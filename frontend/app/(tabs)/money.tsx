@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { BottomSheet, Card } from "@/src/components/ui";
+import { EarningsUploader } from "@/src/components/EarningsUploader";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatINR } from "@/src/i18n";
@@ -104,6 +105,10 @@ export default function Money() {
               );
             })}
           </View>
+        </Card>
+
+        <Card style={{ marginTop: spacing.md }} testID="upload-card">
+          <EarningsUploader onImported={load} />
         </Card>
 
         {/* Settlement */}

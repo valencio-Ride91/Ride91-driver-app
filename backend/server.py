@@ -44,7 +44,7 @@ logger = logging.getLogger("ride91")
 # Constants
 # ---------------------------------------------------------------------------
 PLATFORMS = {"ride91", "uber", "rapido", "ola"}
-NON_PLATFORM_STATES = {"offline", "shift_end"}
+NON_PLATFORM_STATES = {"offline", "shift_end", "charging"}
 ALL_STATES = PLATFORMS | NON_PLATFORM_STATES
 CASH_LIMIT = 1500  # ₹
 DRIVER_SHARE = 0.30
@@ -85,7 +85,7 @@ class DriverOut(BaseModel):
 
 
 class DutyStateIn(BaseModel):
-    state: Literal["ride91", "uber", "rapido", "ola", "offline", "shift_end"]
+    state: Literal["ride91", "uber", "rapido", "ola", "offline", "shift_end", "charging"]
     started_at: str  # ISO from device
     lat: float
     lng: float
@@ -562,6 +562,123 @@ async def vehicle_ping_ingest(body: VehiclePingIn):
     row["received_at"] = iso(now_utc())
     await db.vehicle_pings.insert_one(row)
     return {"ok": True, "id": row["id"]}
+
+
+# ---------------------------------------------------------------------------
+# EARNINGS SCREENSHOT EXTRACTION (Gemini 3 Flash via emergentintegrations)
+# ---------------------------------------------------------------------------
+class EarningsExtractIn(BaseModel):
+    platform: Literal["uber", "rapido"]
+    image_base64: str          # raw base64 (no data URL prefix required)
+    mime: str = "image/jpeg"
+    client_action_id: str
+
+
+@api.post("/earnings/extract")
+async def earnings_extract(body: EarningsExtractIn, driver: Dict = Depends(get_driver)):
+    """Read an Uber/Rapido earnings screenshot and return parsed numbers.
+
+    Nothing is written to the ledger here — the client shows the driver a
+    confirmation sheet with the extracted values, and on Save it POSTs to
+    /api/close-out. This keeps the driver in control of what enters the books.
+    """
+    from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+    import json as _json
+    import re as _re
+
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(500, "llm_key_missing")
+
+    # Strip data-URL prefix if the client sent one.
+    b64 = body.image_base64
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[-1]
+
+    system = (
+        "You extract earnings numbers from Indian ride-hailing driver-app "
+        "screenshots (Uber Driver, Rapido Captain). Reply with STRICT JSON "
+        "only — no prose, no code fences. Numeric fields must be numbers, "
+        "not strings. If a field is not visible, use null.\n\n"
+        "Schema:\n"
+        "{\n"
+        '  "gross_amount": number|null,   // total earnings shown on the screen, in INR\n'
+        '  "trips": number|null,          // total trips/rides count if visible\n'
+        '  "cash_collected": number|null, // cash-collected total if visible (else null)\n'
+        '  "period_hint": string|null,    // e.g. "Today", "Week", "24 Aug"\n'
+        '  "platform_detected": string|null,  // "uber" | "rapido" | null\n'
+        '  "confidence": number           // 0.0–1.0\n'
+        "}"
+    )
+    prompt = (
+        f"This is a {body.platform.upper()} driver-app screenshot. "
+        "Extract today's or the visible period's earnings and reply as JSON."
+    )
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"earnings-{body.client_action_id}",
+        system_message=system,
+    ).with_model("gemini", "gemini-3-flash-preview")
+
+    try:
+        resp = await chat.send_message(
+            UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)])
+        )
+    except Exception as e:
+        logger.exception("earnings_extract llm call failed")
+        raise HTTPException(502, f"llm_error: {type(e).__name__}")
+
+    raw = resp if isinstance(resp, str) else str(resp)
+
+    # Best-effort JSON extraction — strip fences if the model added them.
+    text = raw.strip()
+    m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
+    if m:
+        text = m.group(1)
+    else:
+        m2 = _re.search(r"\{.*\}", text, _re.S)
+        if m2:
+            text = m2.group(0)
+    try:
+        parsed = _json.loads(text)
+    except Exception:
+        parsed = {}
+
+    def _num(k: str):
+        v = parsed.get(k)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    result = {
+        "platform": body.platform,
+        "gross_amount": _num("gross_amount"),
+        "trips": int(_num("trips")) if _num("trips") is not None else None,
+        "cash_collected": _num("cash_collected"),
+        "period_hint": parsed.get("period_hint"),
+        "platform_detected": parsed.get("platform_detected"),
+        "confidence": _num("confidence") or 0.0,
+        "raw": raw,
+    }
+    # Persist the extraction attempt for audit (small doc, no blobs).
+    await db.earnings_extractions.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver["id"],
+            "client_action_id": body.client_action_id,
+            "platform": body.platform,
+            "result": {k: v for k, v in result.items() if k != "raw"},
+            "created_at": iso(now_utc()),
+        }
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# VEHICLE PING helpers
 
 
 async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> float:

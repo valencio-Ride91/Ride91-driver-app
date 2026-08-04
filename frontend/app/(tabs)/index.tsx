@@ -23,6 +23,8 @@ import { useSync } from "@/src/sync";
 import { api } from "@/src/api";
 
 const PLATFORMS = ["ride91", "uber", "rapido", "ola"] as const;
+const QUICK = ["uber", "rapido"] as const;
+const WORKING = new Set(["ride91", "uber", "rapido", "ola"]);
 
 interface CloseOutTarget {
   platform: string;
@@ -92,14 +94,12 @@ export default function Home() {
   }, []);
   const overLimit = cashHeld > cashLimit;
 
-  // If driver hasn't picked a state yet today, open the sheet automatically.
-  // But if inspection isn't done, go there first — that's the hard gate.
+  // On first shift-start (no state yet today) with no inspection, redirect
+  // to the hard gate. Otherwise let the driver drive the Online toggle.
   useEffect(() => {
     if (!today || today.current_state) return;
     if (inspectionOk === false) {
       router.replace("/inspection");
-    } else if (inspectionOk === true) {
-      setSelectorOpen(true);
     }
   }, [today, inspectionOk, router]);
 
@@ -170,21 +170,121 @@ export default function Home() {
 
       {/* Sticky status bar pinned above the map */}
       <View style={styles.statusBar} testID="status-bar">
-        <TouchableOpacity
-          testID="status-current-platform"
-          onPress={() => setSelectorOpen(true)}
-          style={[
-            styles.currentPill,
-            {
-              backgroundColor: current ? platformColors[current] ?? colors.muted : colors.ink,
-            },
-          ]}
-        >
-          <Text style={styles.currentPillText}>
-            {current ? platformLabels[current] : t.pick_platform}
-          </Text>
-        </TouchableOpacity>
+        {/* Row 1: Online/Offline toggle + Charging button */}
+        <View style={styles.toggleRow}>
+          <View style={styles.toggle} testID="online-offline-toggle">
+            <TouchableOpacity
+              testID="toggle-offline"
+              style={[
+                styles.toggleHalf,
+                current !== "charging" && !WORKING.has(current ?? "") ? styles.toggleHalfActive : null,
+              ]}
+              onPress={() => handleSwitch("offline")}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  current !== "charging" && !WORKING.has(current ?? "")
+                    ? styles.toggleTextActive
+                    : null,
+                ]}
+              >
+                Offline
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="toggle-online"
+              style={[
+                styles.toggleHalf,
+                WORKING.has(current ?? "") ? styles.toggleHalfActiveOn : null,
+              ]}
+              onPress={() => {
+                // If already online, do nothing; else go to the last used
+                // working platform (Uber default) or the picker.
+                if (WORKING.has(current ?? "")) return;
+                const last = [...(today?.segments ?? [])]
+                  .reverse()
+                  .find((s) => WORKING.has(s.state))?.state as string | undefined;
+                handleSwitch(last ?? "uber");
+              }}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  WORKING.has(current ?? "") ? styles.toggleTextActive : null,
+                ]}
+              >
+                Online
+              </Text>
+            </TouchableOpacity>
+          </View>
 
+          <TouchableOpacity
+            testID="charging-btn"
+            style={[
+              styles.chargeBtn,
+              current === "charging" ? styles.chargeBtnActive : null,
+            ]}
+            onPress={() => handleSwitch(current === "charging" ? "offline" : "charging")}
+          >
+            <Text
+              style={[
+                styles.chargeBtnText,
+                current === "charging" ? { color: colors.white } : null,
+              ]}
+            >
+              {current === "charging" ? "◼ Stop charging" : "⚡ Charge"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Row 2: When online, show quick Uber/Rapido + more link */}
+        {WORKING.has(current ?? "") ? (
+          <View style={styles.quickRow} testID="quick-platforms">
+            {QUICK.map((p) => (
+              <TouchableOpacity
+                key={p}
+                testID={`quick-btn-${p}`}
+                onPress={() => handleSwitch(p)}
+                style={[
+                  styles.quickBtn,
+                  {
+                    backgroundColor:
+                      current === p ? platformColors[p] : colors.card,
+                    borderColor: platformColors[p],
+                  },
+                ]}
+              >
+                <View
+                  style={[
+                    styles.quickDot,
+                    {
+                      backgroundColor:
+                        current === p ? colors.white : platformColors[p],
+                    },
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.quickText,
+                    { color: current === p ? colors.white : colors.ink },
+                  ]}
+                >
+                  {platformLabels[p]}
+                </Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              testID="more-platforms-link"
+              onPress={() => setSelectorOpen(true)}
+              style={styles.moreBtn}
+            >
+              <Text style={styles.moreText}>More</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* Row 3: stats */}
         <View style={styles.statsRow}>
           <StatCol
             testID="stat-on-duty"
@@ -416,13 +516,58 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     gap: spacing.md,
   },
-  currentPill: {
-    alignSelf: "flex-start",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.lg,
+  toggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
   },
-  currentPillText: { fontFamily: fonts.uiBold, fontSize: 16, color: colors.white },
+  toggle: {
+    flex: 1,
+    flexDirection: "row",
+    backgroundColor: colors.paper,
+    borderRadius: 999,
+    padding: 4,
+  },
+  toggleHalf: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: 999,
+    alignItems: "center",
+  },
+  toggleHalfActive: { backgroundColor: colors.ink },
+  toggleHalfActiveOn: { backgroundColor: colors.live },
+  toggleText: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.muted },
+  toggleTextActive: { color: colors.white },
+  chargeBtn: {
+    borderWidth: 1,
+    borderColor: "#4FA8D8",
+    borderRadius: 999,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.card,
+  },
+  chargeBtnActive: { backgroundColor: "#4FA8D8" },
+  chargeBtnText: { fontFamily: fonts.uiBold, fontSize: 13, color: "#3086B8" },
+  quickRow: { flexDirection: "row", gap: spacing.sm, alignItems: "stretch" },
+  quickBtn: {
+    flex: 1,
+    borderWidth: 2,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    alignItems: "center",
+    gap: 4,
+  },
+  quickDot: { width: 8, height: 8, borderRadius: 4 },
+  quickText: { fontFamily: fonts.uiBold, fontSize: 14 },
+  moreBtn: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    justifyContent: "center",
+    backgroundColor: colors.card,
+  },
+  moreText: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
   statsRow: { flexDirection: "row", justifyContent: "space-between", gap: spacing.md },
   statCol: { flex: 1 },
   statLabel: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginBottom: 2 },

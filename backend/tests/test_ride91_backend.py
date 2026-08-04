@@ -478,3 +478,203 @@ class TestTracking:
         )
         assert r.status_code == 200
         assert r.json().get("ok") is True
+
+
+
+# ================================================================
+# CHARGING duty state — must NOT require inspection and must dedupe like other states
+# ================================================================
+class TestCharging:
+    def test_charging_requires_auth(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("charging"),
+        )
+        assert r.status_code == 401
+
+    def test_charging_accepted_and_no_inspection_gate(
+        self, api_client, base_url, auth, mongo_db, today_key
+    ):
+        """Charging must succeed 200 even if today's inspection is absent."""
+        # Wipe today's inspection so we prove charging bypasses the gate
+        mongo_db.inspections.delete_many(
+            {"driver_id": auth["driver"]["id"], "day_key": today_key}
+        )
+        # Confirm inspection is not completed
+        r0 = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
+        assert r0.status_code == 200
+        assert r0.json().get("completed") is False
+
+        cid = str(uuid.uuid4())
+        payload = {
+            "state": "charging",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "lat": 12.9716, "lng": 77.5946,
+            "client_action_id": cid,
+        }
+        r = api_client.post(
+            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
+        )
+        assert r.status_code == 200, r.text
+        row = r.json()
+        assert row["state"] == "charging"
+        assert "id" in row
+
+        # Idempotency on same client_action_id
+        r2 = api_client.post(
+            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
+        )
+        assert r2.status_code == 200
+        assert r2.json()["id"] == row["id"]
+
+        # Working platform after inspection wipe must still be blocked
+        rp = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("ride91"),
+            headers=auth["headers"],
+        )
+        assert rp.status_code == 409
+        assert rp.json().get("detail") == "inspection_required"
+
+    def test_bad_state_rejected(self, api_client, base_url, auth):
+        payload = {
+            "state": "foobar",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "lat": 12.97, "lng": 77.59,
+            "client_action_id": str(uuid.uuid4()),
+        }
+        r = api_client.post(
+            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
+        )
+        # Either 400 (custom guard) or 422 (Pydantic Literal) is acceptable enum-guard evidence.
+        assert r.status_code in (400, 422), r.text
+
+
+# ================================================================
+# EARNINGS EXTRACTION via Gemini 3 Flash (real LLM call — do NOT mock)
+# ================================================================
+def _synth_earnings_png_b64(text_lines: list[str], size=(720, 1280)) -> str:
+    """Render a realistic earnings-screenshot-ish PNG with readable text.
+
+    Uses varied fill (background gradient bands + rectangles) so it is NOT a
+    solid-color image, satisfying /app/image_testing.md.
+    """
+    import base64, io
+    from PIL import Image, ImageDraw, ImageFont
+
+    W, H = size
+    img = Image.new("RGB", (W, H), (18, 18, 22))
+    d = ImageDraw.Draw(img)
+    # Header band
+    d.rectangle([0, 0, W, 140], fill=(20, 90, 200))
+    # Card area
+    d.rectangle([32, 200, W - 32, 720], fill=(245, 245, 250))
+    # Divider lines
+    for y in range(760, H - 40, 60):
+        d.rectangle([32, y, W - 32, y + 2], fill=(60, 60, 80))
+    # Some contrast dots for texture / real visual features
+    for i in range(40):
+        x = 40 + (i * 17) % (W - 80)
+        y = 750 + (i * 29) % 400
+        d.ellipse([x, y, x + 6, y + 6], fill=(200, 200, 60))
+
+    try:
+        font_title = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46
+        )
+        font_body = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 34
+        )
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_body = font_title
+
+    d.text((48, 60), text_lines[0], fill=(255, 255, 255), font=font_title)
+    y = 240
+    for line in text_lines[1:]:
+        d.text((56, y), line, fill=(10, 10, 30), font=font_body)
+        y += 60
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class TestEarningsExtract:
+    def test_requires_auth(self, api_client, base_url):
+        b64 = _synth_earnings_png_b64(["Uber", "Today", "Rs 100"])
+        r = api_client.post(
+            f"{base_url}/api/earnings/extract",
+            json={
+                "platform": "uber",
+                "image_base64": b64,
+                "mime": "image/png",
+                "client_action_id": str(uuid.uuid4()),
+            },
+        )
+        assert r.status_code == 401
+
+    def test_uber_screenshot_returns_expected_shape(self, api_client, base_url, auth):
+        b64 = _synth_earnings_png_b64(
+            [
+                "Uber",
+                "Today  Rs 1,240",
+                "8 trips",
+                "Cash collected  Rs 300",
+                "Online  6h 12m",
+            ]
+        )
+        r = api_client.post(
+            f"{base_url}/api/earnings/extract",
+            json={
+                "platform": "uber",
+                "image_base64": b64,
+                "mime": "image/png",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+            timeout=90,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        for k in (
+            "platform", "gross_amount", "trips", "cash_collected",
+            "period_hint", "platform_detected", "confidence", "raw",
+        ):
+            assert k in body, f"missing key {k}: {body}"
+        # platform must echo request
+        assert body["platform"] == "uber"
+        # numeric fields must be number or None
+        assert body["gross_amount"] is None or isinstance(body["gross_amount"], (int, float))
+        assert body["trips"] is None or isinstance(body["trips"], (int, float))
+        assert body["cash_collected"] is None or isinstance(
+            body["cash_collected"], (int, float)
+        )
+        assert isinstance(body["confidence"], (int, float))
+        assert 0.0 <= float(body["confidence"]) <= 1.0
+
+    def test_low_signal_image_returns_200_with_nulls_or_low_confidence(
+        self, api_client, base_url, auth
+    ):
+        # Heading only, no numbers — model should either return nulls or low confidence,
+        # but MUST NOT crash.
+        b64 = _synth_earnings_png_b64(["Rapido Captain", "Earnings"])
+        r = api_client.post(
+            f"{base_url}/api/earnings/extract",
+            json={
+                "platform": "rapido",
+                "image_base64": b64,
+                "mime": "image/png",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+            timeout=90,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["platform"] == "rapido"
+        # confidence numeric
+        assert isinstance(body["confidence"], (int, float))
+        # numeric fields either None or number
+        for k in ("gross_amount", "trips", "cash_collected"):
+            assert body[k] is None or isinstance(body[k], (int, float))
