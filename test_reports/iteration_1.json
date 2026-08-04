@@ -1,0 +1,35 @@
+{
+  "summary": "Ran 20 pytest backend tests against Ride91 API via public URL — all passed (100%). Covered health, phone+OTP auth (idempotent /verify, bad-OTP 400, /me auth-guard), append-only duty_states (auth-required, client_action_id dedup, ordered segments/totals/current_state), close-outs (idempotent), money/today (per-platform gross, 30% share math, cash_over_limit flag toggled by seeding a 2000-INR close-out, payable = share - cash - advance_recovery), money/weekly (exactly 7 days, oldest -> newest), requests (idempotent create + list), tracking heartbeat and phone ping (auth), and vehicle_pings ingest (no-auth stub + accuracy_m > 30 filter verified with an 11 km displaced ping at accuracy_m=80).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_ride91_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py uses deprecated FastAPI on_event('startup'/'shutdown') hooks — should migrate to a lifespan context manager (non-blocking; still works today).",
+    "OTP request is upserted per phone but /verify accepts DEMO_OTP unconditionally — fine for demo per PRD; ensure this path is disabled in prod builds.",
+    "server.py is ~713 lines; approaching the 700-line split threshold — consider splitting into routers/ (auth, duty, money, tracking, seed) as the app grows.",
+    "_distance_today streams ALL vehicle_pings for the vehicle then filters in Python; add a Mongo range query on recorded_at + accuracy_m for scale."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (new)",
+    "/app/backend/tests/test_ride91_backend.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (backend-only per request)"},
+  "seed_data_creation": "Server auto-seeds one demo driver (+919900000001), vehicle KA-01-EV-0091, ~1 day of vehicle_pings and 5 duty rows on first boot. Tests appended additional TEST_ close-outs, duty rows, and requests using unique client_action_ids — safe (append-only, idempotent).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All backend endpoints listed in the review request are green. Idempotency verified via client_action_id on /auth/otp/verify, /duty/state, /close-out, /requests. Accuracy filter (>30 m) confirmed by inserting a ping 11 km away at accuracy_m=80 and observing distance_km delta < 1 km. EXPO_PUBLIC_BACKEND_URL is the correct env key (not EXPO_BACKEND_URL) — conftest reads it via python-dotenv from /app/frontend/.env.",
+  "rca_of_issue": "N/A — no bugs found."
+}
