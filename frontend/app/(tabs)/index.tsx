@@ -12,12 +12,14 @@ import { AppHeader } from "@/src/components/AppHeader";
 import { BottomSheet } from "@/src/components/ui";
 import { DutyStripe } from "@/src/components/DutyStripe";
 import { DriverMap } from "@/src/components/DriverMap";
+import { DepositSheet } from "@/src/components/DepositSheet";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
-import { useI18n, formatDuration } from "@/src/i18n";
+import { useI18n, formatDuration, formatINR } from "@/src/i18n";
 import { useDuty } from "@/src/duty";
 import { useTracking } from "@/src/tracking";
 import { useAuth } from "@/src/auth";
 import { useSync } from "@/src/sync";
+import { api } from "@/src/api";
 
 const PLATFORMS = ["ride91", "uber", "rapido", "ola"] as const;
 
@@ -31,7 +33,7 @@ export default function Home() {
   const { t } = useI18n();
   const { today, switchState, refresh } = useDuty();
   const { lat, lng } = useTracking();
-  const { vehicle } = useAuth();
+  const { driver, vehicle } = useAuth();
   const { enqueue } = useSync();
 
   const [selectorOpen, setSelectorOpen] = useState(false);
@@ -39,6 +41,33 @@ export default function Home() {
   const [trips, setTrips] = useState("");
   const [amount, setAmount] = useState("");
   const [cash, setCash] = useState("");
+
+  // Deposit reminder: derived from /money/today. Polled here (small, cheap).
+  const [cashHeld, setCashHeld] = useState(0);
+  const [cashLimit, setCashLimit] = useState(1500);
+  const [qrOpen, setQrOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.get<{ cash_held: number; cash_limit: number }>(
+          "/money/today",
+        );
+        if (!alive) return;
+        setCashHeld(r.cash_held);
+        setCashLimit(r.cash_limit);
+      } catch {
+        // keep previous
+      }
+    };
+    load();
+    const id = setInterval(load, 15000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+  const overLimit = cashHeld > cashLimit;
 
   // If driver hasn't picked a state yet today, open the sheet automatically.
   useEffect(() => {
@@ -79,6 +108,27 @@ export default function Home() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <AppHeader title="Ride91" />
+
+      {overLimit ? (
+        <TouchableOpacity
+          testID="deposit-banner"
+          style={styles.depositBanner}
+          onPress={() => setQrOpen(true)}
+          activeOpacity={0.85}
+        >
+          <View style={styles.depositLeft}>
+            <Text style={styles.depositIcon}>₹</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.depositTitle} testID="deposit-banner-title">
+                {t.cash_held}: {formatINR(cashHeld)}  ·  {t.over_limit}
+              </Text>
+              <Text style={styles.depositSub}>
+                {t.deposit_cash} →
+              </Text>
+            </View>
+          </View>
+        </TouchableOpacity>
+      ) : null}
 
       <View style={styles.mapWrap} testID="home-map">
         <DriverMap lat={lat} lng={lng} />
@@ -250,6 +300,13 @@ export default function Home() {
           </>
         ) : null}
       </BottomSheet>
+
+      <DepositSheet
+        visible={qrOpen}
+        onClose={() => setQrOpen(false)}
+        driverId={driver?.id ?? ""}
+        qrCode={driver?.qr_code ?? ""}
+      />
     </SafeAreaView>
   );
 }
@@ -275,6 +332,38 @@ const FieldRow: React.FC<{ label: string; children: React.ReactNode }> = ({ labe
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
+  depositBanner: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    backgroundColor: colors.alert,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+  },
+  depositLeft: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  depositIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.white,
+    color: colors.alert,
+    fontFamily: fonts.uiBold,
+    fontSize: 18,
+    textAlign: "center",
+    textAlignVertical: "center",
+    lineHeight: 34,
+  },
+  depositTitle: {
+    fontFamily: fonts.uiBold,
+    fontSize: 14,
+    color: colors.white,
+  },
+  depositSub: {
+    fontFamily: fonts.uiMed,
+    fontSize: 12,
+    color: colors.white,
+    opacity: 0.9,
+    marginTop: 2,
+  },
   mapWrap: {
     flex: 1,
     backgroundColor: colors.line,
