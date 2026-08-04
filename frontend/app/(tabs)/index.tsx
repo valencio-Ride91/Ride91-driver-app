@@ -7,6 +7,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { BottomSheet } from "@/src/components/ui";
@@ -35,12 +36,34 @@ export default function Home() {
   const { lat, lng } = useTracking();
   const { driver, vehicle } = useAuth();
   const { enqueue } = useSync();
+  const router = useRouter();
 
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [closeOut, setCloseOut] = useState<CloseOutTarget | null>(null);
   const [trips, setTrips] = useState("");
   const [amount, setAmount] = useState("");
   const [cash, setCash] = useState("");
+
+  // Inspection status for today. Polled so the gate lifts as soon as the
+  // driver returns from /inspection.
+  const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.get<{ completed: boolean }>("/inspection/today");
+        if (alive) setInspectionOk(r.completed);
+      } catch {
+        // keep prev
+      }
+    };
+    load();
+    const id = setInterval(load, 20000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   // Deposit reminder: derived from /money/today. Polled here (small, cheap).
   const [cashHeld, setCashHeld] = useState(0);
@@ -70,16 +93,27 @@ export default function Home() {
   const overLimit = cashHeld > cashLimit;
 
   // If driver hasn't picked a state yet today, open the sheet automatically.
+  // But if inspection isn't done, go there first — that's the hard gate.
   useEffect(() => {
-    if (today && !today.current_state) {
+    if (!today || today.current_state) return;
+    if (inspectionOk === false) {
+      router.replace("/inspection");
+    } else if (inspectionOk === true) {
       setSelectorOpen(true);
     }
-  }, [today]);
+  }, [today, inspectionOk, router]);
 
   const current = today?.current_state ?? null;
 
   const handleSwitch = useCallback(
     async (state: string) => {
+      // Hard gate: any working platform requires today's inspection first.
+      const isWorking = state === "ride91" || state === "uber" || state === "rapido" || state === "ola";
+      if (isWorking && inspectionOk !== true) {
+        setSelectorOpen(false);
+        router.push("/inspection");
+        return;
+      }
       setSelectorOpen(false);
       await switchState(state, (info) => {
         setCloseOut(info);
@@ -88,7 +122,7 @@ export default function Home() {
         setCash("");
       });
     },
-    [switchState],
+    [switchState, inspectionOk, router],
   );
 
   const saveCloseOut = useCallback(async () => {

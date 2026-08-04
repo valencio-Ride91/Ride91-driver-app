@@ -1,0 +1,37 @@
+{
+  "summary": "Ran 34 pytest backend tests against Ride91 API via the public preview URL — all 34 passed (100%) on 5 consecutive clean-slate runs. Covered the new pre-shift INSPECTION feature end-to-end plus a full regression of the previously-green 20-test suite. Inspection coverage: 401 without token on GET /inspection/today and POST /inspection; pre-submit GET returns exactly {completed:false, day_key:YYYY-MM-DD}; hard-gate 409 with detail='inspection_required' on POST /duty/state for all four platforms (ride91, uber, rapido, ola); offline & shift_end returned 200 even with no inspection; POST /inspection returned {completed:true, id, created_at} and did NOT echo dashboard_photo_b64 or exterior_video_b64; idempotent on same client_action_id (same id returned); idempotent per (driver_id, day_key) with a NEW client_action_id (same id returned, Mongo count stayed at 1); GET /inspection/today after submission returned completed:true with id/created_at/day_key and no blobs; POST /duty/state ride91 succeeded (200) after inspection was created. Regression suite still fully green — auth idempotency, /me guard, duty append+dedupe+segments+distance filter (accuracy_m>30), close-outs idempotent, money/today share math and cash_over_limit toggle, money/weekly 7-day ordering, requests idempotency, tracking heartbeat + phone ping, vehicle_pings ingest stub + accuracy filter.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_ride91_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "InspectionIn accepts unbounded base64 blobs (dashboard_photo_b64, exterior_video_b64) in the request body — no size/length ceiling. A 15s HD video base64-encoded can easily be 20-30MB. Add a Pydantic max_length or reject payloads above e.g. 40 MB at the FastAPI level to avoid OOM-ing the worker. Reference: /app/backend/server.py:130-134 and :232.",
+    "Inspection blobs are stored inline in the MongoDB document — this bloats the inspections collection and every full-collection scan. Consider storing them in object storage (S3/GridFS) and keeping only URIs in the doc. Reference: /app/backend/server.py:247-258.",
+    "server.py is now ~786 lines — past the 700-line guideline. Split into routers/ (auth.py, duty.py, inspection.py, money.py, tracking.py, seed.py). Reference: /app/backend/server.py.",
+    "FastAPI startup uses deprecated @app.on_event('startup'/'shutdown') — migrate to lifespan context manager. Reference: /app/backend/server.py:768,783.",
+    "_distance_today streams ALL vehicle_pings for the vehicle then filters in Python; add Mongo range predicate on recorded_at + accuracy_m for scale. Reference: /app/backend/server.py:567-583.",
+    "Duty-state hard-gate check does a second inspections.find_one after the client_action_id dedupe — that's correct today, but if a driver retries a queued 'ride91' from yesterday and their inspection has since rolled to a new IST day, the retry will 409. Consider tolerating idempotent replay of an already-successful state even after the gate reset. Reference: /app/backend/server.py:281-294."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (added mongo_db + today_key fixtures for inspection cleanup)",
+    "/app/backend/tests/test_ride91_backend.py (added 14 inspection tests as TestInspectionAuth / TestAA_InspectionGateBeforeSubmit / TestAB_InspectionSubmit at top of module so they run before the regression classes under xdist loadscope)"
+  ],
+  "success_rate": {"backend": "100% (34/34, stable across 5 back-to-back runs)", "frontend": "not tested (backend-only per request)"},
+  "seed_data_creation": "Tests delete any pre-existing today's inspection for the demo driver at module-setup (per review-request instruction). One real inspection row is then created by test_create_success_no_blobs_echoed and reused by later assertions — that row persists after the run (matches steady-state expectation: driver's inspection is 'done for today').",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All inspection tests are consolidated inside test_ride91_backend.py so pytest-xdist loadscope keeps them on ONE worker with the regression tests, running sequentially. DO NOT split them back into a separate file: two workers on the shared demo driver's inspection row race (one worker's cleanup wipes the row while the other is asserting on it). The module-scoped autouse `_clean_today_inspection` at the top of test_ride91_backend.py wipes today's inspection for the demo driver at start of the run; the gate tests then rely on it staying empty until TestAB_InspectionSubmit creates the real one. EXPO_PUBLIC_BACKEND_URL is the correct key in /app/frontend/.env; MONGO_URL / DB_NAME come from /app/backend/.env. Universal OTP 123456 still works.",
+  "rca_of_issue": "N/A — no bugs found. The pre-shift inspection feature and hard-gate are implemented correctly per the review request: 401 without token, 200 with correct body on create, 409 with detail='inspection_required' on going on-duty for any of the 4 working platforms without a same-day inspection, offline/shift_end allowed always, response never echoes the base64 blobs, and both idempotency guarantees (client_action_id and per (driver, day_key)) hold."
+}

@@ -127,6 +127,13 @@ class VehiclePingIn(BaseModel):
     accuracy_m: float
 
 
+class InspectionIn(BaseModel):
+    dashboard_photo_b64: str          # data URL or raw base64 of the JPEG
+    exterior_video_b64: str           # data URL or raw base64 of the mp4/webm
+    exterior_video_mime: str = "video/mp4"
+    client_action_id: str
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -212,6 +219,59 @@ async def me(driver: Dict = Depends(get_driver)):
 
 
 # ---------------------------------------------------------------------------
+# PRE-SHIFT INSPECTION
+# ---------------------------------------------------------------------------
+def _ist_day_key() -> str:
+    """Calendar day in IST as YYYY-MM-DD — matches the 'today' scoping used
+    everywhere else."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return now_utc().astimezone(ist).strftime("%Y-%m-%d")
+
+
+@api.post("/inspection")
+async def create_inspection(body: InspectionIn, driver: Dict = Depends(get_driver)):
+    # Dedup on client_action_id (sync-queue retry safe)
+    existing = await db.inspections.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return {"completed": True, "id": existing["id"], "created_at": existing["created_at"]}
+    day_key = _ist_day_key()
+    # Also dedup per (driver_id, day_key) — one inspection per day
+    dup = await db.inspections.find_one(
+        {"driver_id": driver["id"], "day_key": day_key}, {"_id": 0}
+    )
+    if dup:
+        return {"completed": True, "id": dup["id"], "created_at": dup["created_at"]}
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "vehicle_id": driver["vehicle_id"],
+        "day_key": day_key,
+        "dashboard_photo_b64": body.dashboard_photo_b64,
+        "exterior_video_b64": body.exterior_video_b64,
+        "exterior_video_mime": body.exterior_video_mime,
+        "created_at": iso(now_utc()),
+        "client_action_id": body.client_action_id,
+    }
+    await db.inspections.insert_one(row.copy())
+    return {"completed": True, "id": row["id"], "created_at": row["created_at"]}
+
+
+@api.get("/inspection/today")
+async def inspection_today(driver: Dict = Depends(get_driver)):
+    day_key = _ist_day_key()
+    row = await db.inspections.find_one(
+        {"driver_id": driver["id"], "day_key": day_key},
+        {"_id": 0, "dashboard_photo_b64": 0, "exterior_video_b64": 0},
+    )
+    if not row:
+        return {"completed": False, "day_key": day_key}
+    return {"completed": True, "id": row["id"], "created_at": row["created_at"], "day_key": day_key}
+
+
+# ---------------------------------------------------------------------------
 # DUTY STATES (append-only)
 # ---------------------------------------------------------------------------
 @api.post("/duty/state")
@@ -223,6 +283,15 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     )
     if existing:
         return existing
+    # HARD GATE: going on-duty on any working platform requires today's
+    # inspection. Offline / shift_end are always allowed.
+    if body.state in PLATFORMS:
+        day_key = _ist_day_key()
+        insp = await db.inspections.find_one(
+            {"driver_id": driver["id"], "day_key": day_key}, {"_id": 0}
+        )
+        if not insp:
+            raise HTTPException(status.HTTP_409_CONFLICT, "inspection_required")
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
@@ -704,6 +773,10 @@ async def _on_startup() -> None:
     await db.requests.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     await db.vehicle_pings.create_index([("vehicle_id", 1), ("recorded_at", 1)])
     await db.sessions.create_index([("token", 1)], unique=True)
+    await db.inspections.create_index([("driver_id", 1), ("day_key", 1)], unique=True)
+    await db.inspections.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
     await _seed_if_empty()
 
 

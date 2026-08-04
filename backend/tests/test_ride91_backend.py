@@ -1,10 +1,203 @@
-"""Ride91 backend API tests — driver flows, duty, close-outs, money, requests, tracking."""
+"""Ride91 backend API tests — inspection gate, driver flows, duty, close-outs, money, requests, tracking.
+
+All tests live in this single module so pytest-xdist loadscope pins them to one
+worker and executes them sequentially — the inspection classes must run BEFORE
+the duty/regression classes because the hard-gate requires no inspection at
+first, then an inspection is created and unlocks working-platform duty states.
+"""
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
+from pymongo import MongoClient
+
+load_dotenv(Path(__file__).resolve().parents[1].parent / "frontend" / ".env")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
+def _ist_day_key() -> str:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(timezone.utc).astimezone(ist).strftime("%Y-%m-%d")
+
+
+# ================================================================
+# PRE-SHIFT INSPECTION (must run first — establishes / creates today's inspection)
+# ================================================================
+DASH_B64 = "data:image/jpeg;base64," + ("A" * 128)
+VIDEO_B64 = "data:video/mp4;base64," + ("B" * 256)
+
+
+def _duty_payload(state: str) -> dict:
+    return {
+        "state": state,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "lat": 12.9716,
+        "lng": 77.5946,
+        "client_action_id": str(uuid.uuid4()),
+    }
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _clean_today_inspection(auth, mongo_db, today_key):
+    """Delete any prior inspection for today so hard-gate tests start clean."""
+    mongo_db.inspections.delete_many(
+        {"driver_id": auth["driver"]["id"], "day_key": today_key}
+    )
+    yield
+
+
+class TestInspectionAuth:
+    def test_get_today_requires_auth(self, api_client, base_url):
+        r = api_client.get(f"{base_url}/api/inspection/today")
+        assert r.status_code == 401
+
+    def test_post_requires_auth(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/inspection",
+            json={
+                "dashboard_photo_b64": DASH_B64,
+                "exterior_video_b64": VIDEO_B64,
+                "exterior_video_mime": "video/mp4",
+                "client_action_id": str(uuid.uuid4()),
+            },
+        )
+        assert r.status_code == 401
+
+
+class TestAA_InspectionGateBeforeSubmit:
+    """Prefixed AA_ so this class collects before every other class in module."""
+
+    def test_today_shows_not_completed(self, api_client, base_url, auth, today_key):
+        r = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json() == {"completed": False, "day_key": today_key}
+
+    @pytest.mark.parametrize("platform", ["ride91", "uber", "rapido", "ola"])
+    def test_going_on_platform_without_inspection_is_409(
+        self, api_client, base_url, auth, platform
+    ):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload(platform),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 409, f"{platform}: {r.status_code} {r.text}"
+        assert r.json().get("detail") == "inspection_required"
+
+    def test_offline_allowed_without_inspection(self, api_client, base_url, auth):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("offline"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "offline"
+
+    def test_shift_end_allowed_without_inspection(self, api_client, base_url, auth):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("shift_end"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "shift_end"
+
+
+class TestAB_InspectionSubmit:
+    first_id: str | None = None
+    first_cid: str | None = None
+
+    def test_create_success_no_blobs_echoed(self, api_client, base_url, auth):
+        cid = str(uuid.uuid4())
+        r = api_client.post(
+            f"{base_url}/api/inspection",
+            json={
+                "dashboard_photo_b64": DASH_B64,
+                "exterior_video_b64": VIDEO_B64,
+                "exterior_video_mime": "video/mp4",
+                "client_action_id": cid,
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("completed") is True
+        assert isinstance(body.get("id"), str)
+        assert "created_at" in body
+        assert "dashboard_photo_b64" not in body
+        assert "exterior_video_b64" not in body
+        TestAB_InspectionSubmit.first_id = body["id"]
+        TestAB_InspectionSubmit.first_cid = cid
+
+    def test_idempotent_same_client_action_id(self, api_client, base_url, auth):
+        assert TestAB_InspectionSubmit.first_cid
+        r = api_client.post(
+            f"{base_url}/api/inspection",
+            json={
+                "dashboard_photo_b64": DASH_B64,
+                "exterior_video_b64": VIDEO_B64,
+                "exterior_video_mime": "video/mp4",
+                "client_action_id": TestAB_InspectionSubmit.first_cid,
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200
+        assert r.json()["id"] == TestAB_InspectionSubmit.first_id
+        assert "dashboard_photo_b64" not in r.json()
+
+    def test_idempotent_per_driver_per_day_different_cid(
+        self, api_client, base_url, auth, mongo_db, today_key
+    ):
+        driver_id = auth["driver"]["id"]
+        before = mongo_db.inspections.count_documents(
+            {"driver_id": driver_id, "day_key": today_key}
+        )
+        r = api_client.post(
+            f"{base_url}/api/inspection",
+            json={
+                "dashboard_photo_b64": DASH_B64,
+                "exterior_video_b64": VIDEO_B64,
+                "exterior_video_mime": "video/mp4",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200
+        assert r.json()["id"] == TestAB_InspectionSubmit.first_id
+        after = mongo_db.inspections.count_documents(
+            {"driver_id": driver_id, "day_key": today_key}
+        )
+        assert after == before == 1
+
+    def test_today_after_submit_completed_no_blobs(
+        self, api_client, base_url, auth, today_key
+    ):
+        r = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
+        assert r.status_code == 200
+        body = r.json()
+        assert body["completed"] is True
+        assert body["id"] == TestAB_InspectionSubmit.first_id
+        assert body["day_key"] == today_key
+        assert "created_at" in body
+        assert "dashboard_photo_b64" not in body
+        assert "exterior_video_b64" not in body
+
+    def test_ride91_allowed_after_inspection(self, api_client, base_url, auth):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("ride91"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "ride91"
+
+
+# ================================================================
+# REGRESSION — health, auth, duty, close-outs, money, requests, tracking
+# ================================================================
 # ---------------------------------------------------------------- health
 def test_health(api_client, base_url):
     r = api_client.get(f"{base_url}/api/")

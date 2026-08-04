@@ -23,10 +23,12 @@ const Router: React.FC = () => {
 
   useEffect(() => {
     if (loading) return;
-    const inTabs = segments[0] === "(tabs)";
-    if (!driver && inTabs) {
+    const first = segments[0];
+    const inTabs = first === "(tabs)";
+    const isAuthedRoute = inTabs || first === "inspection";
+    if (!driver && isAuthedRoute) {
       router.replace("/login");
-    } else if (driver && !inTabs) {
+    } else if (driver && !isAuthedRoute) {
       router.replace("/(tabs)");
     }
   }, [driver, loading, segments, router]);
@@ -38,6 +40,7 @@ const Router: React.FC = () => {
           <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
             <Stack.Screen name="login" />
             <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="inspection" options={{ presentation: "modal" }} />
           </Stack>
         </View>
       </DutyProvider>

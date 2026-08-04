@@ -13,7 +13,9 @@
       "bundleIdentifier": "com.emergent.fleetmobile.uefjzz",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Track your duty location for the fleet.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Track duty location in background."
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Track duty location in background.",
+        "NSCameraUsageDescription": "Capture pre-shift vehicle inspection photos and videos.",
+        "NSMicrophoneUsageDescription": "Record audio during walk-around vehicle video."
       }
     },
     "android": {
@@ -27,7 +29,9 @@
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION"
+        "FOREGROUND_SERVICE_LOCATION",
+        "CAMERA",
+        "RECORD_AUDIO"
       ],
       "config": {
         "googleMaps": {
@@ -44,6 +48,14 @@
       "expo-router",
       "expo-secure-store",
       "expo-sqlite",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Capture pre-shift vehicle inspection photos and videos.",
+          "microphonePermission": "Record audio during walk-around vehicle video.",
+          "recordAudioAndroid": true
+        }
+      ],
       [
         "expo-location",
         {
