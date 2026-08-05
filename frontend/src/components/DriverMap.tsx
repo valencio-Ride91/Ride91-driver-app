@@ -1,12 +1,17 @@
 // Native map wrapper (Android/iOS). Metro picks Map.web.tsx on web instead.
 import React from "react";
-import { StyleSheet, View } from "react-native";
+import { Platform, StyleSheet, View } from "react-native";
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
 
 interface Props {
   lat: number | null;
   lng: number | null;
 }
+
+// Force Google provider on Android only — iOS builds don't ship in this
+// app, and forcing PROVIDER_GOOGLE on iOS without an iOS Google Maps key
+// would break the map on any accidental iOS build.
+const MAP_PROVIDER = Platform.OS === "android" ? PROVIDER_GOOGLE : undefined;
 
 export const DriverMap: React.FC<Props> = ({ lat, lng }) => {
   const region = {
@@ -18,7 +23,7 @@ export const DriverMap: React.FC<Props> = ({ lat, lng }) => {
   return (
     <View style={StyleSheet.absoluteFillObject}>
       <MapView
-        provider={PROVIDER_GOOGLE}
+        provider={MAP_PROVIDER}
         style={StyleSheet.absoluteFillObject}
         region={region}
         showsUserLocation
