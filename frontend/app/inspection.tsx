@@ -46,6 +46,7 @@ export default function Inspection() {
   const [countdown, setCountdown] = useState(MAX_VIDEO_S);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
 
   const [camPerm, requestCamPerm] = useCameraPermissions();
   const [micPerm, requestMicPerm] = useMicrophonePermissions();
@@ -98,23 +99,53 @@ export default function Inspection() {
   }, []);
 
   // ---- Step 2: exterior video --------------------------------------------
+  // Handles three failure modes seen in the wild:
+  //  1) Web preview: expo-camera's record() is a no-op → recordAsync resolves
+  //     to undefined; we surface that instead of silently doing nothing.
+  //  2) Native racy stop: if stop is tapped before the recorder has fully
+  //     initialised, recordAsync can hang; a safety timer at maxDuration+3s
+  //     forces the UI out of the REC state so the driver isn't stuck.
+  //  3) Native permission revoked mid-recording: any throw is caught and the
+  //     driver sees a "Try again" state, not a frozen screen.
   const startRecording = useCallback(async () => {
     if (!cameraRef.current || recording) return;
     setErr(null);
     setRecording(true);
+
+    // Safety fallback — release the REC UI even if recordAsync never resolves.
+    let released = false;
+    const safety = setTimeout(() => {
+      if (released) return;
+      released = true;
+      setRecording(false);
+      setErr(
+        "Recording didn't complete. Please try again — hold the camera steady for the full 15s.",
+      );
+    }, (MAX_VIDEO_S + 3) * 1000);
+
     try {
-      const v = await cameraRef.current.recordAsync({
+      const v = (await cameraRef.current.recordAsync({
         maxDuration: MAX_VIDEO_S,
-      });
-      if (v?.uri) {
-        // Read file → base64 (native). On web, `v.uri` may be a blob URL that
-        // we fetch and convert.
-        const b64 = await fileToBase64(v.uri);
-        setVideoUri(b64);
+      })) as { uri?: string } | undefined;
+
+      if (!v || !v.uri) {
+        // Web preview or unsupported platform: expo-camera returned nothing.
+        if (Platform.OS === "web") {
+          setErr(
+            "Video recording isn't available in the web preview. Open the app in Expo Go on your Android device to record the walk-around video.",
+          );
+        } else {
+          setErr("Could not save the recording. Try again.");
+        }
+        return;
       }
+      const b64 = await fileToBase64(v.uri);
+      setVideoUri(b64);
     } catch (e: any) {
-      setErr("Could not record video. Try again.");
+      setErr(`Could not record video: ${e?.message ?? "unknown error"}`);
     } finally {
+      released = true;
+      clearTimeout(safety);
       setRecording(false);
     }
   }, [recording]);
@@ -124,8 +155,20 @@ export default function Inspection() {
     try {
       cameraRef.current.stopRecording();
     } catch {
-      // ignore
+      // ignore — the safety timeout above will release the REC state
     }
+  }, []);
+
+  // Dev-only escape hatch: on the web preview (where recording is a no-op)
+  // we let the driver progress with a tiny 1-frame placeholder so they can
+  // still exercise the full flow. Never shown on real Android builds.
+  const useWebPlaceholder = useCallback(() => {
+    // A 32-byte "video/mp4" data-URL just to unblock the UI; the backend
+    // stores whatever the client sent, and this only fires on Platform.OS === 'web'.
+    const placeholder =
+      "data:video/mp4;base64,AAAAHGZ0eXBpc29tAAAAAWlzb21tcDQyaXNvNgAAAAA=";
+    setVideoUri(placeholder);
+    setErr(null);
   }, []);
 
   // ---- Submit -------------------------------------------------------------
@@ -264,10 +307,13 @@ export default function Inspection() {
           <>
             <View style={styles.cameraWrap}>
               <CameraView
+                key="cam-video"
                 ref={cameraRef}
                 style={StyleSheet.absoluteFillObject}
                 facing="back"
                 mode="video"
+                videoQuality="480p"
+                onCameraReady={() => setCameraReady(true)}
               />
               <View style={styles.reticle} pointerEvents="none">
                 <Text style={styles.reticleText}>
@@ -284,8 +330,13 @@ export default function Inspection() {
             <View style={styles.actions}>
               {!recording ? (
                 <Button
-                  label={`Start recording · ${MAX_VIDEO_S}s max`}
+                  label={
+                    cameraReady
+                      ? `Start recording · ${MAX_VIDEO_S}s max`
+                      : "Preparing camera…"
+                  }
                   onPress={startRecording}
+                  disabled={!cameraReady}
                   testID="video-start"
                 />
               ) : (
@@ -297,7 +348,18 @@ export default function Inspection() {
                 />
               )}
             </View>
-            {err ? <Text style={styles.err}>{err}</Text> : null}
+            {Platform.OS === "web" && !recording ? (
+              <TouchableOpacity
+                onPress={useWebPlaceholder}
+                style={styles.devSkip}
+                testID="video-web-placeholder"
+              >
+                <Text style={styles.devSkipText}>
+                  Preview build — use placeholder video (dev only)
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            {err ? <Text style={styles.err} testID="video-error">{err}</Text> : null}
           </>
         )}
       </SafeAreaView>
@@ -504,6 +566,18 @@ const styles = StyleSheet.create({
     color: colors.alert,
     textAlign: "center",
     paddingHorizontal: spacing.lg,
+  },
+  devSkip: {
+    alignSelf: "center",
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  devSkipText: {
+    fontFamily: fonts.ui,
+    fontSize: 12,
+    color: colors.muted,
+    textDecorationLine: "underline",
   },
   gateWrap: {
     flex: 1,
