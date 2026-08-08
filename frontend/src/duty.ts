@@ -25,10 +25,13 @@ export interface DutySegment {
 export interface DutyToday {
   segments: DutySegment[];
   totals_seconds: Record<string, number>;
-  shift_seconds: number;
+  on_duty: boolean;
+  on_duty_seconds: number;
   working_seconds: number;
   current_state: string | null;
+  current_platform: string | null;
   distance_km: number;
+  business_date: string;
   day_start: string;
   server_ts: string;
 }

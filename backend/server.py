@@ -43,13 +43,21 @@ logger = logging.getLogger("ride91")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PLATFORMS = {"ride91", "uber", "rapido", "ola"}
+# Ride91 is the employment layer — NOT a dispatch platform. The platform list
+# is Uber / Rapido / Ola only.
+PLATFORMS = {"uber", "rapido", "ola"}
 NON_PLATFORM_STATES = {"offline", "shift_end", "charging"}
-ALL_STATES = PLATFORMS | NON_PLATFORM_STATES
+DUTY_LAYER = {"start_duty", "end_duty"}
+PLATFORM_LAYER = {"uber", "rapido", "ola", "not_online"}
+ALL_STATES = PLATFORMS | NON_PLATFORM_STATES | DUTY_LAYER | PLATFORM_LAYER
 CASH_LIMIT = 1500  # ₹
 DRIVER_SHARE = 0.30
 DEMO_DRIVER_PHONE = "+919900000001"
 DEMO_OTP = "123456"  # any OTP works; this one is guaranteed
+
+# Business day runs 04:00 IST to 03:59 IST next day. Matches Uber's cut-off.
+IST = timezone(timedelta(hours=5, minutes=30))
+BUSINESS_DAY_OFFSET_HOURS = 4
 
 
 def now_utc() -> datetime:
@@ -60,6 +68,39 @@ def iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def business_date_from_dt(dt: datetime) -> str:
+    """Every timestamp bucketed by business day uses this. 04:00-03:59 IST."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    shifted = dt.astimezone(IST) - timedelta(hours=BUSINESS_DAY_OFFSET_HOURS)
+    return shifted.strftime("%Y-%m-%d")
+
+
+def business_date_now() -> str:
+    return business_date_from_dt(now_utc())
+
+
+def business_day_bounds(business_date: str) -> tuple[datetime, datetime]:
+    """UTC bounds for a business-date key ('YYYY-MM-DD')."""
+    d = datetime.strptime(business_date, "%Y-%m-%d")
+    # 04:00 IST on that date
+    start_ist = d.replace(hour=BUSINESS_DAY_OFFSET_HOURS, tzinfo=IST)
+    end_ist = start_ist + timedelta(days=1)
+    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+
+def week_bounds_for_business_date(business_date: str) -> tuple[str, str, int]:
+    """Return (mon_key, next_mon_key, days_until_next_mon).
+    A Ride91 week is Mon 04:00 → next Mon 03:59, keyed by business_date.
+    """
+    d = datetime.strptime(business_date, "%Y-%m-%d").date()
+    weekday = d.weekday()  # Mon=0
+    mon = d - timedelta(days=weekday)
+    next_mon = mon + timedelta(days=7)
+    days_remaining = (next_mon - d).days
+    return mon.strftime("%Y-%m-%d"), next_mon.strftime("%Y-%m-%d"), days_remaining
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +126,16 @@ class DriverOut(BaseModel):
 
 
 class DutyStateIn(BaseModel):
-    state: Literal["ride91", "uber", "rapido", "ola", "offline", "shift_end", "charging"]
-    started_at: str  # ISO from device
+    # Two separate rows land here:
+    #   Duty layer:     start_duty / end_duty
+    #   Platform layer: uber / rapido / ola / not_online
+    #   Support:        offline / charging  (kept for backwards-compat)
+    state: Literal[
+        "start_duty", "end_duty",
+        "uber", "rapido", "ola", "not_online",
+        "offline", "shift_end", "charging",
+    ]
+    started_at: str
     lat: float
     lng: float
     source: Literal["driver", "admin_correction", "system"] = "driver"
@@ -109,6 +158,26 @@ class RequestIn(BaseModel):
     client_action_id: str
 
 
+class PlatformCashIn(BaseModel):
+    """Screenshot-uploaded, provisional cash figure for one platform/day."""
+    platform: Literal["uber", "rapido", "ola"]
+    cash_amount: float
+    business_date: Optional[str] = None      # defaults to today
+    image_ref: Optional[str] = None
+    confidence: Optional[float] = None
+    client_action_id: str
+
+
+class QrPaymentIn(BaseModel):
+    """Razorpay-tracked payments. Fares vs deposits are tagged apart."""
+    amount: float
+    type: Literal["fare", "deposit"]
+    reference: str
+    platform: Optional[Literal["uber", "rapido", "ola"]] = None
+    occurred_at: Optional[str] = None
+    client_action_id: str
+
+
 class HeartbeatIn(BaseModel):
     ts: str
     permission_ok: bool
@@ -123,7 +192,8 @@ class VehiclePingIn(BaseModel):
     lng: float
     speed_kmph: float
     ignition: bool
-    soc_pct: float
+    soc_pct: Optional[float] = None      # NULLABLE — device not on every car yet
+    odometer_km: Optional[float] = None  # NULLABLE
     accuracy_m: float
 
 
@@ -222,10 +292,8 @@ async def me(driver: Dict = Depends(get_driver)):
 # PRE-SHIFT INSPECTION
 # ---------------------------------------------------------------------------
 def _ist_day_key() -> str:
-    """Calendar day in IST as YYYY-MM-DD — matches the 'today' scoping used
-    everywhere else."""
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return now_utc().astimezone(ist).strftime("%Y-%m-%d")
+    """Business day (04:00–03:59 IST) used everywhere as the daily bucket."""
+    return business_date_now()
 
 
 @api.post("/inspection")
@@ -283,9 +351,10 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     )
     if existing:
         return existing
-    # HARD GATE: going on-duty on any working platform requires today's
-    # inspection. Offline / shift_end are always allowed.
-    if body.state in PLATFORMS:
+    # HARD GATE: starting duty requires today's inspection. Platform switches
+    # do NOT gate — they only make sense once on-duty anyway, and the client
+    # blocks them until on-duty.
+    if body.state == "start_duty":
         day_key = _ist_day_key()
         insp = await db.inspections.find_one(
             {"driver_id": driver["id"], "day_key": day_key}, {"_id": 0}
@@ -298,6 +367,7 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
         "vehicle_id": driver["vehicle_id"],
         "state": body.state,
         "started_at": body.started_at,
+        "business_date": business_date_from_dt(_parse_iso(body.started_at) if body.started_at else now_utc()),
         "lat": body.lat,
         "lng": body.lng,
         "source": body.source,
@@ -357,24 +427,55 @@ async def _segments_for_day(driver_id: str, day_start: datetime, day_end: dateti
 
 @api.get("/duty/today")
 async def duty_today(driver: Dict = Depends(get_driver)):
-    day_start = _start_of_day_utc()
-    day_end = day_start + timedelta(days=1)
+    # Business day 04:00 IST → 03:59 next day.
+    today_bd = business_date_now()
+    day_start, day_end = business_day_bounds(today_bd)
     segs = await _segments_for_day(driver["id"], day_start, day_end)
     totals: Dict[str, int] = {}
     for s in segs:
         totals[s["state"]] = totals.get(s["state"], 0) + s["seconds"]
-    shift_seconds = sum(totals.get(p, 0) for p in PLATFORMS) + totals.get("offline", 0)
     working_seconds = sum(totals.get(p, 0) for p in PLATFORMS)
+    # On-duty time = anything after start_duty and before end_duty. Simpler:
+    # the sum of platform + not_online + charging segments once start_duty
+    # has been seen for the day.
+    on_duty_seconds = (
+        working_seconds
+        + totals.get("not_online", 0)
+        + totals.get("charging", 0)
+    )
+    # Current state = most recent row across the day.
     current = segs[-1]["state"] if segs else None
-    # Distance today from vehicle_pings, filtered by accuracy_m <= 30
+    # Is the driver ON DUTY? Yes iff most recent start_duty is more recent
+    # than most recent end_duty within the business day.
+    on_duty = False
+    for s in reversed(segs):
+        if s["state"] == "end_duty":
+            on_duty = False
+            break
+        if s["state"] == "start_duty":
+            on_duty = True
+            break
+    # Current platform (of the four) is the most recent platform row if it
+    # came after the last start_duty.
+    current_platform = None
+    if on_duty:
+        for s in reversed(segs):
+            if s["state"] == "start_duty":
+                break
+            if s["state"] in PLATFORMS or s["state"] == "not_online":
+                current_platform = s["state"]
+                break
     distance_km = await _distance_today(driver["vehicle_id"], day_start, day_end)
     return {
         "segments": segs,
         "totals_seconds": totals,
-        "shift_seconds": shift_seconds,
+        "on_duty": on_duty,
+        "current_platform": current_platform,
+        "on_duty_seconds": on_duty_seconds,
         "working_seconds": working_seconds,
         "current_state": current,
         "distance_km": round(distance_km, 2),
+        "business_date": today_bd,
         "day_start": iso(day_start),
         "server_ts": iso(now_utc()),
     }
@@ -410,71 +511,223 @@ async def close_out(body: CloseOutIn, driver: Dict = Depends(get_driver)):
 # ---------------------------------------------------------------------------
 # MONEY
 # ---------------------------------------------------------------------------
-async def _money_for_range(driver_id: str, start: datetime, end: datetime) -> Dict:
-    cursor = db.close_outs.find({"driver_id": driver_id}, {"_id": 0})
-    per_platform: Dict[str, Dict[str, float]] = {
-        p: {"gross": 0.0, "trips": 0, "cash": 0.0} for p in PLATFORMS
+async def _fetch_platform_cash(
+    driver_id: str, from_bd: str, to_bd: str
+) -> List[Dict]:
+    """platform_cash rows falling within [from_bd, to_bd] (business dates)."""
+    cursor = db.platform_cash.find(
+        {
+            "driver_id": driver_id,
+            "business_date": {"$gte": from_bd, "$lt": to_bd},
+        },
+        {"_id": 0},
+    ).sort("business_date", 1)
+    return [r async for r in cursor]
+
+
+async def _fetch_qr_payments(
+    driver_id: str, from_bd: str, to_bd: str
+) -> List[Dict]:
+    cursor = db.qr_payments.find(
+        {
+            "driver_id": driver_id,
+            "business_date": {"$gte": from_bd, "$lt": to_bd},
+        },
+        {"_id": 0},
+    )
+    return [r async for r in cursor]
+
+
+# ---------------------------------------------------------------------------
+# PLATFORM CASH (screenshot upload → provisional, or fleet job → settled)
+# ---------------------------------------------------------------------------
+@api.post("/platform-cash")
+async def add_platform_cash(body: PlatformCashIn, driver: Dict = Depends(get_driver)):
+    existing = await db.platform_cash.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+    bd = body.business_date or business_date_now()
+    start, end = business_day_bounds(bd)
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "platform": body.platform,
+        "cash_amount": round(body.cash_amount, 2),
+        "business_date": bd,
+        "window_start": iso(start),
+        "window_end": iso(end),
+        "source": "ocr",
+        "status": "provisional",
+        "image_ref": body.image_ref,
+        "confidence": body.confidence,
+        "client_action_id": body.client_action_id,
+        "created_at": iso(now_utc()),
     }
-    total_cash = 0.0
-    for row in [r async for r in cursor]:
-        try:
-            ts = _parse_iso(row["to_ts"])
-        except Exception:
-            continue
-        if not (start <= ts < end):
-            continue
-        p = row["platform"]
+    await db.platform_cash.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# QR PAYMENTS (Razorpay side effect). Deposits tagged apart from fares.
+# ---------------------------------------------------------------------------
+@api.post("/qr-payment")
+async def add_qr_payment(body: QrPaymentIn, driver: Dict = Depends(get_driver)):
+    existing = await db.qr_payments.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+    occurred_at = body.occurred_at or iso(now_utc())
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "amount": round(body.amount, 2),
+        "type": body.type,          # 'fare' or 'deposit'
+        "reference": body.reference,
+        "platform": body.platform,
+        "occurred_at": occurred_at,
+        "business_date": business_date_from_dt(_parse_iso(occurred_at)),
+        "client_action_id": body.client_action_id,
+        "created_at": iso(now_utc()),
+    }
+    await db.qr_payments.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# MONEY
+# ---------------------------------------------------------------------------
+def _empty_platform_map() -> Dict[str, Dict]:
+    return {p: {"cash_collected": 0.0, "status": "pending"} for p in PLATFORMS}
+
+
+async def _cash_snapshot(driver_id: str, from_bd: str, to_bd: str) -> Dict:
+    pc = await _fetch_platform_cash(driver_id, from_bd, to_bd)
+    qr = await _fetch_qr_payments(driver_id, from_bd, to_bd)
+    per_platform = _empty_platform_map()
+    for r in pc:
+        p = r["platform"]
         if p not in per_platform:
             continue
-        per_platform[p]["gross"] += row["gross_amount"]
-        per_platform[p]["trips"] += row["trips"]
-        per_platform[p]["cash"] += row["cash_collected"]
-        total_cash += row["cash_collected"]
-    gross = sum(v["gross"] for v in per_platform.values())
-    return {"per_platform": per_platform, "gross": gross, "cash_collected": total_cash}
+        per_platform[p]["cash_collected"] += r["cash_amount"]
+        per_platform[p]["status"] = r["status"]
+    total_cash_fares = sum(v["cash_collected"] for v in per_platform.values())
+    qr_fares = sum(r["amount"] for r in qr if r["type"] == "fare")
+    deposits = sum(r["amount"] for r in qr if r["type"] == "deposit")
+    cash_in_hand = round(total_cash_fares - qr_fares - deposits, 2)
+    return {
+        "per_platform": per_platform,
+        "total_cash_fares": round(total_cash_fares, 2),
+        "qr_fares": round(qr_fares, 2),
+        "deposits": round(deposits, 2),
+        "cash_in_hand": cash_in_hand,
+    }
 
 
 @api.get("/money/today")
 async def money_today(driver: Dict = Depends(get_driver)):
-    day_start = _start_of_day_utc()
-    day_end = day_start + timedelta(days=1)
-    today = await _money_for_range(driver["id"], day_start, day_end)
+    today_bd = business_date_now()
+    tomorrow_bd = (
+        datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    snap = await _cash_snapshot(driver["id"], today_bd, tomorrow_bd)
+    cash = snap["cash_in_hand"]
+    return {
+        "business_date": today_bd,
+        "per_platform": snap["per_platform"],       # includes 'status' per platform
+        "total_cash_fares": snap["total_cash_fares"],
+        "qr_fares": snap["qr_fares"],
+        "deposits": snap["deposits"],
+        "cash_in_hand": cash,
+        "cash_limit": CASH_LIMIT,
+        "cash_over_limit": cash > CASH_LIMIT,
+        "you_owe": max(0.0, -cash),
+    }
+
+
+@api.get("/money/week")
+async def money_week(driver: Dict = Depends(get_driver)):
+    """Card 1 driver of the Money screen: the Monday payout view."""
+    today_bd = business_date_now()
+    mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
+    pc = await _fetch_platform_cash(driver["id"], mon_bd, next_mon_bd)
+
+    # Aggregate per platform per business_date so we can label settled vs
+    # provisional. Note: earnings gross is the FLEET statement number for
+    # settled rows; for provisional rows we only have cash figures from OCR
+    # (no gross), so gross==cash for provisional (best available approximation).
+    per_platform: Dict[str, Dict] = {
+        p: {"settled_gross": 0.0, "provisional_gross": 0.0} for p in PLATFORMS
+    }
+    for r in pc:
+        p = r["platform"]
+        if p not in per_platform:
+            continue
+        # If a settlement row has explicit gross use it, else fall back to cash
+        gross = r.get("gross_amount", r["cash_amount"])
+        if r["status"] == "settled":
+            per_platform[p]["settled_gross"] += gross
+        else:
+            per_platform[p]["provisional_gross"] += gross
+
+    total_settled = sum(v["settled_gross"] for v in per_platform.values())
+    total_prov = sum(v["provisional_gross"] for v in per_platform.values())
+    est_gross = total_settled + total_prov
+    driver_share = round(est_gross * DRIVER_SHARE, 2)
+
+    # Cash held right now (not window-scoped — deposits carry across days)
+    today_snap = await _cash_snapshot(driver["id"], today_bd, next_mon_bd)
+    cash_held = max(0.0, today_snap["cash_in_hand"])
+
     advance = await db.advances.find_one({"driver_id": driver["id"]}, {"_id": 0})
     advance = advance or {"principal": 0, "daily_recovery": 0, "days_remaining": 0}
-    driver_share = round(today["gross"] * DRIVER_SHARE, 2)
-    advance_recovery_today = min(advance.get("daily_recovery", 0), driver_share)
-    cash_held = round(today["cash_collected"], 2)
-    payable = round(driver_share - cash_held - advance_recovery_today, 2)
+    weekly_advance_recovery = min(
+        advance.get("daily_recovery", 0) * 7, driver_share
+    )
+    payable_est = round(driver_share - cash_held - weekly_advance_recovery, 2)
+
     return {
-        "date": iso(day_start),
-        "gross_by_platform": today["per_platform"],
-        "gross": round(today["gross"], 2),
+        "week_start": mon_bd,
+        "week_end_exclusive": next_mon_bd,
+        "days_remaining": days_remaining,
+        "per_platform": per_platform,
+        "total_settled": round(total_settled, 2),
+        "total_provisional": round(total_prov, 2),
+        "estimated_gross": round(est_gross, 2),
         "driver_share": driver_share,
         "share_rate": DRIVER_SHARE,
-        "cash_held": cash_held,
-        "cash_limit": CASH_LIMIT,
-        "cash_over_limit": cash_held > CASH_LIMIT,
+        "cash_held": round(cash_held, 2),
         "advance": advance,
-        "advance_recovery_today": advance_recovery_today,
-        "payable": payable,
+        "advance_recovery_week": round(weekly_advance_recovery, 2),
+        "payable_estimate": payable_est,
     }
 
 
 @api.get("/money/weekly")
 async def money_weekly(driver: Dict = Depends(get_driver)):
-    day_start = _start_of_day_utc()
+    """7-day earnings bar-chart driver. Reads platform_cash bucketed by
+    business_date. Never sums across midnight-based days."""
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    from_bd = (today_d - timedelta(days=6)).strftime("%Y-%m-%d")
+    to_bd = (today_d + timedelta(days=1)).strftime("%Y-%m-%d")
+    pc = await _fetch_platform_cash(driver["id"], from_bd, to_bd)
+    by_day: Dict[str, float] = {}
+    for r in pc:
+        by_day.setdefault(r["business_date"], 0.0)
+        by_day[r["business_date"]] += r.get("gross_amount", r["cash_amount"])
     days = []
     for i in range(6, -1, -1):
-        s = day_start - timedelta(days=i)
-        e = s + timedelta(days=1)
-        m = await _money_for_range(driver["id"], s, e)
-        days.append(
-            {
-                "date": iso(s),
-                "gross": round(m["gross"], 2),
-                "share": round(m["gross"] * DRIVER_SHARE, 2),
-            }
-        )
+        d = today_d - timedelta(days=i)
+        key = d.strftime("%Y-%m-%d")
+        gross = round(by_day.get(key, 0.0), 2)
+        days.append({"business_date": key, "gross": gross, "share": round(gross * DRIVER_SHARE, 2)})
     return {"days": days}
 
 
@@ -695,7 +948,18 @@ async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> fl
         if p.get("accuracy_m", 0) > 30:
             continue
         if prev is not None:
-            total_m += _haversine_m(prev["lat"], prev["lng"], p["lat"], p["lng"])
+            d_m = _haversine_m(prev["lat"], prev["lng"], p["lat"], p["lng"])
+            try:
+                dt_s = (ts - _parse_iso(prev["recorded_at"])).total_seconds()
+            except Exception:
+                dt_s = 0
+            if dt_s > 0:
+                implied_kmph = (d_m / dt_s) * 3.6
+                if implied_kmph > 120:
+                    # noisy jump — reset the anchor and skip this segment
+                    prev = p
+                    continue
+            total_m += d_m
         prev = p
     return total_m / 1000.0
 
@@ -743,6 +1007,7 @@ async def _seed_if_empty() -> None:
             "vehicle_id": vehicle_id,
             "qr_code": f"RIDE91-DEPOSIT-{driver_id[:8].upper()}",
             "active": True,
+            "shift_type": "day",
         }
     )
     await db.advances.insert_one(
@@ -753,9 +1018,10 @@ async def _seed_if_empty() -> None:
             "days_remaining": 21,
         }
     )
-    # Seed a plausible day of vehicle_pings around Bengaluru.
-    day_start = _start_of_day_utc()
-    # 1 ping every 90 seconds over the last ~8 hours before now.
+    # Seed a plausible day of vehicle_pings around Bengaluru starting at
+    # today's 04:00 IST business-day start.
+    today_bd = business_date_now()
+    day_start, _ = business_day_bounds(today_bd)
     base_lat, base_lng = 12.9716, 77.5946  # MG Road
     now = now_utc()
     t = max(day_start, now - timedelta(hours=8))
@@ -790,14 +1056,15 @@ async def _seed_if_empty() -> None:
         i += 1
     if pings:
         await db.vehicle_pings.insert_many(pings)
-    # Seed a demo duty timeline (shift started 5h ago on ride91, switched around)
+    # Seed a demo duty timeline (shift start 5h ago). Follows the new
+    # duty/platform two-layer model.
     shift_start = now - timedelta(hours=5)
     duty_events = [
-        (shift_start, "ride91"),
-        (shift_start + timedelta(hours=1, minutes=20), "uber"),
-        (shift_start + timedelta(hours=2, minutes=40), "offline"),
-        (shift_start + timedelta(hours=3, minutes=10), "rapido"),
-        (shift_start + timedelta(hours=4, minutes=15), "ride91"),
+        (shift_start, "start_duty"),
+        (shift_start + timedelta(minutes=2), "uber"),
+        (shift_start + timedelta(hours=1, minutes=20), "not_online"),
+        (shift_start + timedelta(hours=2, minutes=40), "rapido"),
+        (shift_start + timedelta(hours=4, minutes=15), "uber"),
     ]
     for ts, state in duty_events:
         await db.duty_states.insert_one(
@@ -807,6 +1074,7 @@ async def _seed_if_empty() -> None:
                 "vehicle_id": vehicle_id,
                 "state": state,
                 "started_at": iso(ts),
+                "business_date": business_date_from_dt(ts),
                 "lat": base_lat,
                 "lng": base_lng,
                 "source": "driver",
@@ -814,27 +1082,70 @@ async def _seed_if_empty() -> None:
                 "synced_at": iso(ts + timedelta(seconds=3)),
             }
         )
-    # Seed close-outs for each block that ended (all except the last).
-    for i in range(len(duty_events) - 1):
-        (ts_from, state), (ts_to, _next) = duty_events[i], duty_events[i + 1]
-        if state in NON_PLATFORM_STATES:
+    # Seed today's provisional platform_cash figures — one per platform.
+    for platform, amount in [("uber", 640.0), ("rapido", 280.0), ("ola", 0.0)]:
+        if amount <= 0:
             continue
-        gross = round(random.uniform(180, 480), 2)
-        cash = round(gross * random.uniform(0.2, 0.6), 2)
-        await db.close_outs.insert_one(
+        s, e = business_day_bounds(today_bd)
+        await db.platform_cash.insert_one(
             {
                 "id": str(uuid.uuid4()),
                 "driver_id": driver_id,
-                "platform": state,
-                "from_ts": iso(ts_from),
-                "to_ts": iso(ts_to),
-                "trips": random.randint(2, 6),
-                "gross_amount": gross,
-                "cash_collected": cash,
+                "platform": platform,
+                "cash_amount": amount,
+                "gross_amount": amount * 2.4,
+                "business_date": today_bd,
+                "window_start": iso(s),
+                "window_end": iso(e),
+                "source": "ocr",
+                "status": "provisional",
+                "image_ref": None,
+                "confidence": 0.9,
                 "client_action_id": str(uuid.uuid4()),
-                "created_at": iso(ts_to),
+                "created_at": iso(now),
             }
         )
+    # Seed the previous few days as SETTLED to fill the weekly chart.
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    for i in range(1, 6):
+        bd = (today_d - timedelta(days=i)).strftime("%Y-%m-%d")
+        s, e = business_day_bounds(bd)
+        for platform, base in [("uber", 780.0), ("rapido", 340.0), ("ola", 120.0)]:
+            amt = round(base * random.uniform(0.7, 1.3), 2)
+            await db.platform_cash.insert_one(
+                {
+                    "id": str(uuid.uuid4()),
+                    "driver_id": driver_id,
+                    "platform": platform,
+                    "cash_amount": round(amt * random.uniform(0.3, 0.6), 2),
+                    "gross_amount": amt,
+                    "business_date": bd,
+                    "window_start": iso(s),
+                    "window_end": iso(e),
+                    "source": "settlement",
+                    "status": "settled",
+                    "image_ref": None,
+                    "confidence": None,
+                    "client_action_id": str(uuid.uuid4()),
+                    "created_at": iso(e),
+                }
+            )
+    # Seed a "customer paid via QR" fare and one prior deposit so cash-in-hand
+    # is non-trivial from the first render.
+    await db.qr_payments.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "amount": 120.0,
+            "type": "fare",
+            "reference": f"FARE-{driver_id[:6]}-1",
+            "platform": "uber",
+            "occurred_at": iso(now - timedelta(hours=3)),
+            "business_date": today_bd,
+            "client_action_id": str(uuid.uuid4()),
+            "created_at": iso(now),
+        }
+    )
     # Seed a couple of requests
     await db.requests.insert_many(
         [
@@ -892,6 +1203,18 @@ async def _on_startup() -> None:
     await db.sessions.create_index([("token", 1)], unique=True)
     await db.inspections.create_index([("driver_id", 1), ("day_key", 1)], unique=True)
     await db.inspections.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.platform_cash.create_index(
+        [("driver_id", 1), ("business_date", 1)]
+    )
+    await db.platform_cash.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.qr_payments.create_index(
+        [("driver_id", 1), ("business_date", 1)]
+    )
+    await db.qr_payments.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
     await _seed_if_empty()

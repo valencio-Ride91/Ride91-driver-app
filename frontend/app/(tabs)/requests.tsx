@@ -15,7 +15,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AppHeader } from "@/src/components/AppHeader";
 import { BottomSheet, Card } from "@/src/components/ui";
 import { api } from "@/src/api";
-import { useI18n, formatINR } from "@/src/i18n";
+import { useI18n, formatINR, formatIST, formatISTDate } from "@/src/i18n";
 import { useSync } from "@/src/sync";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -67,30 +67,38 @@ export default function Requests() {
     setRefreshing(false);
   }, [load]);
 
+  const [submitting, setSubmitting] = useState(false);
+
   const submit = useCallback(async () => {
+    if (submitting) return;         // prevent double-tap dupe
+    setSubmitting(true);
     let payload: Record<string, any> = { reason };
     if (type === "advance") payload = { amount: parseFloat(amount || "0"), reason };
     if (type === "holiday") payload = { date, reason };
     if (type === "extra_hours") payload = { hours: parseFloat(hours || "0"), reason };
-    await enqueue("/requests", { type, payload });
-    // Optimistic append
-    setItems((prev) => [
-      {
-        id: `local-${Date.now()}`,
-        type,
-        payload,
-        state: "pending",
-        created_at: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-    setCreating(false);
-    setAmount("");
-    setReason("");
-    setDate("");
-    setHours("");
-    setTimeout(load, 1500);
-  }, [type, amount, reason, date, hours, enqueue, load]);
+    try {
+      await enqueue("/requests", { type, payload });
+      // Optimistic append
+      setItems((prev) => [
+        {
+          id: `local-${Date.now()}`,
+          type,
+          payload,
+          state: "pending",
+          created_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      setCreating(false);
+      setAmount("");
+      setReason("");
+      setDate("");
+      setHours("");
+      setTimeout(load, 1500);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [type, amount, reason, date, hours, enqueue, load, submitting]);
 
   const typeLabel: Record<ReqType, string> = {
     advance: t.request_advance,
@@ -127,8 +135,8 @@ export default function Requests() {
                   <Text style={styles.reqPayload}>{formatINR(r.payload.amount ?? 0)}</Text>
                 ) : null}
                 {r.type === "holiday" ? (
-                  <Text style={styles.reqPayload}>
-                    {new Date(r.payload.date ?? r.created_at).toLocaleDateString()}
+                  <Text style={styles.reqPayload} testID={`request-${r.id}-date`}>
+                    {r.payload.date ? formatISTDate(r.payload.date) : "—"}
                   </Text>
                 ) : null}
                 {r.type === "extra_hours" ? (
@@ -138,9 +146,7 @@ export default function Requests() {
                   <Text style={styles.reqReason}>{r.payload.reason}</Text>
                 ) : null}
               </View>
-              <Text style={styles.reqDate}>
-                {new Date(r.created_at).toLocaleString()}
-              </Text>
+              <Text style={styles.reqDate}>{formatIST(r.created_at)}</Text>
             </Card>
           ))
         )}
@@ -246,8 +252,13 @@ export default function Requests() {
             >
               <Text style={styles.secondaryText}>{t.cancel}</Text>
             </TouchableOpacity>
-            <TouchableOpacity testID="req-submit" style={styles.primaryBtn} onPress={submit}>
-              <Text style={styles.primaryText}>{t.submit}</Text>
+            <TouchableOpacity
+              testID="req-submit"
+              style={[styles.primaryBtn, submitting ? { opacity: 0.6 } : null]}
+              onPress={submit}
+              disabled={submitting}
+            >
+              <Text style={styles.primaryText}>{submitting ? "…" : t.submit}</Text>
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
@@ -265,7 +276,7 @@ const FieldBlock: React.FC<{ label: string; children: React.ReactNode }> = ({ la
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
-  scroll: { padding: spacing.md, paddingBottom: 120 },
+  scroll: { padding: spacing.md, paddingBottom: 180 },
   empty: {
     fontFamily: fonts.ui,
     color: colors.muted,

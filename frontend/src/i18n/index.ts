@@ -244,3 +244,56 @@ export const formatDuration = (seconds: number): string => {
   const m = Math.floor((seconds % 3600) / 60);
   return `${h}h ${m.toString().padStart(2, "0")}m`;
 };
+
+// All timestamps rendered in the app pass through this. Asia/Kolkata, human
+// readable ("Today 12:32 pm", "Wed 6 Aug 12:32 pm", "6 Aug 2025 12:32 pm").
+export const formatIST = (input: string | number | Date | undefined | null): string => {
+  if (!input) return "—";
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return "—";
+  const now = new Date();
+  const optsTime: Intl.DateTimeFormatOptions = {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
+  };
+  const optsDate: Intl.DateTimeFormatOptions = {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    timeZone: "Asia/Kolkata",
+  };
+  const optsYear: Intl.DateTimeFormatOptions = {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  };
+  const day = (x: Date) =>
+    x.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" });
+  const isSameDay = day(d) === day(now);
+  const t = d.toLocaleTimeString("en-IN", optsTime).replace(" AM", " am").replace(" PM", " pm");
+  if (isSameDay) return `Today ${t}`;
+  const sameYear = d.getUTCFullYear() === now.getUTCFullYear();
+  const dateStr = sameYear
+    ? d.toLocaleDateString("en-IN", optsDate)
+    : d.toLocaleDateString("en-IN", optsYear);
+  return `${dateStr} ${t}`;
+};
+
+// Short "Mon 4 Aug" / "6 Aug 2024" — no time. For headers and list dates.
+export const formatISTDate = (input: string | number | Date | undefined | null): string => {
+  if (!input) return "—";
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return "—";
+  const now = new Date();
+  const sameYear = d.getUTCFullYear() === now.getUTCFullYear();
+  return d.toLocaleDateString("en-IN", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: sameYear ? undefined : "numeric",
+    timeZone: "Asia/Kolkata",
+  });
+};

@@ -6,25 +6,27 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useI18n, Lang } from "@/src/i18n";
 import { useSync } from "@/src/sync";
-import { useTracking, HealthState } from "@/src/tracking";
+import { useTracking } from "@/src/tracking";
 import { BottomSheet } from "@/src/components/ui";
 
 const LANG_LABEL: Record<Lang, string> = { en: "EN", hi: "हिं", kn: "ಕನ್" };
 
-const healthMeta = (
-  h: HealthState,
+// Single-truth status pill. Never shows two contradictory states.
+// Priority: GPS off > No network > Saving N > On phone N > Synced
+const singleStatus = (
+  online: boolean,
+  permissionOk: boolean,
+  unsynced: number,
   t: ReturnType<typeof useI18n>["t"],
-): { bg: string; fg: string; label: string } => {
-  switch (h) {
-    case "synced":
-      return { bg: colors.live, fg: colors.white, label: t.health_synced };
-    case "no_network":
-      return { bg: colors.muted, fg: colors.white, label: t.health_offline };
-    case "location_off":
-      return { bg: colors.alert, fg: colors.white, label: t.health_location };
-    case "service_killed":
-      return { bg: colors.alert, fg: colors.white, label: t.health_service };
-  }
+): { bg: string; fg: string; label: string; testID: string } => {
+  if (!permissionOk) return { bg: colors.alert, fg: colors.white, label: t.health_location, testID: "status-gps-off" };
+  if (!online && unsynced > 0)
+    return { bg: colors.muted, fg: colors.white, label: `On phone ${unsynced}`, testID: "status-on-phone" };
+  if (!online)
+    return { bg: colors.muted, fg: colors.white, label: t.health_offline, testID: "status-offline" };
+  if (unsynced > 0)
+    return { bg: colors.amber, fg: colors.ink, label: `Saving ${unsynced}`, testID: "status-saving" };
+  return { bg: colors.live, fg: colors.white, label: t.health_synced, testID: "status-synced" };
 };
 
 interface Props {
@@ -33,10 +35,10 @@ interface Props {
 
 export const AppHeader: React.FC<Props> = ({ title }) => {
   const { lang, setLang, t } = useI18n();
-  const { unsynced } = useSync();
-  const { health, permissionOk, requestPermission } = useTracking();
+  const { unsynced, online } = useSync();
+  const { permissionOk, requestPermission } = useTracking();
   const [langOpen, setLangOpen] = useState(false);
-  const meta = healthMeta(health, t);
+  const status = singleStatus(online, permissionOk, unsynced, t);
 
   return (
     <View style={styles.wrap}>
@@ -45,19 +47,14 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
           {title}
         </Text>
         <View style={styles.rightRow}>
-          {unsynced > 0 ? (
-            <View style={styles.unsyncedPill} testID="unsynced-pill">
-              <Text style={styles.unsyncedText}>{unsynced}</Text>
-            </View>
-          ) : null}
           <TouchableOpacity
-            style={[styles.healthPill, { backgroundColor: meta.bg }]}
+            style={[styles.healthPill, { backgroundColor: status.bg }]}
             onPress={() => {
               if (!permissionOk) requestPermission();
             }}
-            testID="health-pill"
+            testID={status.testID}
           >
-            <Text style={[styles.healthText, { color: meta.fg }]}>{meta.label}</Text>
+            <Text style={[styles.healthText, { color: status.fg }]}>{status.label}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.langPill}
@@ -68,7 +65,7 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
           </TouchableOpacity>
         </View>
       </View>
-      {unsynced > 0 ? (
+      {unsynced > 0 && online ? (
         <Text style={styles.unsyncedBanner} testID="unsynced-banner">
           {t.unsynced_msg(unsynced)}
         </Text>

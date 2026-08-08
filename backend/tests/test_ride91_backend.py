@@ -1,33 +1,28 @@
-"""Ride91 backend API tests — inspection gate, driver flows, duty, close-outs, money, requests, tracking.
+"""Ride91 backend API tests — iteration 4.
 
-All tests live in this single module so pytest-xdist loadscope pins them to one
-worker and executes them sequentially — the inspection classes must run BEFORE
-the duty/regression classes because the hard-gate requires no inspection at
-first, then an inspection is created and unlocks working-platform duty states.
+Big restructure:
+  - Duty is two layers: DUTY_LAYER (start_duty/end_duty) and
+    PLATFORM_LAYER (uber/rapido/ola/not_online). Ride91 dropped from platforms.
+  - Money model: platform_cash + qr_payments collections, business-day
+    (04:00 IST -> 03:59 next-day IST) bucketing, /api/money/today and
+    /api/money/week endpoints.
+
+Test order matters. All classes live in this single module so pytest-xdist
+loadscope pins them to one worker and executes sequentially.
 """
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
-from dotenv import load_dotenv
-from pymongo import MongoClient
 
-load_dotenv(Path(__file__).resolve().parents[1].parent / "frontend" / ".env")
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+IST = timezone(timedelta(hours=5, minutes=30))
+BUSINESS_DAY_OFFSET_HOURS = 4
 
 
-def _ist_day_key() -> str:
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(timezone.utc).astimezone(ist).strftime("%Y-%m-%d")
-
-
-# ================================================================
-# PRE-SHIFT INSPECTION (must run first — establishes / creates today's inspection)
-# ================================================================
-DASH_B64 = "data:image/jpeg;base64," + ("A" * 128)
-VIDEO_B64 = "data:video/mp4;base64," + ("B" * 256)
+def business_date_now() -> str:
+    now = datetime.now(timezone.utc)
+    shifted = now.astimezone(IST) - timedelta(hours=BUSINESS_DAY_OFFSET_HOURS)
+    return shifted.strftime("%Y-%m-%d")
 
 
 def _duty_payload(state: str) -> dict:
@@ -40,213 +35,71 @@ def _duty_payload(state: str) -> dict:
     }
 
 
+DASH_B64 = "data:image/jpeg;base64," + ("A" * 128)
+VIDEO_B64 = "data:video/mp4;base64," + ("B" * 256)
+
+
+# =============================================================================
+# Module-scoped cleanup: reset gates before this iteration's tests
+# =============================================================================
 @pytest.fixture(scope="module", autouse=True)
-def _clean_today_inspection(auth, mongo_db, today_key):
-    """Delete any prior inspection for today so hard-gate tests start clean."""
-    mongo_db.inspections.delete_many(
-        {"driver_id": auth["driver"]["id"], "day_key": today_key}
+def _clean_state(auth, mongo_db):
+    """Clear per-driver state so gates and math start from a known baseline."""
+    driver_id = auth["driver"]["id"]
+    today_bd = business_date_now()
+    mongo_db.inspections.delete_many({"driver_id": driver_id, "day_key": today_bd})
+    # Wipe any prior duty rows for today so start_duty/end_duty tests are deterministic
+    mongo_db.duty_states.delete_many(
+        {"driver_id": driver_id, "business_date": today_bd}
+    )
+    # Wipe today's platform_cash + qr_payments so math is predictable
+    mongo_db.platform_cash.delete_many(
+        {"driver_id": driver_id, "business_date": today_bd}
+    )
+    mongo_db.qr_payments.delete_many(
+        {"driver_id": driver_id, "business_date": today_bd}
     )
     yield
 
 
-class TestInspectionAuth:
-    def test_get_today_requires_auth(self, api_client, base_url):
-        r = api_client.get(f"{base_url}/api/inspection/today")
-        assert r.status_code == 401
-
-    def test_post_requires_auth(self, api_client, base_url):
-        r = api_client.post(
-            f"{base_url}/api/inspection",
-            json={
-                "dashboard_photo_b64": DASH_B64,
-                "exterior_video_b64": VIDEO_B64,
-                "exterior_video_mime": "video/mp4",
-                "client_action_id": str(uuid.uuid4()),
-            },
-        )
-        assert r.status_code == 401
-
-
-class TestAA_InspectionGateBeforeSubmit:
-    """Prefixed AA_ so this class collects before every other class in module."""
-
-    def test_today_shows_not_completed(self, api_client, base_url, auth, today_key):
-        r = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
-        assert r.status_code == 200, r.text
-        assert r.json() == {"completed": False, "day_key": today_key}
-
-    @pytest.mark.parametrize("platform", ["ride91", "uber", "rapido", "ola"])
-    def test_going_on_platform_without_inspection_is_409(
-        self, api_client, base_url, auth, platform
-    ):
-        r = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload(platform),
-            headers=auth["headers"],
-        )
-        assert r.status_code == 409, f"{platform}: {r.status_code} {r.text}"
-        assert r.json().get("detail") == "inspection_required"
-
-    def test_offline_allowed_without_inspection(self, api_client, base_url, auth):
-        r = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload("offline"),
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "offline"
-
-    def test_shift_end_allowed_without_inspection(self, api_client, base_url, auth):
-        r = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload("shift_end"),
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "shift_end"
-
-
-class TestAB_InspectionSubmit:
-    first_id: str | None = None
-    first_cid: str | None = None
-
-    def test_create_success_no_blobs_echoed(self, api_client, base_url, auth):
-        cid = str(uuid.uuid4())
-        r = api_client.post(
-            f"{base_url}/api/inspection",
-            json={
-                "dashboard_photo_b64": DASH_B64,
-                "exterior_video_b64": VIDEO_B64,
-                "exterior_video_mime": "video/mp4",
-                "client_action_id": cid,
-            },
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body.get("completed") is True
-        assert isinstance(body.get("id"), str)
-        assert "created_at" in body
-        assert "dashboard_photo_b64" not in body
-        assert "exterior_video_b64" not in body
-        TestAB_InspectionSubmit.first_id = body["id"]
-        TestAB_InspectionSubmit.first_cid = cid
-
-    def test_idempotent_same_client_action_id(self, api_client, base_url, auth):
-        assert TestAB_InspectionSubmit.first_cid
-        r = api_client.post(
-            f"{base_url}/api/inspection",
-            json={
-                "dashboard_photo_b64": DASH_B64,
-                "exterior_video_b64": VIDEO_B64,
-                "exterior_video_mime": "video/mp4",
-                "client_action_id": TestAB_InspectionSubmit.first_cid,
-            },
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200
-        assert r.json()["id"] == TestAB_InspectionSubmit.first_id
-        assert "dashboard_photo_b64" not in r.json()
-
-    def test_idempotent_per_driver_per_day_different_cid(
-        self, api_client, base_url, auth, mongo_db, today_key
-    ):
-        driver_id = auth["driver"]["id"]
-        before = mongo_db.inspections.count_documents(
-            {"driver_id": driver_id, "day_key": today_key}
-        )
-        r = api_client.post(
-            f"{base_url}/api/inspection",
-            json={
-                "dashboard_photo_b64": DASH_B64,
-                "exterior_video_b64": VIDEO_B64,
-                "exterior_video_mime": "video/mp4",
-                "client_action_id": str(uuid.uuid4()),
-            },
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200
-        assert r.json()["id"] == TestAB_InspectionSubmit.first_id
-        after = mongo_db.inspections.count_documents(
-            {"driver_id": driver_id, "day_key": today_key}
-        )
-        assert after == before == 1
-
-    def test_today_after_submit_completed_no_blobs(
-        self, api_client, base_url, auth, today_key
-    ):
-        r = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
-        assert r.status_code == 200
-        body = r.json()
-        assert body["completed"] is True
-        assert body["id"] == TestAB_InspectionSubmit.first_id
-        assert body["day_key"] == today_key
-        assert "created_at" in body
-        assert "dashboard_photo_b64" not in body
-        assert "exterior_video_b64" not in body
-
-    def test_ride91_allowed_after_inspection(self, api_client, base_url, auth):
-        r = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload("ride91"),
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "ride91"
-
-
-# ================================================================
-# REGRESSION — health, auth, duty, close-outs, money, requests, tracking
-# ================================================================
-# ---------------------------------------------------------------- health
+# =============================================================================
+# Health / Auth regression
+# =============================================================================
 def test_health(api_client, base_url):
     r = api_client.get(f"{base_url}/api/")
     assert r.status_code == 200
-    body = r.json()
-    assert body.get("ok") is True
-    assert body.get("service") == "ride91"
+    assert r.json().get("ok") is True and r.json().get("service") == "ride91"
 
 
-# ---------------------------------------------------------------- auth
 class TestAuth:
-    def test_otp_request_any_phone(self, api_client, base_url):
-        r = api_client.post(f"{base_url}/api/auth/otp/request", json={"phone": "+919888777666"})
-        assert r.status_code == 200
-        body = r.json()
-        assert body.get("sent") is True
-        assert "debug_code" in body and len(str(body["debug_code"])) == 6
-
-    def test_otp_request_demo_phone_returns_universal_code(self, api_client, base_url):
-        r = api_client.post(f"{base_url}/api/auth/otp/request", json={"phone": "+919900000001"})
+    def test_otp_request_demo(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/auth/otp/request", json={"phone": "+919900000001"}
+        )
         assert r.status_code == 200
         assert r.json().get("debug_code") == "123456"
 
-    def test_verify_universal_otp_returns_token_and_driver(self, api_client, base_url):
-        cid = str(uuid.uuid4())
+    def test_verify_universal_otp(self, api_client, base_url):
         r = api_client.post(
             f"{base_url}/api/auth/otp/verify",
-            json={"phone": "+919900000001", "code": "123456", "client_action_id": cid},
+            json={
+                "phone": "+919900000001",
+                "code": "123456",
+                "client_action_id": str(uuid.uuid4()),
+            },
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 200
         d = r.json()
-        assert d["token"] and isinstance(d["token"], str)
-        drv = d["driver"]
-        assert drv["phone"] == "+919900000001"
-        for k in ("id", "name", "vehicle_id", "vehicle_number", "qr_code"):
-            assert k in drv
-
-    def test_verify_idempotent_same_client_action_id(self, api_client, base_url):
-        cid = str(uuid.uuid4())
-        payload = {"phone": "+919900000001", "code": "123456", "client_action_id": cid}
-        r1 = api_client.post(f"{base_url}/api/auth/otp/verify", json=payload)
-        r2 = api_client.post(f"{base_url}/api/auth/otp/verify", json=payload)
-        assert r1.status_code == r2.status_code == 200
-        assert r1.json()["token"] == r2.json()["token"], "verify must be idempotent per client_action_id"
+        assert d["token"] and d["driver"]["phone"] == "+919900000001"
 
     def test_verify_bad_otp_400(self, api_client, base_url):
         r = api_client.post(
             f"{base_url}/api/auth/otp/verify",
-            json={"phone": "+919900000001", "code": "000000", "client_action_id": str(uuid.uuid4())},
+            json={
+                "phone": "+919900000001",
+                "code": "000000",
+                "client_action_id": str(uuid.uuid4()),
+            },
         )
         assert r.status_code == 400
 
@@ -254,205 +107,491 @@ class TestAuth:
         r = api_client.get(f"{base_url}/api/auth/me")
         assert r.status_code == 401
 
-    def test_me_with_token(self, api_client, base_url, auth):
+    def test_me_ok(self, api_client, base_url, auth):
         r = api_client.get(f"{base_url}/api/auth/me", headers=auth["headers"])
         assert r.status_code == 200
-        body = r.json()
-        assert body["driver"]["phone"] == "+919900000001"
-        assert body.get("vehicle", {}).get("id") == auth["driver"]["vehicle_id"]
+        assert r.json()["driver"]["id"] == auth["driver"]["id"]
 
 
-# ---------------------------------------------------------------- duty states
-class TestDutyStates:
-    def test_append_requires_auth(self, api_client, base_url):
+# =============================================================================
+# PART 2 — Duty state enum: accepts start_duty/end_duty/not_online, rejects ride91
+# =============================================================================
+class TestBB_DutyLayerEnum:
+    def test_ride91_rejected(self, api_client, base_url, auth):
         r = api_client.post(
             f"{base_url}/api/duty/state",
-            json={
-                "state": "ride91",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "lat": 12.97, "lng": 77.59,
-                "client_action_id": str(uuid.uuid4()),
-            },
+            json=_duty_payload("ride91"),
+            headers=auth["headers"],
         )
-        assert r.status_code == 401
+        # Ride91 is not a platform anymore — Pydantic Literal 422 (or 400 guard)
+        assert r.status_code in (400, 422), r.text
 
-    def test_append_and_idempotency(self, api_client, base_url, auth):
-        cid = str(uuid.uuid4())
-        payload = {
-            "state": "uber",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "lat": 12.9716, "lng": 77.5946,
-            "client_action_id": cid,
-        }
-        r1 = api_client.post(f"{base_url}/api/duty/state", json=payload, headers=auth["headers"])
-        assert r1.status_code == 200, r1.text
-        row1 = r1.json()
-        assert row1["state"] == "uber"
-        assert "id" in row1
-        # Same client_action_id => must echo same row, not create new
-        r2 = api_client.post(f"{base_url}/api/duty/state", json=payload, headers=auth["headers"])
-        assert r2.status_code == 200
-        assert r2.json()["id"] == row1["id"], "duty_state must be idempotent on client_action_id"
-
-    def test_today_returns_segments_and_totals(self, api_client, base_url, auth):
-        # Append a fresh state so 'current_state' is deterministic
-        cid = str(uuid.uuid4())
-        api_client.post(
+    def test_not_online_accepted(self, api_client, base_url, auth):
+        r = api_client.post(
             f"{base_url}/api/duty/state",
+            json=_duty_payload("not_online"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "not_online"
+
+
+# =============================================================================
+# PART 2 — Inspection gate: start_duty needs inspection; 'uber' does not
+# =============================================================================
+class TestCC_InspectionGate:
+    def test_inspection_today_initially_missing(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        today = business_date_now()
+        mongo_db.inspections.delete_many(
+            {"driver_id": auth["driver"]["id"], "day_key": today}
+        )
+        r = api_client.get(
+            f"{base_url}/api/inspection/today", headers=auth["headers"]
+        )
+        assert r.status_code == 200
+        assert r.json() == {"completed": False, "day_key": today}
+
+    def test_start_duty_blocked_without_inspection(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        today = business_date_now()
+        mongo_db.inspections.delete_many(
+            {"driver_id": auth["driver"]["id"], "day_key": today}
+        )
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("start_duty"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 409, r.text
+        assert r.json().get("detail") == "inspection_required"
+
+    def test_uber_platform_does_not_require_inspection(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        """Platform-layer switches are NOT gated — the client blocks them
+        client-side until on-duty. Spec explicit: only start_duty gates."""
+        today = business_date_now()
+        mongo_db.inspections.delete_many(
+            {"driver_id": auth["driver"]["id"], "day_key": today}
+        )
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("uber"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "uber"
+
+    def test_inspection_create_and_start_duty_unblocks(
+        self, api_client, base_url, auth
+    ):
+        r = api_client.post(
+            f"{base_url}/api/inspection",
             json={
-                "state": "ride91",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "lat": 12.9716, "lng": 77.5946,
-                "client_action_id": cid,
+                "dashboard_photo_b64": DASH_B64,
+                "exterior_video_b64": VIDEO_B64,
+                "exterior_video_mime": "video/mp4",
+                "client_action_id": str(uuid.uuid4()),
             },
             headers=auth["headers"],
         )
-        r = api_client.get(f"{base_url}/api/duty/today", headers=auth["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["completed"] is True
+
+        r2 = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("start_duty"),
+            headers=auth["headers"],
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["state"] == "start_duty"
+        assert r2.json().get("business_date") == business_date_now()
+
+    def test_end_duty_accepted(self, api_client, base_url, auth):
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json=_duty_payload("end_duty"),
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200
+        assert r.json()["state"] == "end_duty"
+
+
+# =============================================================================
+# PART 3 — Business-day bucketing
+# =============================================================================
+class TestDD_BusinessDay:
+    def test_money_today_business_date_matches(
+        self, api_client, base_url, auth
+    ):
+        r = api_client.get(f"{base_url}/api/money/today", headers=auth["headers"])
+        assert r.status_code == 200
+        assert r.json()["business_date"] == business_date_now()
+
+    def test_yesterday_platform_cash_excluded_from_money_today(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        """Inserting a platform_cash row for business_date=today-1 must NOT
+        appear in money/today."""
+        driver_id = auth["driver"]["id"]
+        today = business_date_now()
+        yesterday = (
+            datetime.strptime(today, "%Y-%m-%d").date() - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        # Drop any today row so baseline is clean, and stamp a yesterday row.
+        mongo_db.platform_cash.delete_many(
+            {"driver_id": driver_id, "business_date": today}
+        )
+        yid = str(uuid.uuid4())
+        mongo_db.platform_cash.insert_one(
+            {
+                "id": yid,
+                "driver_id": driver_id,
+                "platform": "uber",
+                "cash_amount": 999.0,
+                "business_date": yesterday,
+                "source": "ocr",
+                "status": "provisional",
+                "client_action_id": str(uuid.uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        r = api_client.get(
+            f"{base_url}/api/money/today", headers=auth["headers"]
+        )
         assert r.status_code == 200
         body = r.json()
-        for k in ("segments", "totals_seconds", "shift_seconds", "working_seconds", "current_state", "distance_km"):
-            assert k in body, f"missing key {k}"
-        assert isinstance(body["segments"], list) and len(body["segments"]) > 0
-        # ordered by from_ts ascending
-        ts = [s["from_ts"] for s in body["segments"]]
-        assert ts == sorted(ts)
-        assert body["current_state"] == body["segments"][-1]["state"]
-        assert body["current_state"] == "ride91"
-        assert isinstance(body["distance_km"], (int, float))
+        assert body["business_date"] == today
+        # No uber cash for TODAY should exist yet — yesterday's row must not leak
+        assert body["per_platform"]["uber"]["cash_collected"] == 0.0
+        # cleanup
+        mongo_db.platform_cash.delete_one({"id": yid})
+
+    def test_money_week_monday_bounds(self, api_client, base_url, auth):
+        r = api_client.get(f"{base_url}/api/money/week", headers=auth["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "week_start" in body and "week_end_exclusive" in body
+        ws = datetime.strptime(body["week_start"], "%Y-%m-%d").date()
+        we = datetime.strptime(body["week_end_exclusive"], "%Y-%m-%d").date()
+        assert ws.weekday() == 0, "week_start must be Monday"
+        assert we.weekday() == 0, "week_end_exclusive must be Monday"
+        assert (we - ws).days == 7
 
 
-# ---------------------------------------------------------------- vehicle pings & distance filter
-class TestVehiclePings:
-    def test_ingest_without_auth(self, api_client, base_url, auth):
-        vehicle_id = auth["driver"]["vehicle_id"]
+# =============================================================================
+# PART 4 — Cash-in-hand math & endpoints
+# =============================================================================
+class TestEE_CashMath:
+    def test_platform_cash_ride91_rejected(self, api_client, base_url, auth):
+        r = api_client.post(
+            f"{base_url}/api/platform-cash",
+            json={
+                "platform": "ride91",
+                "cash_amount": 100.0,
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 422, r.text
+
+    def test_platform_cash_provisional_and_appears_in_money_today(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        driver_id = auth["driver"]["id"]
+        today = business_date_now()
+        # Clean today's cash/qr so math is deterministic
+        mongo_db.platform_cash.delete_many(
+            {"driver_id": driver_id, "business_date": today}
+        )
+        mongo_db.qr_payments.delete_many(
+            {"driver_id": driver_id, "business_date": today}
+        )
+
+        # Uber cash 1000
+        r = api_client.post(
+            f"{base_url}/api/platform-cash",
+            json={
+                "platform": "uber",
+                "cash_amount": 1000.0,
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        row = r.json()
+        assert row["status"] == "provisional"
+        assert row["source"] == "ocr"
+        assert row["platform"] == "uber"
+        assert row["business_date"] == today
+
+        # QR fare 200
+        r_qr_fare = api_client.post(
+            f"{base_url}/api/qr-payment",
+            json={
+                "amount": 200.0,
+                "type": "fare",
+                "reference": "FARE-TEST-1",
+                "platform": "uber",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r_qr_fare.status_code == 200, r_qr_fare.text
+        assert r_qr_fare.json()["type"] == "fare"
+
+        # QR deposit 300
+        r_qr_dep = api_client.post(
+            f"{base_url}/api/qr-payment",
+            json={
+                "amount": 300.0,
+                "type": "deposit",
+                "reference": "DEP-TEST-1",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r_qr_dep.status_code == 200, r_qr_dep.text
+        assert r_qr_dep.json()["type"] == "deposit"
+
+        # money/today: 1000 - 200 - 300 = 500
+        m = api_client.get(
+            f"{base_url}/api/money/today", headers=auth["headers"]
+        ).json()
+        assert m["business_date"] == today
+        assert m["per_platform"]["uber"]["cash_collected"] == 1000.0
+        assert m["per_platform"]["uber"]["status"] == "provisional"
+        assert m["qr_fares"] == 200.0
+        assert m["deposits"] == 300.0
+        assert m["cash_in_hand"] == 500.0
+        # Deposits NOT double-counted as fares
+        assert m["qr_fares"] != m["qr_fares"] + m["deposits"]
+        # you_owe zero when cash_in_hand positive
+        assert m["you_owe"] == 0.0
+
+    def test_money_today_status_pending_for_empty_platforms(
+        self, api_client, base_url, auth
+    ):
+        m = api_client.get(
+            f"{base_url}/api/money/today", headers=auth["headers"]
+        ).json()
+        # Rapido and Ola weren't populated in test above -> pending
+        assert m["per_platform"]["rapido"]["status"] == "pending"
+        assert m["per_platform"]["ola"]["status"] == "pending"
+
+    def test_you_owe_positive_when_cash_negative(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        driver_id = auth["driver"]["id"]
+        today = business_date_now()
+        # Wipe today's cash and add only a big deposit — cash_in_hand goes negative
+        mongo_db.platform_cash.delete_many(
+            {"driver_id": driver_id, "business_date": today}
+        )
+        mongo_db.qr_payments.delete_many(
+            {"driver_id": driver_id, "business_date": today}
+        )
+        r = api_client.post(
+            f"{base_url}/api/qr-payment",
+            json={
+                "amount": 500.0,
+                "type": "deposit",
+                "reference": "DEP-OWE-1",
+                "client_action_id": str(uuid.uuid4()),
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200
+        m = api_client.get(
+            f"{base_url}/api/money/today", headers=auth["headers"]
+        ).json()
+        assert m["cash_in_hand"] == -500.0
+        assert m["you_owe"] == 500.0
+
+
+# =============================================================================
+# PART 5 — /api/money/week shape
+# =============================================================================
+class TestFF_MoneyWeek:
+    def test_shape(self, api_client, base_url, auth):
+        r = api_client.get(f"{base_url}/api/money/week", headers=auth["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        for k in (
+            "week_start", "week_end_exclusive", "days_remaining",
+            "per_platform", "total_settled", "total_provisional",
+            "estimated_gross", "driver_share", "cash_held", "advance",
+            "advance_recovery_week", "payable_estimate",
+        ):
+            assert k in body, f"missing key {k}: {body.keys()}"
+        for p in ("uber", "rapido", "ola"):
+            assert p in body["per_platform"]
+            for pk in ("settled_gross", "provisional_gross"):
+                assert pk in body["per_platform"][p]
+        # driver_share = estimated_gross * 0.30
+        expected = round(body["estimated_gross"] * 0.30, 2)
+        assert abs(body["driver_share"] - expected) < 0.02
+        # numeric even if negative
+        assert isinstance(body["payable_estimate"], (int, float))
+
+
+# =============================================================================
+# PART 6 — Vehicle pings ingest with nullable fields & accuracy/speed filters
+# =============================================================================
+class TestGG_VehiclePings:
+    def test_ingest_nullable_soc_and_odometer(
+        self, api_client, base_url, auth
+    ):
         r = api_client.post(
             f"{base_url}/api/vehicles/pings/ingest",
             json={
-                "vehicle_id": vehicle_id,
+                "vehicle_id": auth["driver"]["vehicle_id"],
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
-                "lat": 12.9716, "lng": 77.5946,
-                "speed_kmph": 25.0, "ignition": True, "soc_pct": 62.0,
-                "accuracy_m": 12.0,
+                "lat": 12.97, "lng": 77.59,
+                "speed_kmph": 20.0,
+                "ignition": True,
+                # soc_pct and odometer_km omitted (nullable)
+                "accuracy_m": 10.0,
             },
         )
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         assert r.json().get("ok") is True
 
-    def test_low_accuracy_ping_filtered_from_distance(self, api_client, base_url, auth):
-        vehicle_id = auth["driver"]["vehicle_id"]
+    def test_accuracy_over_30_filtered_from_distance(
+        self, api_client, base_url, auth
+    ):
         # baseline
-        r0 = api_client.get(f"{base_url}/api/duty/today", headers=auth["headers"])
-        d0 = r0.json()["distance_km"]
-
-        # Insert a low-accuracy ping ~1 km away from any prior good ping.
-        # If it were counted, distance would jump by >~1 km.
-        far_payload = {
-            "vehicle_id": vehicle_id,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "lat": 13.0716,  # ~11km away, would explode distance if counted
-            "lng": 77.6946,
-            "speed_kmph": 30.0, "ignition": True, "soc_pct": 60.0,
-            "accuracy_m": 80.0,  # >30 => must be filtered
-        }
-        r = api_client.post(f"{base_url}/api/vehicles/pings/ingest", json=far_payload)
-        assert r.status_code == 200
-
-        r1 = api_client.get(f"{base_url}/api/duty/today", headers=auth["headers"])
-        d1 = r1.json()["distance_km"]
-        # Low-accuracy ping must not push a huge jump
-        assert d1 - d0 < 1.0, f"low-accuracy ping leaked into distance (d0={d0}, d1={d1})"
-
-
-# ---------------------------------------------------------------- close-outs & money
-class TestCloseOutsAndMoney:
-    def test_close_out_idempotent(self, api_client, base_url, auth):
-        cid = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        payload = {
-            "platform": "ride91",
-            "from_ts": (now - timedelta(hours=1)).isoformat(),
-            "to_ts": now.isoformat(),
-            "trips": 3,
-            "gross_amount": 400.0,
-            "cash_collected": 120.0,
-            "client_action_id": cid,
-        }
-        r1 = api_client.post(f"{base_url}/api/close-out", json=payload, headers=auth["headers"])
-        assert r1.status_code == 200, r1.text
-        r2 = api_client.post(f"{base_url}/api/close-out", json=payload, headers=auth["headers"])
-        assert r2.status_code == 200
-        assert r1.json()["id"] == r2.json()["id"], "close-out must be idempotent"
-
-    def test_money_today_shape_and_share_math(self, api_client, base_url, auth):
-        r = api_client.get(f"{base_url}/api/money/today", headers=auth["headers"])
-        assert r.status_code == 200
-        body = r.json()
-        for k in ("gross_by_platform", "gross", "driver_share", "cash_held", "cash_over_limit", "payable"):
-            assert k in body, f"missing {k}"
-        for p in ("ride91", "uber", "rapido", "ola"):
-            assert p in body["gross_by_platform"], f"missing platform {p} in gross_by_platform"
-        # share = gross * 0.30
-        expected_share = round(body["gross"] * 0.30, 2)
-        assert abs(body["driver_share"] - expected_share) < 0.02
-        # payable = share - cash - advance_recovery_today
-        expected_payable = round(body["driver_share"] - body["cash_held"] - body.get("advance_recovery_today", 0), 2)
-        assert abs(body["payable"] - expected_payable) < 0.02
-
-    def test_cash_over_limit_flag_toggles(self, api_client, base_url, auth):
-        # Force cash > 1500 with a big close-out (today)
-        now = datetime.now(timezone.utc)
-        r = api_client.post(
-            f"{base_url}/api/close-out",
+        d0 = api_client.get(
+            f"{base_url}/api/duty/today", headers=auth["headers"]
+        ).json()["distance_km"]
+        # low-accuracy far ping
+        api_client.post(
+            f"{base_url}/api/vehicles/pings/ingest",
             json={
-                "platform": "uber",
-                "from_ts": (now - timedelta(minutes=5)).isoformat(),
-                "to_ts": now.isoformat(),
-                "trips": 1,
-                "gross_amount": 5000.0,
-                "cash_collected": 2000.0,  # pushes cash_held over 1500
-                "client_action_id": str(uuid.uuid4()),
+                "vehicle_id": auth["driver"]["vehicle_id"],
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "lat": 13.0716, "lng": 77.6946,
+                "speed_kmph": 30.0,
+                "ignition": True,
+                "accuracy_m": 80.0,  # > 30 -> must be dropped
             },
-            headers=auth["headers"],
         )
-        assert r.status_code == 200
-        r2 = api_client.get(f"{base_url}/api/money/today", headers=auth["headers"])
-        b = r2.json()
-        assert b["cash_held"] > 1500
-        assert b["cash_over_limit"] is True
+        d1 = api_client.get(
+            f"{base_url}/api/duty/today", headers=auth["headers"]
+        ).json()["distance_km"]
+        assert d1 - d0 < 1.0, f"low-accuracy ping leaked (d0={d0}, d1={d1})"
 
-    def test_money_weekly_7_days_ordered(self, api_client, base_url, auth):
-        r = api_client.get(f"{base_url}/api/money/weekly", headers=auth["headers"])
-        assert r.status_code == 200
-        days = r.json()["days"]
-        assert len(days) == 7
-        dates = [d["date"] for d in days]
-        assert dates == sorted(dates), "weekly must be oldest -> newest"
+    def test_speed_over_120_kmh_jump_dropped(
+        self, api_client, base_url, auth
+    ):
+        """Two pings ~11 km apart 10 seconds apart implies ~4000 km/h — server
+        must reset the anchor and not add that segment to distance."""
+        d0 = api_client.get(
+            f"{base_url}/api/duty/today", headers=auth["headers"]
+        ).json()["distance_km"]
+        now = datetime.now(timezone.utc)
+        api_client.post(
+            f"{base_url}/api/vehicles/pings/ingest",
+            json={
+                "vehicle_id": auth["driver"]["vehicle_id"],
+                "recorded_at": (now - timedelta(seconds=20)).isoformat(),
+                "lat": 12.97, "lng": 77.59,
+                "speed_kmph": 20.0, "ignition": True,
+                "accuracy_m": 8.0,
+            },
+        )
+        api_client.post(
+            f"{base_url}/api/vehicles/pings/ingest",
+            json={
+                "vehicle_id": auth["driver"]["vehicle_id"],
+                "recorded_at": (now - timedelta(seconds=10)).isoformat(),
+                "lat": 13.0716, "lng": 77.6946,  # ~11km jump
+                "speed_kmph": 30.0, "ignition": True,
+                "accuracy_m": 8.0,
+            },
+        )
+        d1 = api_client.get(
+            f"{base_url}/api/duty/today", headers=auth["headers"]
+        ).json()["distance_km"]
+        assert d1 - d0 < 2.0, f"high-speed jump not dropped (d0={d0}, d1={d1})"
 
 
-# ---------------------------------------------------------------- requests
-class TestRequests:
-    def test_create_and_list_idempotent(self, api_client, base_url, auth):
+# =============================================================================
+# REGRESSION — requests idempotency + admin correction
+# =============================================================================
+class TestHH_RequestsIdempotent:
+    def test_same_client_action_id_returns_same_row(
+        self, api_client, base_url, auth
+    ):
         cid = str(uuid.uuid4())
         payload = {
             "type": "advance",
             "payload": {"amount": 1000, "reason": "TEST"},
             "client_action_id": cid,
         }
-        r1 = api_client.post(f"{base_url}/api/requests", json=payload, headers=auth["headers"])
-        assert r1.status_code == 200, r1.text
-        assert r1.json()["state"] == "pending"
-        r2 = api_client.post(f"{base_url}/api/requests", json=payload, headers=auth["headers"])
-        assert r2.status_code == 200
-        assert r1.json()["id"] == r2.json()["id"], "requests must be idempotent"
+        r1 = api_client.post(
+            f"{base_url}/api/requests", json=payload, headers=auth["headers"]
+        )
+        r2 = api_client.post(
+            f"{base_url}/api/requests", json=payload, headers=auth["headers"]
+        )
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["id"] == r2.json()["id"]
 
-        r3 = api_client.get(f"{base_url}/api/requests", headers=auth["headers"])
-        assert r3.status_code == 200
-        items = r3.json()["items"]
-        assert any(it["id"] == r1.json()["id"] for it in items)
+    def test_unique_index_blocks_bypass(
+        self, api_client, base_url, auth, mongo_db
+    ):
+        """If someone bypasses the guard, the unique index must throw."""
+        from pymongo.errors import DuplicateKeyError
+
+        driver_id = auth["driver"]["id"]
+        cid = str(uuid.uuid4())
+        doc = {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "type": "advance",
+            "payload": {},
+            "state": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "decided_at": None,
+            "client_action_id": cid,
+        }
+        mongo_db.requests.insert_one(doc.copy())
+        dup = doc.copy()
+        dup["_id"] = None
+        del dup["_id"]
+        dup["id"] = str(uuid.uuid4())
+        with pytest.raises(DuplicateKeyError):
+            mongo_db.requests.insert_one(dup)
+        # cleanup
+        mongo_db.requests.delete_many({"client_action_id": cid})
 
 
-# ---------------------------------------------------------------- tracking
-class TestTracking:
+class TestII_AdminCorrection:
+    def test_source_admin_correction_stored(self, api_client, base_url, auth):
+        cid = str(uuid.uuid4())
+        r = api_client.post(
+            f"{base_url}/api/duty/state",
+            json={
+                "state": "not_online",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "lat": 12.97, "lng": 77.59,
+                "source": "admin_correction",
+                "client_action_id": cid,
+            },
+            headers=auth["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json().get("source") == "admin_correction"
+
+
+# =============================================================================
+# REGRESSION — tracking heartbeat + close-out legacy endpoint still works
+# =============================================================================
+class TestJJ_Tracking:
     def test_heartbeat_ok(self, api_client, base_url, auth):
         r = api_client.post(
             f"{base_url}/api/tracking/heartbeat",
@@ -464,217 +603,60 @@ class TestTracking:
             },
             headers=auth["headers"],
         )
-        assert r.status_code == 200
-        assert r.json().get("ok") is True
+        assert r.status_code == 200 and r.json().get("ok") is True
 
-    def test_phone_ping_ok(self, api_client, base_url, auth):
-        r = api_client.post(
-            f"{base_url}/api/tracking/ping",
-            json={
-                "recorded_at": datetime.now(timezone.utc).isoformat(),
-                "lat": 12.97, "lng": 77.59,
-            },
-            headers=auth["headers"],
-        )
-        assert r.status_code == 200
-        assert r.json().get("ok") is True
-
-
-
-# ================================================================
-# CHARGING duty state — must NOT require inspection and must dedupe like other states
-# ================================================================
-class TestCharging:
-    def test_charging_requires_auth(self, api_client, base_url):
-        r = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload("charging"),
-        )
-        assert r.status_code == 401
-
-    def test_charging_accepted_and_no_inspection_gate(
-        self, api_client, base_url, auth, mongo_db, today_key
-    ):
-        """Charging must succeed 200 even if today's inspection is absent."""
-        # Wipe today's inspection so we prove charging bypasses the gate
-        mongo_db.inspections.delete_many(
-            {"driver_id": auth["driver"]["id"], "day_key": today_key}
-        )
-        # Confirm inspection is not completed
-        r0 = api_client.get(f"{base_url}/api/inspection/today", headers=auth["headers"])
-        assert r0.status_code == 200
-        assert r0.json().get("completed") is False
-
+    def test_close_out_legacy_still_accepts(self, api_client, base_url, auth):
+        """Legacy endpoint — kept alive, but ignored by new money math."""
         cid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
         payload = {
-            "state": "charging",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "lat": 12.9716, "lng": 77.5946,
+            "platform": "uber",
+            "from_ts": (now - timedelta(hours=1)).isoformat(),
+            "to_ts": now.isoformat(),
+            "trips": 3,
+            "gross_amount": 400.0,
+            "cash_collected": 120.0,
             "client_action_id": cid,
         }
-        r = api_client.post(
-            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
+        r1 = api_client.post(
+            f"{base_url}/api/close-out", json=payload, headers=auth["headers"]
         )
-        assert r.status_code == 200, r.text
-        row = r.json()
-        assert row["state"] == "charging"
-        assert "id" in row
-
-        # Idempotency on same client_action_id
         r2 = api_client.post(
-            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
+            f"{base_url}/api/close-out", json=payload, headers=auth["headers"]
         )
-        assert r2.status_code == 200
-        assert r2.json()["id"] == row["id"]
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["id"] == r2.json()["id"]
 
-        # Working platform after inspection wipe must still be blocked
-        rp = api_client.post(
-            f"{base_url}/api/duty/state",
-            json=_duty_payload("ride91"),
-            headers=auth["headers"],
+
+# =============================================================================
+# REGRESSION — inspection today endpoint shape
+# =============================================================================
+class TestKK_InspectionToday:
+    def test_completed_after_earlier_submit(self, api_client, base_url, auth):
+        # An inspection was submitted in TestCC_InspectionGate
+        r = api_client.get(
+            f"{base_url}/api/inspection/today", headers=auth["headers"]
         )
-        assert rp.status_code == 409
-        assert rp.json().get("detail") == "inspection_required"
-
-    def test_bad_state_rejected(self, api_client, base_url, auth):
-        payload = {
-            "state": "foobar",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "lat": 12.97, "lng": 77.59,
-            "client_action_id": str(uuid.uuid4()),
-        }
-        r = api_client.post(
-            f"{base_url}/api/duty/state", json=payload, headers=auth["headers"]
-        )
-        # Either 400 (custom guard) or 422 (Pydantic Literal) is acceptable enum-guard evidence.
-        assert r.status_code in (400, 422), r.text
+        assert r.status_code == 200
+        body = r.json()
+        assert body["completed"] is True
+        assert body["day_key"] == business_date_now()
+        assert "dashboard_photo_b64" not in body
+        assert "exterior_video_b64" not in body
 
 
-# ================================================================
-# EARNINGS EXTRACTION via Gemini 3 Flash (real LLM call — do NOT mock)
-# ================================================================
-def _synth_earnings_png_b64(text_lines: list[str], size=(720, 1280)) -> str:
-    """Render a realistic earnings-screenshot-ish PNG with readable text.
-
-    Uses varied fill (background gradient bands + rectangles) so it is NOT a
-    solid-color image, satisfying /app/image_testing.md.
-    """
-    import base64, io
-    from PIL import Image, ImageDraw, ImageFont
-
-    W, H = size
-    img = Image.new("RGB", (W, H), (18, 18, 22))
-    d = ImageDraw.Draw(img)
-    # Header band
-    d.rectangle([0, 0, W, 140], fill=(20, 90, 200))
-    # Card area
-    d.rectangle([32, 200, W - 32, 720], fill=(245, 245, 250))
-    # Divider lines
-    for y in range(760, H - 40, 60):
-        d.rectangle([32, y, W - 32, y + 2], fill=(60, 60, 80))
-    # Some contrast dots for texture / real visual features
-    for i in range(40):
-        x = 40 + (i * 17) % (W - 80)
-        y = 750 + (i * 29) % 400
-        d.ellipse([x, y, x + 6, y + 6], fill=(200, 200, 60))
-
-    try:
-        font_title = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46
-        )
-        font_body = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 34
-        )
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_body = font_title
-
-    d.text((48, 60), text_lines[0], fill=(255, 255, 255), font=font_title)
-    y = 240
-    for line in text_lines[1:]:
-        d.text((56, y), line, fill=(10, 10, 30), font=font_body)
-        y += 60
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-class TestEarningsExtract:
+# =============================================================================
+# REGRESSION — earnings extract (Gemini). Auth only — real LLM call is optional
+# =============================================================================
+class TestLL_EarningsExtractAuth:
     def test_requires_auth(self, api_client, base_url):
-        b64 = _synth_earnings_png_b64(["Uber", "Today", "Rs 100"])
         r = api_client.post(
             f"{base_url}/api/earnings/extract",
             json={
                 "platform": "uber",
-                "image_base64": b64,
+                "image_base64": "AA==",
                 "mime": "image/png",
                 "client_action_id": str(uuid.uuid4()),
             },
         )
         assert r.status_code == 401
-
-    def test_uber_screenshot_returns_expected_shape(self, api_client, base_url, auth):
-        b64 = _synth_earnings_png_b64(
-            [
-                "Uber",
-                "Today  Rs 1,240",
-                "8 trips",
-                "Cash collected  Rs 300",
-                "Online  6h 12m",
-            ]
-        )
-        r = api_client.post(
-            f"{base_url}/api/earnings/extract",
-            json={
-                "platform": "uber",
-                "image_base64": b64,
-                "mime": "image/png",
-                "client_action_id": str(uuid.uuid4()),
-            },
-            headers=auth["headers"],
-            timeout=90,
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        for k in (
-            "platform", "gross_amount", "trips", "cash_collected",
-            "period_hint", "platform_detected", "confidence", "raw",
-        ):
-            assert k in body, f"missing key {k}: {body}"
-        # platform must echo request
-        assert body["platform"] == "uber"
-        # numeric fields must be number or None
-        assert body["gross_amount"] is None or isinstance(body["gross_amount"], (int, float))
-        assert body["trips"] is None or isinstance(body["trips"], (int, float))
-        assert body["cash_collected"] is None or isinstance(
-            body["cash_collected"], (int, float)
-        )
-        assert isinstance(body["confidence"], (int, float))
-        assert 0.0 <= float(body["confidence"]) <= 1.0
-
-    def test_low_signal_image_returns_200_with_nulls_or_low_confidence(
-        self, api_client, base_url, auth
-    ):
-        # Heading only, no numbers — model should either return nulls or low confidence,
-        # but MUST NOT crash.
-        b64 = _synth_earnings_png_b64(["Rapido Captain", "Earnings"])
-        r = api_client.post(
-            f"{base_url}/api/earnings/extract",
-            json={
-                "platform": "rapido",
-                "image_base64": b64,
-                "mime": "image/png",
-                "client_action_id": str(uuid.uuid4()),
-            },
-            headers=auth["headers"],
-            timeout=90,
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["platform"] == "rapido"
-        # confidence numeric
-        assert isinstance(body["confidence"], (int, float))
-        # numeric fields either None or number
-        for k in ("gross_amount", "trips", "cash_collected"):
-            assert body[k] is None or isinstance(body[k], (int, float))

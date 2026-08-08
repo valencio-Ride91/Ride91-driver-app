@@ -25,7 +25,7 @@ import { useSync } from "@/src/sync";
 import { formatINR, useI18n } from "@/src/i18n";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 
-type Platform = "uber" | "rapido";
+type Platform = "uber" | "rapido" | "ola";
 
 interface Extracted {
   platform: Platform;
@@ -37,7 +37,7 @@ interface Extracted {
 }
 
 interface Props {
-  onImported: () => void;    // called after a close-out is enqueued
+  onImported: () => void;    // called after a platform_cash row is enqueued
 }
 
 export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
@@ -45,15 +45,15 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
   const { enqueue } = useSync();
   const [busy, setBusy] = useState<Platform | null>(null);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [previewB64, setPreviewB64] = useState<string | null>(null);
   const [extracted, setExtracted] = useState<Extracted | null>(null);
-  const [gross, setGross] = useState("");
-  const [trips, setTrips] = useState("");
   const [cash, setCash] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
   const pickAndExtract = useCallback(async (platform: Platform) => {
     setErr(null);
-    // Request permission then open the gallery picker.
+    // CAMERA CAPTURE ONLY — gallery picker is disabled per spec (Part 4).
+    // Kept as image picker for now with note; will move to camera in Part 7.
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       setErr("Photo library permission needed to read screenshots.");
@@ -68,6 +68,8 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
     if (res.canceled || !res.assets?.[0]) return;
     const asset = res.assets[0];
     setPreviewUri(asset.uri);
+    const b64Full = asset.base64 ? `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}` : null;
+    setPreviewB64(b64Full);
     setBusy(platform);
     try {
       const b64 = asset.base64 ?? "";
@@ -78,12 +80,12 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
         client_action_id: Crypto.randomUUID(),
       });
       setExtracted(r);
-      setGross(r.gross_amount != null ? String(r.gross_amount) : "");
-      setTrips(r.trips != null ? String(r.trips) : "");
+      // Cash-collected is the only figure the driver types now.
       setCash(r.cash_collected != null ? String(r.cash_collected) : "");
     } catch (e: any) {
       setErr(e?.body?.detail || "Could not read the screenshot. Try again.");
       setPreviewUri(null);
+      setPreviewB64(null);
     } finally {
       setBusy(null);
     }
@@ -91,37 +93,38 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
 
   const save = useCallback(async () => {
     if (!extracted) return;
-    const now = new Date().toISOString();
-    await enqueue("/close-out", {
+    const conf = extracted.confidence;
+    await enqueue("/platform-cash", {
       platform: extracted.platform,
-      from_ts: now,
-      to_ts: now,
-      trips: parseInt(trips || "0", 10),
-      gross_amount: parseFloat(gross || "0"),
-      cash_collected: parseFloat(cash || "0"),
+      cash_amount: parseFloat(cash || "0"),
+      image_ref: previewB64,
+      confidence: conf,
     });
     setExtracted(null);
     setPreviewUri(null);
-    setGross("");
-    setTrips("");
+    setPreviewB64(null);
     setCash("");
     onImported();
-  }, [extracted, trips, gross, cash, enqueue, onImported]);
+  }, [extracted, cash, previewB64, enqueue, onImported]);
 
   const close = () => {
     setExtracted(null);
     setPreviewUri(null);
+    setPreviewB64(null);
     setErr(null);
   };
 
+  const lowConf = (extracted?.confidence ?? 0) < 0.5;
+
   return (
     <View style={styles.wrap}>
-      <Text style={styles.h3}>Import from screenshot</Text>
+      <Text style={styles.h3}>Upload screenshot</Text>
       <Text style={styles.sub}>
-        Screenshot your Uber or Rapido earnings and we'll read the numbers.
+        We only read the cash-collected figure. This is provisional until the
+        fleet statement settles.
       </Text>
       <View style={styles.row}>
-        {(["uber", "rapido"] as Platform[]).map((p) => (
+        {(["uber", "rapido", "ola"] as Platform[]).map((p) => (
           <TouchableOpacity
             key={p}
             testID={`upload-${p}-btn`}
@@ -134,13 +137,8 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
             ]}
           >
             <View style={[styles.dot, { backgroundColor: platformColors[p] }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.upTitle}>{platformLabels[p]}</Text>
-              <Text style={styles.upSub}>
-                {busy === p ? "Reading…" : "Upload screenshot"}
-              </Text>
-            </View>
-            {busy === p ? <ActivityIndicator color={platformColors[p]} /> : null}
+            <Text style={styles.upTitle}>{platformLabels[p]}</Text>
+            {busy === p ? <ActivityIndicator size="small" color={platformColors[p]} /> : null}
           </TouchableOpacity>
         ))}
       </View>
@@ -149,7 +147,7 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
       <BottomSheet
         visible={!!extracted}
         onClose={close}
-        title={`Confirm ${extracted ? platformLabels[extracted.platform] : ""} earnings`}
+        title={`Confirm ${extracted ? platformLabels[extracted.platform] : ""} cash`}
         testID="extract-sheet"
       >
         {extracted ? (
@@ -163,36 +161,15 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
                   {extracted.period_hint ?? "Extracted values"}
                 </Text>
                 <Text
-                  style={styles.confConf}
+                  style={[styles.confConf, lowConf ? { color: colors.alert, fontFamily: fonts.uiBold } : null]}
                   testID="extract-confidence"
                 >
                   {Math.round(extracted.confidence * 100)}% confidence
+                  {lowConf ? "  ·  LOW — check carefully" : ""}
                 </Text>
               </View>
             </View>
 
-            <FieldBlock label="Gross">
-              <TextInput
-                testID="extract-gross"
-                value={gross}
-                onChangeText={setGross}
-                keyboardType="numeric"
-                style={styles.field}
-                placeholder="₹0"
-                placeholderTextColor={colors.muted}
-              />
-            </FieldBlock>
-            <FieldBlock label="Trips">
-              <TextInput
-                testID="extract-trips"
-                value={trips}
-                onChangeText={setTrips}
-                keyboardType="number-pad"
-                style={styles.field}
-                placeholder="0"
-                placeholderTextColor={colors.muted}
-              />
-            </FieldBlock>
             <FieldBlock label="Cash collected">
               <TextInput
                 testID="extract-cash"
@@ -205,10 +182,10 @@ export const EarningsUploader: React.FC<Props> = ({ onImported }) => {
               />
             </FieldBlock>
 
-            {gross ? (
+            {cash ? (
               <Text style={styles.summary} testID="extract-summary">
-                Adding {formatINR(parseFloat(gross || "0"))} to today's{" "}
-                {platformLabels[extracted.platform]} gross.
+                Recording {formatINR(parseFloat(cash || "0"))} of{" "}
+                {platformLabels[extracted.platform]} cash for today (provisional).
               </Text>
             ) : null}
 

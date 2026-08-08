@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -10,7 +9,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 
 import { AppHeader } from "@/src/components/AppHeader";
-import { BottomSheet } from "@/src/components/ui";
 import { DutyStripe } from "@/src/components/DutyStripe";
 import { DriverMap } from "@/src/components/DriverMap";
 import { DepositSheet } from "@/src/components/DepositSheet";
@@ -19,35 +17,51 @@ import { useI18n, formatDuration, formatINR } from "@/src/i18n";
 import { useDuty } from "@/src/duty";
 import { useTracking } from "@/src/tracking";
 import { useAuth } from "@/src/auth";
-import { useSync } from "@/src/sync";
 import { api } from "@/src/api";
 
-const PLATFORMS = ["ride91", "uber", "rapido", "ola"] as const;
-const QUICK = ["uber", "rapido"] as const;
-const WORKING = new Set(["ride91", "uber", "rapido", "ola"]);
-
-interface CloseOutTarget {
-  platform: string;
-  from_ts: string;
-  to_ts: string;
-}
+// Two clearly-labelled rows: Duty (Start/On/End) and Platform (Uber/Rapido/Ola/Not online).
+// Ride91 is NOT in the platform list — Ride91 is the employment layer.
+const PLATFORMS = ["uber", "rapido", "ola"] as const;
 
 export default function Home() {
   const { t } = useI18n();
   const { today, switchState, refresh } = useDuty();
   const { lat, lng } = useTracking();
   const { driver, vehicle } = useAuth();
-  const { enqueue } = useSync();
   const router = useRouter();
 
-  const [selectorOpen, setSelectorOpen] = useState(false);
-  const [closeOut, setCloseOut] = useState<CloseOutTarget | null>(null);
-  const [trips, setTrips] = useState("");
-  const [amount, setAmount] = useState("");
-  const [cash, setCash] = useState("");
+  // Deposit banner state (unchanged behaviour).
+  const [cashHeld, setCashHeld] = useState(0);
+  const [cashLimit, setCashLimit] = useState(1500);
+  const [youOwe, setYouOwe] = useState(0);
+  const [qrOpen, setQrOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.get<{
+          cash_in_hand: number;
+          cash_limit: number;
+          you_owe: number;
+        }>("/money/today");
+        if (!alive) return;
+        setCashHeld(r.cash_in_hand);
+        setCashLimit(r.cash_limit);
+        setYouOwe(r.you_owe);
+      } catch {
+        // keep previous
+      }
+    };
+    load();
+    const id = setInterval(load, 15000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+  const overLimit = cashHeld > cashLimit;
 
-  // Inspection status for today. Polled so the gate lifts as soon as the
-  // driver returns from /inspection.
+  // Inspection status. Auto-redirect on first-of-day if not complete.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
   useEffect(() => {
     let alive = true;
@@ -67,77 +81,34 @@ export default function Home() {
     };
   }, []);
 
-  // Deposit reminder: derived from /money/today. Polled here (small, cheap).
-  const [cashHeld, setCashHeld] = useState(0);
-  const [cashLimit, setCashLimit] = useState(1500);
-  const [qrOpen, setQrOpen] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await api.get<{ cash_held: number; cash_limit: number }>(
-          "/money/today",
-        );
-        if (!alive) return;
-        setCashHeld(r.cash_held);
-        setCashLimit(r.cash_limit);
-      } catch {
-        // keep previous
-      }
-    };
-    load();
-    const id = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
-  const overLimit = cashHeld > cashLimit;
+  const onDuty = !!today?.on_duty;
+  const currentPlatform = today?.current_platform ?? null;
 
-  // On first shift-start (no state yet today) with no inspection, redirect
-  // to the hard gate. Otherwise let the driver drive the Online toggle.
-  useEffect(() => {
-    if (!today || today.current_state) return;
-    if (inspectionOk === false) {
-      router.replace("/inspection");
+  // Duty toggle: Start duty → routes through inspection first. End duty
+  // simply appends end_duty. Both push a row into duty_states.
+  const startDuty = useCallback(async () => {
+    if (inspectionOk !== true) {
+      router.push("/inspection");
+      return;
     }
-  }, [today, inspectionOk, router]);
-
-  const current = today?.current_state ?? null;
-
-  const handleSwitch = useCallback(
-    async (state: string) => {
-      // Hard gate: any working platform requires today's inspection first.
-      const isWorking = state === "ride91" || state === "uber" || state === "rapido" || state === "ola";
-      if (isWorking && inspectionOk !== true) {
-        setSelectorOpen(false);
-        router.push("/inspection");
-        return;
-      }
-      setSelectorOpen(false);
-      await switchState(state, (info) => {
-        setCloseOut(info);
-        setTrips("");
-        setAmount("");
-        setCash("");
-      });
-    },
-    [switchState, inspectionOk, router],
-  );
-
-  const saveCloseOut = useCallback(async () => {
-    if (!closeOut) return;
-    await enqueue("/close-out", {
-      platform: closeOut.platform,
-      from_ts: closeOut.from_ts,
-      to_ts: closeOut.to_ts,
-      trips: parseInt(trips || "0", 10),
-      gross_amount: parseFloat(amount || "0"),
-      cash_collected: parseFloat(cash || "0"),
-    });
-    setCloseOut(null);
+    await switchState("start_duty", () => {});
     setTimeout(refresh, 800);
-  }, [closeOut, trips, amount, cash, enqueue, refresh]);
+  }, [inspectionOk, switchState, refresh, router]);
+
+  const endDuty = useCallback(async () => {
+    await switchState("end_duty", () => {});
+    setTimeout(refresh, 800);
+  }, [switchState, refresh]);
+
+  const pickPlatform = useCallback(
+    async (state: string) => {
+      if (!onDuty) return;
+      if (currentPlatform === state) return;
+      await switchState(state, () => {});
+      setTimeout(refresh, 400);
+    },
+    [onDuty, currentPlatform, switchState, refresh],
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -148,19 +119,21 @@ export default function Home() {
           testID="deposit-banner"
           style={styles.depositBanner}
           onPress={() => setQrOpen(true)}
-          activeOpacity={0.85}
         >
-          <View style={styles.depositLeft}>
-            <Text style={styles.depositIcon}>₹</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.depositTitle} testID="deposit-banner-title">
-                {t.cash_held}: {formatINR(cashHeld)}  ·  {t.over_limit}
-              </Text>
-              <Text style={styles.depositSub}>
-                {t.deposit_cash} →
-              </Text>
-            </View>
-          </View>
+          <Text style={styles.depositTitle} testID="deposit-banner-title">
+            Cash with you {formatINR(cashHeld)} · OVER LIMIT
+          </Text>
+          <Text style={styles.depositSub}>Deposit now →</Text>
+        </TouchableOpacity>
+      ) : youOwe > 0 ? (
+        <TouchableOpacity
+          testID="you-owe-banner"
+          style={styles.depositBanner}
+          onPress={() => setQrOpen(true)}
+        >
+          <Text style={styles.depositTitle}>
+            You owe {formatINR(youOwe)} — deposit your cash to clear it.
+          </Text>
         </TouchableOpacity>
       ) : null}
 
@@ -168,272 +141,154 @@ export default function Home() {
         <DriverMap lat={lat} lng={lng} />
       </View>
 
-      {/* Sticky status bar pinned above the map */}
       <View style={styles.statusBar} testID="status-bar">
-        {/* Row 1: Online/Offline toggle + Charging button */}
-        <View style={styles.toggleRow}>
-          <View style={styles.toggle} testID="online-offline-toggle">
-            <TouchableOpacity
-              testID="toggle-offline"
-              style={[
-                styles.toggleHalf,
-                current !== "charging" && !WORKING.has(current ?? "") ? styles.toggleHalfActive : null,
-              ]}
-              onPress={() => handleSwitch("offline")}
-            >
-              <Text
-                style={[
-                  styles.toggleText,
-                  current !== "charging" && !WORKING.has(current ?? "")
-                    ? styles.toggleTextActive
-                    : null,
-                ]}
+        {/* ROW 1 — Ride91 duty */}
+        <View style={styles.rowBlock} testID="duty-row">
+          <Text style={styles.rowLabel}>Ride91 duty</Text>
+          {onDuty ? (
+            <View style={styles.dutyRow}>
+              <View style={styles.dutyPill}>
+                <View style={styles.dutyDot} />
+                <Text style={styles.dutyPillText}>
+                  On duty · {formatDuration(today?.on_duty_seconds ?? 0)}
+                </Text>
+              </View>
+              <TouchableOpacity
+                testID="end-duty-btn"
+                style={styles.endBtn}
+                onPress={endDuty}
               >
-                Offline
-              </Text>
-            </TouchableOpacity>
+                <Text style={styles.endBtnText}>End duty</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
             <TouchableOpacity
-              testID="toggle-online"
-              style={[
-                styles.toggleHalf,
-                WORKING.has(current ?? "") ? styles.toggleHalfActiveOn : null,
-              ]}
-              onPress={() => {
-                // If already online, do nothing; else go to the last used
-                // working platform (Uber default) or the picker.
-                if (WORKING.has(current ?? "")) return;
-                const last = [...(today?.segments ?? [])]
-                  .reverse()
-                  .find((s) => WORKING.has(s.state))?.state as string | undefined;
-                handleSwitch(last ?? "uber");
-              }}
+              testID="start-duty-btn"
+              style={styles.startBtn}
+              onPress={startDuty}
             >
-              <Text
-                style={[
-                  styles.toggleText,
-                  WORKING.has(current ?? "") ? styles.toggleTextActive : null,
-                ]}
-              >
-                Online
-              </Text>
+              <Text style={styles.startBtnText}>Start duty</Text>
             </TouchableOpacity>
-          </View>
+          )}
+        </View>
 
+        {/* ROW 2 — Online on */}
+        <View style={styles.rowBlock} testID="platform-row">
+          <Text style={styles.rowLabel}>
+            Online on
+            {!onDuty ? (
+              <Text style={styles.rowLabelHint}>  · start duty to enable</Text>
+            ) : null}
+          </Text>
+          <View style={styles.platformRow}>
+            {PLATFORMS.map((p) => {
+              const active = currentPlatform === p;
+              return (
+                <TouchableOpacity
+                  key={p}
+                  testID={`platform-btn-${p}`}
+                  disabled={!onDuty}
+                  onPress={() => pickPlatform(p)}
+                  style={[
+                    styles.platformBtn,
+                    {
+                      backgroundColor: active
+                        ? platformColors[p]
+                        : colors.card,
+                      borderColor: onDuty ? platformColors[p] : colors.line,
+                      opacity: !onDuty ? 0.4 : 1,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.platformDot,
+                      {
+                        backgroundColor: active
+                          ? colors.white
+                          : platformColors[p],
+                      },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.platformBtnText,
+                      { color: active ? colors.white : colors.ink },
+                    ]}
+                  >
+                    {platformLabels[p]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
           <TouchableOpacity
-            testID="charging-btn"
+            testID="platform-btn-not_online"
+            disabled={!onDuty}
+            onPress={() => pickPlatform("not_online")}
             style={[
-              styles.chargeBtn,
-              current === "charging" ? styles.chargeBtnActive : null,
+              styles.notOnlineBtn,
+              currentPlatform === "not_online"
+                ? { backgroundColor: colors.ink, borderColor: colors.ink }
+                : null,
+              !onDuty ? { opacity: 0.4 } : null,
             ]}
-            onPress={() => handleSwitch(current === "charging" ? "offline" : "charging")}
           >
             <Text
               style={[
-                styles.chargeBtnText,
-                current === "charging" ? { color: colors.white } : null,
+                styles.notOnlineText,
+                currentPlatform === "not_online"
+                  ? { color: colors.white }
+                  : null,
               ]}
             >
-              {current === "charging" ? "◼ Stop charging" : "⚡ Charge"}
+              Not online on any app
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Row 2: When online, show quick Uber/Rapido + more link */}
-        {WORKING.has(current ?? "") ? (
-          <View style={styles.quickRow} testID="quick-platforms">
-            {QUICK.map((p) => (
-              <TouchableOpacity
-                key={p}
-                testID={`quick-btn-${p}`}
-                onPress={() => handleSwitch(p)}
-                style={[
-                  styles.quickBtn,
-                  {
-                    backgroundColor:
-                      current === p ? platformColors[p] : colors.card,
-                    borderColor: platformColors[p],
-                  },
-                ]}
-              >
-                <View
-                  style={[
-                    styles.quickDot,
-                    {
-                      backgroundColor:
-                        current === p ? colors.white : platformColors[p],
-                    },
-                  ]}
-                />
-                <Text
-                  style={[
-                    styles.quickText,
-                    { color: current === p ? colors.white : colors.ink },
-                  ]}
-                >
-                  {platformLabels[p]}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              testID="more-platforms-link"
-              onPress={() => setSelectorOpen(true)}
-              style={styles.moreBtn}
-            >
-              <Text style={styles.moreText}>More</Text>
-            </TouchableOpacity>
-          </View>
-        ) : null}
-
-        {/* Row 3: stats */}
+        {/* Stats: distance from vehicle GPS; battery/range hidden when SoC unknown */}
         <View style={styles.statsRow}>
-          <StatCol
-            testID="stat-on-duty"
-            label={t.on_duty}
-            value={formatDuration(today?.working_seconds ?? 0)}
-          />
           <StatCol
             testID="stat-distance"
             label={t.distance}
             value={`${(today?.distance_km ?? 0).toFixed(1)} km`}
           />
-          <StatCol
-            testID="stat-battery"
-            label={t.battery}
-            value={`${vehicle?.current_soc ?? "—"}%`}
-            valueColor={(vehicle?.current_soc ?? 100) < 25 ? colors.alert : colors.ink}
-          />
-          <StatCol
-            testID="stat-range"
-            label={t.range}
-            value={`${vehicle?.current_range_km ?? "—"} km`}
-          />
+          {vehicle?.current_soc != null ? (
+            <>
+              <StatCol
+                testID="stat-battery"
+                label={t.battery}
+                value={`${vehicle.current_soc}%`}
+                valueColor={vehicle.current_soc < 25 ? colors.alert : colors.ink}
+              />
+              <StatCol
+                testID="stat-range"
+                label={t.range}
+                value={
+                  vehicle.current_range_km != null
+                    ? `${vehicle.current_range_km} km`
+                    : "—"
+                }
+              />
+            </>
+          ) : (
+            <StatCol
+              testID="stat-battery-unknown"
+              label={t.battery}
+              value="—"
+            />
+          )}
         </View>
       </View>
 
       <View style={styles.stripeCard}>
         <DutyStripe
           segments={today?.segments ?? []}
-          shiftSeconds={today?.shift_seconds ?? 0}
+          shiftSeconds={24 * 3600}
           workingSeconds={today?.working_seconds ?? 0}
         />
       </View>
-
-      {/* Platform selector sheet */}
-      <BottomSheet
-        visible={selectorOpen}
-        onClose={() => setSelectorOpen(false)}
-        title={t.pick_platform}
-        testID="platform-sheet"
-      >
-        <View style={styles.grid}>
-          {PLATFORMS.map((p) => (
-            <TouchableOpacity
-              key={p}
-              testID={`platform-btn-${p}`}
-              onPress={() => handleSwitch(p)}
-              style={[
-                styles.gridBtn,
-                {
-                  backgroundColor: current === p ? platformColors[p] : colors.card,
-                  borderColor: platformColors[p],
-                },
-              ]}
-            >
-              <View style={[styles.gridDot, { backgroundColor: platformColors[p] }]} />
-              <Text
-                style={[
-                  styles.gridBtnText,
-                  { color: current === p ? colors.white : colors.ink },
-                ]}
-              >
-                {platformLabels[p]}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-        <TouchableOpacity
-          testID="platform-btn-offline"
-          onPress={() => handleSwitch("offline")}
-          style={[
-            styles.offlineBtn,
-            current === "offline" ? { backgroundColor: colors.ink, borderColor: colors.ink } : null,
-          ]}
-        >
-          <Text
-            style={[
-              styles.offlineText,
-              current === "offline" ? { color: colors.white } : null,
-            ]}
-          >
-            {t.go_offline}
-          </Text>
-        </TouchableOpacity>
-      </BottomSheet>
-
-      {/* Close-out sheet */}
-      <BottomSheet
-        visible={!!closeOut}
-        onClose={() => setCloseOut(null)}
-        title={t.close_out_title}
-        testID="close-out-sheet"
-      >
-        {closeOut ? (
-          <>
-            <Text style={styles.closeOutHint}>
-              {t.close_out_hint}  ·  {platformLabels[closeOut.platform]}
-            </Text>
-            <FieldRow label={t.trips}>
-              <TextInput
-                testID="close-out-trips"
-                value={trips}
-                onChangeText={setTrips}
-                keyboardType="number-pad"
-                style={styles.field}
-                placeholder="0"
-                placeholderTextColor={colors.muted}
-              />
-            </FieldRow>
-            <FieldRow label={t.amount_earned}>
-              <TextInput
-                testID="close-out-amount"
-                value={amount}
-                onChangeText={setAmount}
-                keyboardType="numeric"
-                style={styles.field}
-                placeholder="₹0"
-                placeholderTextColor={colors.muted}
-              />
-            </FieldRow>
-            <FieldRow label={t.cash_collected}>
-              <TextInput
-                testID="close-out-cash"
-                value={cash}
-                onChangeText={setCash}
-                keyboardType="numeric"
-                style={styles.field}
-                placeholder="₹0"
-                placeholderTextColor={colors.muted}
-              />
-            </FieldRow>
-            <View style={styles.sheetActions}>
-              <TouchableOpacity
-                testID="close-out-cancel"
-                style={styles.secondaryBtn}
-                onPress={() => setCloseOut(null)}
-              >
-                <Text style={styles.secondaryText}>{t.cancel}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                testID="close-out-save"
-                style={styles.primaryBtn}
-                onPress={saveCloseOut}
-              >
-                <Text style={styles.primaryText}>{t.save}</Text>
-              </TouchableOpacity>
-            </View>
-          </>
-        ) : null}
-      </BottomSheet>
 
       <DepositSheet
         visible={qrOpen}
@@ -457,13 +312,6 @@ const StatCol: React.FC<{ label: string; value: string; valueColor?: string; tes
   </View>
 );
 
-const FieldRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <View style={styles.fieldRow}>
-    <Text style={styles.fieldLabel}>{label}</Text>
-    {children}
-  </View>
-);
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
   depositBanner: {
@@ -473,24 +321,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     padding: spacing.md,
   },
-  depositLeft: { flexDirection: "row", alignItems: "center", gap: spacing.md },
-  depositIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.white,
-    color: colors.alert,
-    fontFamily: fonts.uiBold,
-    fontSize: 18,
-    textAlign: "center",
-    textAlignVertical: "center",
-    lineHeight: 34,
-  },
-  depositTitle: {
-    fontFamily: fonts.uiBold,
-    fontSize: 14,
-    color: colors.white,
-  },
+  depositTitle: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.white },
   depositSub: {
     fontFamily: fonts.uiMed,
     fontSize: 12,
@@ -516,40 +347,55 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     gap: spacing.md,
   },
-  toggleRow: {
+  rowBlock: { gap: 6 },
+  rowLabel: {
+    fontFamily: fonts.uiBold,
+    fontSize: 11,
+    color: colors.muted,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  rowLabelHint: {
+    fontFamily: fonts.ui,
+    fontSize: 11,
+    color: colors.muted,
+    textTransform: "none",
+    letterSpacing: 0,
+  },
+  dutyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.sm,
+  },
+  dutyPill: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
-  },
-  toggle: {
-    flex: 1,
-    flexDirection: "row",
-    backgroundColor: colors.paper,
-    borderRadius: 999,
-    padding: 4,
-  },
-  toggleHalf: {
-    flex: 1,
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+    backgroundColor: colors.live,
     borderRadius: 999,
+  },
+  dutyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.white },
+  dutyPillText: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.white },
+  startBtn: {
+    backgroundColor: colors.live,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
     alignItems: "center",
   },
-  toggleHalfActive: { backgroundColor: colors.ink },
-  toggleHalfActiveOn: { backgroundColor: colors.live },
-  toggleText: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.muted },
-  toggleTextActive: { color: colors.white },
-  chargeBtn: {
+  startBtnText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.white },
+  endBtn: {
     borderWidth: 1,
-    borderColor: "#4FA8D8",
-    borderRadius: 999,
+    borderColor: colors.line,
+    borderRadius: radius.md,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    backgroundColor: colors.card,
+    paddingVertical: spacing.sm,
   },
-  chargeBtnActive: { backgroundColor: "#4FA8D8" },
-  chargeBtnText: { fontFamily: fonts.uiBold, fontSize: 13, color: "#3086B8" },
-  quickRow: { flexDirection: "row", gap: spacing.sm, alignItems: "stretch" },
-  quickBtn: {
+  endBtnText: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.ink },
+  platformRow: { flexDirection: "row", gap: spacing.sm },
+  platformBtn: {
     flex: 1,
     borderWidth: 2,
     borderRadius: radius.md,
@@ -557,17 +403,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
   },
-  quickDot: { width: 8, height: 8, borderRadius: 4 },
-  quickText: { fontFamily: fonts.uiBold, fontSize: 14 },
-  moreBtn: {
+  platformDot: { width: 8, height: 8, borderRadius: 4 },
+  platformBtnText: { fontFamily: fonts.uiBold, fontSize: 13 },
+  notOnlineBtn: {
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.line,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    justifyContent: "center",
-    backgroundColor: colors.card,
+    paddingVertical: spacing.sm,
+    alignItems: "center",
   },
-  moreText: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
+  notOnlineText: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink },
   statsRow: { flexDirection: "row", justifyContent: "space-between", gap: spacing.md },
   statCol: { flex: 1 },
   statLabel: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginBottom: 2 },
@@ -582,67 +427,4 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
   },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
-  gridBtn: {
-    width: "48%",
-    borderRadius: radius.md,
-    borderWidth: 2,
-    padding: spacing.lg,
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  gridDot: { width: 10, height: 10, borderRadius: 5 },
-  gridBtnText: { fontFamily: fonts.uiBold, fontSize: 16 },
-  offlineBtn: {
-    marginTop: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: spacing.lg,
-    alignItems: "center",
-    backgroundColor: colors.card,
-  },
-  offlineText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink },
-  closeOutHint: {
-    fontFamily: fonts.uiMed,
-    fontSize: 13,
-    color: colors.muted,
-    marginBottom: spacing.md,
-  },
-  fieldRow: { marginBottom: spacing.md },
-  fieldLabel: {
-    fontFamily: fonts.uiMed,
-    fontSize: 13,
-    color: colors.muted,
-    marginBottom: spacing.xs,
-  },
-  field: {
-    backgroundColor: colors.paper,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    fontFamily: fonts.dataMed,
-    fontSize: 18,
-    color: colors.ink,
-  },
-  sheetActions: { flexDirection: "row", gap: spacing.md, marginTop: spacing.md },
-  primaryBtn: {
-    flex: 1,
-    backgroundColor: colors.live,
-    borderRadius: radius.md,
-    padding: spacing.lg,
-    alignItems: "center",
-  },
-  primaryText: { fontFamily: fonts.uiBold, fontSize: 16, color: colors.white },
-  secondaryBtn: {
-    flex: 1,
-    borderColor: colors.line,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    padding: spacing.lg,
-    alignItems: "center",
-  },
-  secondaryText: { fontFamily: fonts.uiBold, fontSize: 16, color: colors.ink },
 });
