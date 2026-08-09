@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#10231C"
+    android:padding="24dp"
+    android:gravity="center_vertical">
+
+    <TextView
+        android:id="@+id/alarm_kicker"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="RIDE91 · SHIFT ALARM"
+        android:textColor="#0B7A4B"
+        android:textSize="12sp"
+        android:letterSpacing="0.15"
+        android:paddingBottom="8dp"/>
+
+    <TextView
+        android:id="@+id/alarm_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Shift starts in 1 hour"
+        android:textColor="#FFFFFF"
+        android:textSize="32sp"
+        android:paddingBottom="24dp"/>
+
+    <Button
+        android:id="@+id/btn_awake"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Awake and coming for duty"
+        android:backgroundTint="#0B7A4B"
+        android:textColor="#FFFFFF"
+        android:padding="20dp"/>
+
+    <Button
+        android:id="@+id/btn_not_coming"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Not coming"
+        android:backgroundTint="#BF3F2C"
+        android:textColor="#FFFFFF"
+        android:padding="20dp"
+        android:layout_marginTop="12dp"/>
+
+    <Spinner
+        android:id="@+id/reason_spinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:background="#FFFFFF" />
+
+    <Button
+        android:id="@+id/btn_confirm"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Confirm"
+        android:backgroundTint="#0B7A4B"
+        android:textColor="#FFFFFF"
+        android:padding="16dp"
+        android:layout_marginTop="12dp"/>
+
+    <Button
+        android:id="@+id/btn_snooze"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Snooze 10 minutes (once)"
+        android:backgroundTint="@android:color/transparent"
+        android:textColor="#EEF1EC"
+        android:padding="16dp"
+        android:layout_marginTop="24dp"/>
+</LinearLayout>

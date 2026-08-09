@@ -10,6 +10,7 @@ import { AuthProvider, useAuth } from "@/src/auth";
 import { SyncProvider } from "@/src/sync";
 import { TrackingProvider } from "@/src/tracking";
 import { DutyProvider } from "@/src/duty";
+import { ShiftAlarmProvider } from "@/src/shift-alarms";
 import { I18nProvider } from "@/src/i18n";
 import { colors } from "@/src/theme";
 
@@ -25,7 +26,7 @@ const Router: React.FC = () => {
     if (loading) return;
     const first = segments[0];
     const inTabs = first === "(tabs)";
-    const isAuthedRoute = inTabs || first === "inspection";
+    const isAuthedRoute = inTabs || first === "inspection" || first === "alarm";
     if (!driver && isAuthedRoute) {
       router.replace("/login");
     } else if (driver && !isAuthedRoute) {
@@ -36,13 +37,16 @@ const Router: React.FC = () => {
   return (
     <TrackingProvider enabled={!!driver}>
       <DutyProvider enabled={!!driver}>
-        <View style={{ flex: 1, backgroundColor: colors.paper }}>
-          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
-            <Stack.Screen name="login" />
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="inspection" options={{ presentation: "modal" }} />
-          </Stack>
-        </View>
+        <ShiftAlarmProvider enabled={!!driver}>
+          <View style={{ flex: 1, backgroundColor: colors.paper }}>
+            <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
+              <Stack.Screen name="login" />
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="inspection" options={{ presentation: "modal" }} />
+              <Stack.Screen name="alarm" options={{ presentation: "fullScreenModal", gestureEnabled: false }} />
+            </Stack>
+          </View>
+        </ShiftAlarmProvider>
       </DutyProvider>
     </TrackingProvider>
   );

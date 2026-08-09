@@ -158,6 +158,35 @@ class RequestIn(BaseModel):
     client_action_id: str
 
 
+# ---------------------------------------------------------------------------
+# Shift alarms (Part 8)
+# ---------------------------------------------------------------------------
+# Reason codes are stored as CODES, not free text, so they aggregate.
+ALARM_REASONS = {
+    "unwell", "family_emergency", "vehicle_problem",
+    "transport_problem", "personal", "other",
+}
+
+
+class ShiftScheduleIn(BaseModel):
+    """The next shift the driver is expected on. Alarm fires 1h before."""
+    shift_start: str            # ISO
+    shift_type: Literal["day", "night"] = "day"
+    hub_id: Optional[str] = None
+    client_action_id: str
+
+
+class AlarmResponseIn(BaseModel):
+    schedule_id: str
+    response: Literal["awake", "not_coming", "snooze"]
+    reason_code: Optional[str] = None       # required if response=not_coming
+    reason_note: Optional[str] = None       # free text if reason_code='other'
+    back_by: Optional[str] = None           # optional YYYY-MM-DD
+    fired_at: str
+    responded_at: str
+    client_action_id: str
+
+
 class PlatformCashIn(BaseModel):
     """Screenshot-uploaded, provisional cash figure for one platform/day."""
     platform: Literal["uber", "rapido", "ola"]
@@ -536,6 +565,87 @@ async def _fetch_qr_payments(
         {"_id": 0},
     )
     return [r async for r in cursor]
+
+
+# ---------------------------------------------------------------------------
+# SHIFT ALARMS (Part 8) — server contract for the native Android AlarmManager
+# module. Native side fires locally; server records schedule + responses.
+# ---------------------------------------------------------------------------
+@api.post("/shift-alarm/schedule")
+async def schedule_shift_alarm(body: ShiftScheduleIn, driver: Dict = Depends(get_driver)):
+    existing = await db.shift_schedules.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "shift_start": body.shift_start,
+        "shift_type": body.shift_type,
+        "hub_id": body.hub_id,
+        "alarm_fires_at": iso(_parse_iso(body.shift_start) - timedelta(hours=1)),
+        "state": "scheduled",             # scheduled | responded | no_response
+        "created_at": iso(now_utc()),
+        "client_action_id": body.client_action_id,
+    }
+    await db.shift_schedules.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+@api.get("/shift-alarm/next")
+async def next_shift_alarm(driver: Dict = Depends(get_driver)):
+    """Native side calls this on app open / boot to (re)schedule the alarm."""
+    row = await db.shift_schedules.find_one(
+        {"driver_id": driver["id"], "state": {"$in": ["scheduled", "no_response"]}},
+        {"_id": 0},
+        sort=[("shift_start", 1)],
+    )
+    return row or {}
+
+
+@api.post("/shift-alarm/response")
+async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(get_driver)):
+    if body.response == "not_coming":
+        if not body.reason_code or body.reason_code not in ALARM_REASONS:
+            raise HTTPException(400, "reason_required")
+    existing = await db.alarm_responses.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "schedule_id": body.schedule_id,
+        "response": body.response,
+        "reason_code": body.reason_code,
+        "reason_note": body.reason_note if body.reason_code == "other" else None,
+        "back_by": body.back_by,
+        "fired_at": body.fired_at,
+        "responded_at": body.responded_at,
+        "created_at": iso(now_utc()),
+        "client_action_id": body.client_action_id,
+    }
+    await db.alarm_responses.insert_one(row.copy())
+    # Advance the schedule state.
+    if body.response in ("awake", "not_coming"):
+        await db.shift_schedules.update_one(
+            {"id": body.schedule_id}, {"$set": {"state": "responded"}}
+        )
+    row.pop("_id", None)
+    return row
+
+
+@api.get("/shift-alarm/responses")
+async def list_alarm_responses(driver: Dict = Depends(get_driver)):
+    cursor = db.alarm_responses.find(
+        {"driver_id": driver["id"]}, {"_id": 0}
+    ).sort("responded_at", -1)
+    return {"items": [r async for r in cursor]}
 
 
 # ---------------------------------------------------------------------------
@@ -1215,6 +1325,15 @@ async def _on_startup() -> None:
         [("driver_id", 1), ("business_date", 1)]
     )
     await db.qr_payments.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.shift_schedules.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.shift_schedules.create_index(
+        [("driver_id", 1), ("shift_start", 1)]
+    )
+    await db.alarm_responses.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
     await _seed_if_empty()
