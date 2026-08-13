@@ -206,7 +206,7 @@ export default function Profile() {
               return (
                 <TouchableOpacity
                   key={p.label}
-                  testID={`alarm-preset-${p.label.replace(/\W+/g, "-").toLowerCase()}`}
+                  testID={`alarm-preset-${p.label.replace(/[^\w]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase()}`}
                   style={styles.sheetRow}
                   onPress={() => onPickPreset(p)}
                   disabled={busyPreset !== null}

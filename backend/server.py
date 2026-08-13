@@ -634,7 +634,8 @@ async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(ge
     # Advance the schedule state.
     if body.response in ("awake", "not_coming"):
         await db.shift_schedules.update_one(
-            {"id": body.schedule_id}, {"$set": {"state": "responded"}}
+            {"id": body.schedule_id, "driver_id": driver["id"]},
+            {"$set": {"state": "responded"}},
         )
     row.pop("_id", None)
     return row
