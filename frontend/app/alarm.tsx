@@ -1,11 +1,7 @@
 // Full-screen fallback alarm UI (web / Expo Go).
-// On production Android the native AlarmActivity takes over — this route is
-// only used when the native module is unavailable or when we want to preview
-// the same UX on desktop / Expo Go.
-//
-// Route: /alarm?scheduleId=...&title=...&firedAt=...
-// Posts to /shift-alarm/response via the offline queue on the same shape as
-// the native module.
+// Route: /alarm?scheduleId=...&phase=start|end&title=...&firedAt=...
+// On production Android the native AlarmActivity takes over — this route
+// mirrors the UX for previews and web-only usage.
 
 import React, { useCallback, useMemo, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
@@ -26,17 +22,25 @@ const REASONS: { code: string; label: string }[] = [
 ];
 
 export default function AlarmScreen() {
-  const params = useLocalSearchParams<{ scheduleId?: string; title?: string; firedAt?: string }>();
+  const params = useLocalSearchParams<{
+    scheduleId?: string;
+    phase?: string;
+    title?: string;
+    firedAt?: string;
+  }>();
   const router = useRouter();
   const { driver } = useAuth();
-  const { submitAlarmResponse, refresh } = useShiftAlarm();
+  const { submitAlarmResponse, refresh, endEta } = useShiftAlarm();
 
+  const phase: "start" | "end" = params.phase === "end" ? "end" : "start";
   const firedAt = useMemo(
     () => (params.firedAt ? Number(params.firedAt) : Date.now()),
     [params.firedAt],
   );
   const scheduleId = params.scheduleId ?? `local-${firedAt}`;
-  const title = params.title ?? "Shift starts in 1 hour";
+  const title =
+    params.title ??
+    (phase === "end" ? "Shift ends soon — head back to hub" : "Shift starts in 1 hour");
 
   const [mode, setMode] = useState<"choose" | "reason">("choose");
   const [reasonPickerOpen, setReasonPickerOpen] = useState(false);
@@ -45,71 +49,125 @@ export default function AlarmScreen() {
   const [snoozed, setSnoozed] = useState(false);
 
   const respond = useCallback(
-    async (response: "awake" | "not_coming" | "snooze", chosenReason?: string) => {
+    async (
+      response: "awake" | "not_coming" | "snooze" | "heading_back" | "delayed",
+      chosenReason?: string,
+    ) => {
       if (submitting) return;
       setSubmitting(true);
       try {
-        await submitAlarmResponse({
-          scheduleId,
-          response,
-          reasonCode: response === "not_coming" ? chosenReason ?? reasonCode : null,
-          firedAt,
-          respondedAt: Date.now(),
-        });
+        await submitAlarmResponse(
+          {
+            scheduleId,
+            response: response as "awake" | "not_coming" | "snooze",
+            reasonCode: response === "not_coming" ? chosenReason ?? reasonCode : null,
+            firedAt,
+            respondedAt: Date.now(),
+          },
+          phase,
+        );
         setTimeout(refresh, 400);
       } finally {
         setSubmitting(false);
       }
       if (response === "snooze") {
         setSnoozed(true);
-        // 10s "snoozed" pause on the fallback, then close. Real snooze is
-        // handled by the native module — this branch is only for preview.
         setTimeout(() => router.replace("/(tabs)"), 800);
         return;
       }
       router.replace("/(tabs)");
     },
-    [submitting, submitAlarmResponse, scheduleId, reasonCode, firedAt, refresh, router],
+    [submitting, submitAlarmResponse, scheduleId, phase, reasonCode, firedAt, refresh, router],
   );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.body}>
-        <Text style={styles.kicker}>RIDE91 · SHIFT ALARM</Text>
+        <Text style={styles.kicker}>
+          RIDE91 · {phase === "end" ? "SHIFT END ALARM" : "SHIFT ALARM"}
+        </Text>
         <Text style={styles.title} testID="alarm-title">
           {title}
         </Text>
         {driver?.name ? <Text style={styles.driver}>Hi {driver.name}</Text> : null}
 
+        {phase === "end" && endEta?.has_hub ? (
+          <View style={styles.etaStrip} testID="alarm-eta-strip">
+            <View style={styles.etaCol}>
+              <Text style={styles.etaLabel}>Distance</Text>
+              <Text style={styles.etaValue}>
+                {(endEta.distance_km ?? 0).toFixed(1)} km
+              </Text>
+            </View>
+            <View style={styles.etaCol}>
+              <Text style={styles.etaLabel}>ETA to hub</Text>
+              <Text style={styles.etaValue}>{Math.max(0, Math.round(endEta.eta_minutes ?? 0))} min</Text>
+            </View>
+            <View style={styles.etaCol}>
+              <Text style={styles.etaLabel}>Shift ends</Text>
+              <Text style={styles.etaValue}>{Math.max(0, Math.round(endEta.remaining_minutes ?? 0))} min</Text>
+            </View>
+          </View>
+        ) : null}
+
         {snoozed ? (
           <Text style={styles.snoozeMsg}>Snoozed — we&apos;ll ring again in 10 minutes.</Text>
         ) : mode === "choose" ? (
-          <View style={styles.actions}>
-            <TouchableOpacity
-              testID="alarm-awake"
-              style={styles.primary}
-              onPress={() => respond("awake")}
-              disabled={submitting}
-            >
-              <Text style={styles.primaryText}>Awake and coming for duty</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID="alarm-not-coming"
-              style={styles.danger}
-              onPress={() => setMode("reason")}
-              disabled={submitting}
-            >
-              <Text style={styles.dangerText}>Not coming</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID="alarm-snooze"
-              style={styles.ghost}
-              onPress={() => respond("snooze")}
-              disabled={submitting}
-            >
-              <Text style={styles.ghostText}>Snooze 10 minutes (once)</Text>
-            </TouchableOpacity>
-          </View>
+          phase === "end" ? (
+            <View style={styles.actions}>
+              <TouchableOpacity
+                testID="alarm-heading-back"
+                style={styles.primary}
+                onPress={() => respond("heading_back")}
+                disabled={submitting}
+              >
+                <Text style={styles.primaryText}>Heading back to hub now</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="alarm-delayed"
+                style={styles.warn}
+                onPress={() => respond("delayed")}
+                disabled={submitting}
+              >
+                <Text style={styles.warnText}>Running late — inform dispatch</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="alarm-snooze"
+                style={styles.ghost}
+                onPress={() => respond("snooze")}
+                disabled={submitting}
+              >
+                <Text style={styles.ghostText}>Snooze 10 minutes (once)</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.actions}>
+              <TouchableOpacity
+                testID="alarm-awake"
+                style={styles.primary}
+                onPress={() => respond("awake")}
+                disabled={submitting}
+              >
+                <Text style={styles.primaryText}>Awake and coming for duty</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="alarm-not-coming"
+                style={styles.danger}
+                onPress={() => setMode("reason")}
+                disabled={submitting}
+              >
+                <Text style={styles.dangerText}>Not coming</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="alarm-snooze"
+                style={styles.ghost}
+                onPress={() => respond("snooze")}
+                disabled={submitting}
+              >
+                <Text style={styles.ghostText}>Snooze 10 minutes (once)</Text>
+              </TouchableOpacity>
+            </View>
+          )
         ) : (
           <View style={styles.actions}>
             <Text style={styles.reasonLabel}>Reason (required)</Text>
@@ -185,13 +243,31 @@ const styles = StyleSheet.create({
   },
   title: {
     fontFamily: fonts.display,
-    fontSize: 34,
+    fontSize: 32,
     color: colors.white,
-    lineHeight: 40,
+    lineHeight: 38,
     marginBottom: spacing.md,
   },
-  driver: { fontFamily: fonts.uiMed, fontSize: 15, color: "#B7C4BE", marginBottom: spacing.xl },
-  actions: { gap: spacing.md, marginTop: spacing.lg },
+  driver: { fontFamily: fonts.uiMed, fontSize: 15, color: "#B7C4BE", marginBottom: spacing.lg },
+  etaStrip: {
+    flexDirection: "row",
+    gap: spacing.md,
+    backgroundColor: "#182A24",
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  etaCol: { flex: 1 },
+  etaLabel: {
+    fontFamily: fonts.uiBold,
+    fontSize: 10,
+    color: "#B7C4BE",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  etaValue: { fontFamily: fonts.dataMed, fontSize: 20, color: colors.white },
+  actions: { gap: spacing.md, marginTop: spacing.sm },
   primary: {
     backgroundColor: colors.live,
     borderRadius: radius.md,
@@ -206,6 +282,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   dangerText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 16 },
+  warn: {
+    backgroundColor: colors.amber,
+    borderRadius: radius.md,
+    paddingVertical: 20,
+    alignItems: "center",
+  },
+  warnText: { fontFamily: fonts.uiBold, color: colors.ink, fontSize: 16 },
   ghost: {
     borderRadius: radius.md,
     paddingVertical: 16,

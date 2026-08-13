@@ -102,6 +102,111 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
+user_problem_statement_v2: |
+  Ride91 driver app — Part 8b (Shift-end alarm with ETA-to-hub).
+  Extends Part 8 with a second alarm per shift:
+    • Driver optionally specifies shift_end when scheduling.
+    • Backend seeds a home hub (lat/lng/name) on the driver record.
+    • Backend endpoint GET /api/shift-alarm/end-eta computes distance
+      (haversine) to hub + average speed from last 20 vehicle_pings
+      (clamped 12–45 km/h, default 22 km/h) → eta_minutes.
+    • alarm_at = shift_end − (eta_minutes + end_buffer_min).
+    • Response endpoint gains `phase` = start | end, new responses
+      `heading_back` / `delayed` for end-phase; start-phase keeps
+      awake / not_coming / snooze.
+    • Native module is re-armed only when alarm_at drifts > 30s.
+    • Fallback /alarm route accepts phase= param and shows different
+      buttons + ETA strip.
+
+backend:
+  - task: "Shift-end ETA endpoint (Part 8b)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: >
+          Manual curl on demo driver returns has_end_alarm=true,
+          has_hub=true, distance_km, eta_minutes, alarm_at.
+          Please cover: (a) no shift_end → has_end_alarm=false;
+          (b) driver without hub_lat/lng → has_hub=false;
+          (c) lat/lng query overrides last ping; (d) alarm_at maths;
+          (e) end-phase responses (heading_back/delayed/snooze)
+          are accepted while start-phase responses on end schedule
+          return 400 invalid_response_for_end_phase, and vice versa;
+          (f) responded on 'heading_back'/'delayed' flips end_state
+          to 'responded' but not state; (g) idempotency on client_action_id.
+
+frontend:
+  - task: "Profile end-alarm sub-card + duration picker"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/profile.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: >
+          Vehicle card now shows Home hub row (profile-hub-info).
+          Shift alarm card has Start-alarm and End-alarm sections.
+          Schedule flow is now 2-step: pick preset → pick duration
+          (alarm-duration-6-hours / -8-hours / -10-hours / -12-hours /
+          -no-end-alarm). Picking a duration with hours sets shift_end;
+          "No end alarm" leaves shift_end unset.
+          End-alarm section renders alarm-shift-end, alarm-distance,
+          alarm-eta, alarm-end-fires-at when end-alarm exists.
+          New buttons: alarm-preview-start-btn, alarm-preview-end-btn,
+          alarm-test-native-start-btn, alarm-test-native-end-btn.
+  - task: "Alarm fallback route end-phase UI"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/alarm.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: >
+          /alarm now accepts phase= param. When phase=end it renders
+          alarm-eta-strip (distance/ETA/remaining) if end-ETA available,
+          shows alarm-heading-back (primary green) + alarm-delayed
+          (amber) + alarm-snooze buttons. When phase=start (default)
+          the awake/not-coming/reason flow is unchanged.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.2"
+  test_sequence: 6
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Shift-end ETA endpoint (Part 8b)"
+    - "Profile end-alarm sub-card + duration picker"
+    - "Alarm fallback route end-phase UI"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: >
+      Part 8b (shift-end alarm w/ ETA-to-hub) implemented. Please
+      backend-test /api/shift-alarm/end-eta and phase-scoped
+      /shift-alarm/response, and frontend-test the Profile duration
+      picker + end-alarm sub-card + /alarm?phase=end fallback UI.
+      Native Android alarm can only be validated on APK — do NOT test.
+      Login: +919900000001 / OTP 123456. Backend at
+      http://localhost:8001, frontend at http://localhost:3000.
+
+
 user_problem_statement: |
   Ride91 driver app — Part 8 (Shift Alarms) JS integration.
   Native Android AlarmManager Java sources already exist under
@@ -226,3 +331,45 @@ agent_communication:
       module surfaces when both files are run together (see iteration_5.json
       rca_of_issue). Fix belongs in the iteration-4 test file, not Part 8.
       Full details: /app/test_reports/iteration_5.json.
+
+  - agent: "testing"
+    message: >
+      Iteration 6 complete — Part 8b Shift-END alarm with live-GPS ETA-to-hub verified end-to-end.
+      Backend: created /app/backend/tests/test_shift_end_alarm.py (12 tests, ALL PASS) covering:
+      schedule persists shift_end/end_buffer_min/end_state=scheduled when shift_end is present,
+      end_state='na' when absent; GET /shift-alarm/end-eta returns {has_end_alarm:false} with no
+      schedule, {has_end_alarm:true,has_hub:false} when driver has no hub coords (verified via
+      temporary Mongo mutation with restore), and full payload with distance/eta/avg_speed/alarm_at
+      when hub + query lat/lng provided. alarm_at == shift_end - (eta+buffer) minutes within <5s.
+      /end-eta falls back to the latest vehicle_ping when lat/lng omitted (current_lat/lng match).
+      Response endpoint phase discriminator: phase='end' + response='awake' → 400
+      invalid_response_for_end_phase; phase='start' + response='heading_back' → 400
+      invalid_response_for_start_phase; phase='end' + heading_back is idempotent by
+      client_action_id and flips end_state='responded' while leaving start state='scheduled';
+      phase='end' + snooze does NOT flip end_state; phase='end' + delayed does; /shift-alarm/next
+      correctly returns rows where start state=responded but end_state=scheduled.
+      NOTE: I initially split the module into 4 classes and hit cross-worker LoadScope races on
+      the shared demo driver's shift_schedules collection — consolidated into a single class
+      TestShiftEndAlarm to pin the whole module to one xdist worker.
+      Frontend (Expo web preview, 390×844): login OK → Profile → profile-hub-info renders
+      'Koramangala Hub · 12.9352, 77.6245'. alarm-schedule-btn opens sheet at step 1; tapping
+      alarm-preset-in-2-hours-day (trailing-dash fix from iteration 5 confirmed) advances to
+      duration step titled 'How long is your shift?'. alarm-duration-8-hours closes the sheet,
+      fires 'Alarm scheduled' toast, and within <2s populates: alarm-shift-end='Today 12:05 pm',
+      alarm-distance='16.96 km', alarm-eta='41 min · avg 25 km/h', alarm-end-fires-at='Today
+      11:15 am'. alarm-preview-end-btn navigates to /alarm?phase=end where alarm-title='Shift
+      ends soon — head back to hub', alarm-eta-strip has 3 columns, and only
+      alarm-heading-back / alarm-delayed / alarm-snooze buttons are present (no
+      alarm-not-coming / alarm-awake). Tapping alarm-heading-back POSTs
+      {phase:'end',response:'heading_back'} to /api/shift-alarm/response (captured live),
+      router.replace('/(tabs)') lands on Home; verified via curl on /api/shift-alarm/responses
+      that the row landed correctly. Regression: start-phase awake + not_coming(reason) flow
+      from iteration 5 still works — phase discriminator did not break start alarms.
+      One LOW-priority UX bug found (see iteration_6.json.frontend_issues): the no-end-alarm
+      reschedule branch leaves alarm-shift-end showing the prior schedule's value (widgets ARE
+      hidden correctly). Root cause: /shift-alarm/next returns EARLIEST by shift_start, so an
+      older scheduled row with a still-populated shift_end wins over the newly-scheduled
+      no-end-alarm row. Fix belongs in server.py sort/filter or profile.tsx binding.
+      No React Native issues (no deprecated packages, no red screens, all testIDs present).
+      Full details + curl-verified evidence: /app/test_reports/iteration_6.json.
+

@@ -18,6 +18,9 @@ export interface Driver {
   vehicle_id: string;
   vehicle_number: string;
   qr_code: string;
+  hub_name?: string | null;
+  hub_lat?: number | null;
+  hub_lng?: number | null;
 }
 
 interface AuthCtx {

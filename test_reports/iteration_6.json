@@ -1,0 +1,55 @@
+{
+  "summary": "Ride91 Part 8b (Shift-end alarm with live-GPS ETA-to-hub) tested end-to-end. Backend: created /app/backend/tests/test_shift_end_alarm.py with 12 tests — 12/12 PASSED (initially had 3 cross-worker LoadScope races; consolidated into a single class TestShiftEndAlarm so xdist keeps all tests on one worker). Coverage: schedule persists shift_end/end_buffer_min/end_state=scheduled with shift_end and end_state='na' without; /end-eta returns {has_end_alarm:false} for no schedule; /end-eta with hub + query lat/lng returns distance/eta/avg_speed/alarm_at with alarm_at ≈ shift_end - (eta+buffer)*60s within <5s; /end-eta uses latest vehicle_ping when lat/lng omitted (current_lat/lng match seeded ping); driver without hub coords returns has_hub=false (temp Mongo mutation, then restore); response phase discriminator returns 400 invalid_response_for_end_phase on phase=end + awake and 400 invalid_response_for_start_phase on phase=start + heading_back; phase=end heading_back is idempotent by client_action_id, flips end_state to responded while leaving start state=scheduled; phase=end snooze does NOT flip end_state; phase=end delayed does flip end_state; /shift-alarm/next returns row when start state=responded but end_state=scheduled. Frontend (Expo web preview, 390×844): login OK → Profile → profile-hub-info renders 'Koramangala Hub · 12.9352, 77.6245' ✓. Scheduler sheet opens at step 1, tapping 'In 2 hours (day)' preset (testID 'alarm-preset-in-2-hours-day' — trailing dash fixed since iteration 5) advances to duration step titled 'How long is your shift?' ✓. Tapping 'alarm-duration-8-hours' closes sheet, shows 'Alarm scheduled' toast, and within <2s the end-alarm section populates: alarm-shift-end='Today 12:05 pm', alarm-distance='16.96 km', alarm-eta='41 min · avg 25 km/h', alarm-end-fires-at='Today 11:15 am' ✓. Preview end UI: alarm-title='Shift ends soon — head back to hub' ✓, alarm-eta-strip renders 3 columns ✓, buttons alarm-heading-back / alarm-delayed / alarm-snooze present, alarm-not-coming and alarm-awake absent ✓. Tapping alarm-heading-back POSTs {phase:'end',response:'heading_back'} to /api/shift-alarm/response (captured live, verified body) and router.replace('/(tabs)') lands on Home. Confirmed via curl on /api/shift-alarm/responses that the row landed with phase=end, response=heading_back. No-end-alarm branch (alarm-duration-no-end-alarm): dist/eta/end-fires widget counts drop to 0 (hidden correctly) ✓ — see minor note below about alarm-shift-end value staleness when a prior schedule with shift_end still exists. Regression: start-phase awake and not_coming (with reason) POSTs continue to persist correctly ({phase:'start',response:'awake'} and {phase:'start',response:'not_coming'} both present in /shift-alarm/responses) — phase discriminator did NOT break iteration-5 start-alarm flow. React Native issues: none (no deprecated packages, no red screens, all interactive elements have testIDs, all text wrapped in <Text>).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/shift-alarm/response",
+        "issue": "shift_schedules update_one filter on end-phase flip (server.py:775) matches on {id, driver_id} — good ownership check; however the start-phase flip (server.py:770) similarly relies only on id+driver_id and does not include end-state — no bug, just a note that a caller can never flip another driver's schedule."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "profile.tsx end-alarm section",
+        "issue": "When a driver has multiple schedules and a prior one still has shift_end + end_state≠responded, GET /shift-alarm/next returns the earliest by shift_start. Scheduling a NEW row with alarm-duration-no-end-alarm calls setNext(newRow) locally but the follow-up refresh() overwrites it with the older row that still has shift_end populated. Result: alarm-shift-end shows the OLD 'Today 12:05 pm' rather than 'Not scheduled' for the newly-scheduled no-end-alarm shift. Widgets (alarm-distance/alarm-eta/alarm-end-fires-at) DO hide correctly because that older row's end_state has flipped to 'responded' and endEta becomes null. Recommend either: (a) filter /shift-alarm/next to prefer the newest scheduled row, (b) tie the profile display to the schedule the driver just created (last insert) rather than /next, or (c) mark endEta=null explicitly when parsed.shift_end is null so the profile row shows 'Not scheduled'.",
+        "testID": "alarm-shift-end",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_shift_end_alarm.py",
+    "/app/backend/tests/test_shift_alarm.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_shift_end_alarm.xml"
+  ],
+  "action_items": [
+    "Low priority UX cleanup: fix /shift-alarm/next selection or profile.tsx binding so that the newest-scheduled row wins over an older row with responded end_state — otherwise alarm-shift-end can show a stale value after a no-end-alarm reschedule (see frontend_issues.ui_bugs[0]).",
+    "Optional hardening: server.py:770 — start-state flip filters on {id, driver_id}, good; consider also asserting current state so a stale replay after end has fired can't flip start back to 'responded' twice. Not a bug today, defensive-only.",
+    "shift-alarms.ts:200 — response listener maps `-end` suffix on scheduleId back to base id before POSTing. Since the frontend fallback UI in /alarm gets scheduleId from useLocalSearchParams (already the bare schedule id from profile.onPreviewUi), the suffix logic is native-only and untested here. Fine for Part 8b — flag for the APK-build iteration."
+  ],
+  "critical_code_review_comments": [
+    "server.py:667 /end-eta — no cap on avg_speed_kmph clamp when speeds list is exactly 5+; math is correct. Consider excluding pings older than N hours so the mean reflects RECENT driving (currently the last 20 pings can span the entire day).",
+    "server.py:709-713 — eta_min = distance/avg*60. If distance is 0 (driver already at hub), alarm_at = shift_end - buffer; should_alarm_now is true from (shift_end - buffer) onwards. Correct per spec.",
+    "shift-alarms.ts:190 60-second polling interval — fine for a foreground app, but if the driver leaves the app open in background on iOS/web without AppState change, this keeps firing. Consider tying it to AppState==='active'.",
+    "profile.tsx:161 hub_lat/hub_lng.toFixed(4) — if driver has no hub set, this crashes on undefined.toFixed. The hubText guard prevents it (driver?.hub_name is falsy → 'Hub not set'), but if only hub_name is set and coords are null it will still throw. Consider optional chain: `driver.hub_lat?.toFixed(4) ?? '—'`.",
+    "test_shift_end_alarm.py originally split into 4 classes triggered xdist LoadScopeScheduling class-splitting → the shared demo driver's shift_schedules collection was wiped mid-test on the other worker. Consolidating to one class TestShiftEndAlarm keeps LoadScope on a single worker. Same risk exists for test_shift_alarm.py (iteration 5) — currently passes 'by luck'; consider merging all shift-alarm tests into one class or adding `pytestmark = pytest.mark.xdist_group(...)` **with the loadgroup dist mode** (requires pytest.ini change)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_shift_end_alarm.py (new — 12 tests in a single class TestShiftEndAlarm covering schedule persist, /end-eta happy path & fallback, driver-without-hub, phase discriminator 400s, end-phase idempotency, end-phase snooze/delayed/heading_back, /next including end_state)"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12 shift-end alarm tests, plus iteration-5's test_shift_alarm.py unaffected)",
+    "frontend": "~95% — full end-alarm happy path passes (login, hub info, schedule sheet, preset+duration, toast, end-alarm widgets populate, preview end UI, heading_back POST, backend persistence, regression start-phase awake+not_coming). One minor stale-value bug on the no-end-alarm reschedule branch (alarm-shift-end shows prior schedule's value; distance/eta/end-fires widgets correctly hidden)."
+  },
+  "seed_data_creation": "Module-scoped autouse fixture in test_shift_end_alarm.py wipes shift_schedules + alarm_responses for the demo driver before and after the module. Also temporarily $unset hub_name/hub_lat/hub_lng on the demo driver during test_driver_without_hub_has_hub_false and restores them in a try/finally.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Part 8b covered: shift-end alarm with live GPS ETA. Backend endpoint /api/shift-alarm/end-eta and phase='end' on /api/shift-alarm/response fully tested. When extending: keep all tests in a SINGLE class in test_shift_end_alarm.py — LoadScope splits classes across xdist workers and both workers race on the shared demo driver's schedule wipes. Public URL from EXPO_PUBLIC_BACKEND_URL. testID name change since iteration 5: alarm-preset-in-2-hours-day (NO trailing dash) — profile.tsx line 321 strips trailing dashes now. Preview navigates to /alarm?phase=end for end UI. Backend selection issue: /shift-alarm/next returns EARLIEST by shift_start, not most recent scheduled, so rescheduling with a later shift_start after a prior schedule leaves the OLD schedule visible on profile.",
+  "rca_of_issue": "No product-blocking bugs. One minor UX issue on the no-end-alarm branch: the Profile card's `alarm-shift-end` field shows a stale value from a previously-scheduled row because GET /shift-alarm/next returns the earliest scheduled row (by shift_start), and the profile's endEta / shift-end binding is driven from `next`, not from the row the driver JUST scheduled. Reproduction: (1) schedule 2h day shift with 8h duration → alarm-shift-end='Today 12:05 pm'. (2) preview end UI → tap heading_back (flips end_state to responded on THAT row). (3) reschedule 2h day shift with 'No end alarm' duration → NEW row inserted with shift_end=null; profile's setNext(newRow) briefly shows 'Not scheduled' but the 500ms setTimeout refresh() overwrites next with the OLDER row (state='scheduled') where end_state='responded' — that row has shift_end still populated, so alarm-shift-end shows the older 'Today 12:05 pm'. Widgets are correctly hidden because endEta=null (parsed.shift_end && end_state !== 'responded' fails). Fix: either exclude rows where end_state='responded' AND state='responded' from /shift-alarm/next, or sort by created_at DESC, or bind alarm-shift-end directly to the freshly-created row."
+}

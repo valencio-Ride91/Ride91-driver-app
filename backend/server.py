@@ -11,6 +11,7 @@ are new rows with source='admin_correction'.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import uuid
@@ -123,6 +124,9 @@ class DriverOut(BaseModel):
     vehicle_id: str
     vehicle_number: str
     qr_code: str
+    hub_name: Optional[str] = None
+    hub_lat: Optional[float] = None
+    hub_lng: Optional[float] = None
 
 
 class DutyStateIn(BaseModel):
@@ -169,19 +173,25 @@ ALARM_REASONS = {
 
 
 class ShiftScheduleIn(BaseModel):
-    """The next shift the driver is expected on. Alarm fires 1h before."""
+    """The next shift the driver is expected on. Start alarm fires 1h before.
+    End alarm fires dynamically based on driver's live GPS ETA back to hub.
+    """
     shift_start: str            # ISO
     shift_type: Literal["day", "night"] = "day"
     hub_id: Optional[str] = None
+    shift_end: Optional[str] = None       # ISO — enables shift-end alarm
+    end_buffer_min: int = 10              # extra minutes on top of ETA
     client_action_id: str
 
 
 class AlarmResponseIn(BaseModel):
     schedule_id: str
-    response: Literal["awake", "not_coming", "snooze"]
+    phase: Literal["start", "end"] = "start"
+    response: Literal["awake", "not_coming", "snooze", "heading_back", "delayed"]
     reason_code: Optional[str] = None       # required if response=not_coming
     reason_note: Optional[str] = None       # free text if reason_code='other'
-    back_by: Optional[str] = None           # optional YYYY-MM-DD
+    back_by: Optional[str] = None           # optional YYYY-MM-DD (start)
+    eta_minutes: Optional[float] = None     # optional (end)
     fired_at: str
     responded_at: str
     client_action_id: str
@@ -249,6 +259,20 @@ async def get_driver(authorization: Optional[str] = Header(default=None)) -> Dic
     return driver
 
 
+def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
+    return DriverOut(
+        id=driver["id"],
+        name=driver["name"],
+        phone=driver["phone"],
+        vehicle_id=driver["vehicle_id"],
+        vehicle_number=vehicle["number"] if vehicle else "",
+        qr_code=driver.get("qr_code", ""),
+        hub_name=driver.get("hub_name"),
+        hub_lat=driver.get("hub_lat"),
+        hub_lng=driver.get("hub_lng"),
+    ).model_dump()
+
+
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
@@ -290,14 +314,7 @@ async def verify_otp(body: OtpVerify):
         )
     return {
         "token": token,
-        "driver": DriverOut(
-            id=driver["id"],
-            name=driver["name"],
-            phone=driver["phone"],
-            vehicle_id=driver["vehicle_id"],
-            vehicle_number=vehicle["number"] if vehicle else "",
-            qr_code=driver.get("qr_code", ""),
-        ).model_dump(),
+        "driver": _driver_out(driver, vehicle),
     }
 
 
@@ -305,14 +322,7 @@ async def verify_otp(body: OtpVerify):
 async def me(driver: Dict = Depends(get_driver)):
     vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
     return {
-        "driver": DriverOut(
-            id=driver["id"],
-            name=driver["name"],
-            phone=driver["phone"],
-            vehicle_id=driver["vehicle_id"],
-            vehicle_number=vehicle["number"] if vehicle else "",
-            qr_code=driver.get("qr_code", ""),
-        ).model_dump(),
+        "driver": _driver_out(driver, vehicle),
         "vehicle": {k: v for k, v in (vehicle or {}).items()},
     }
 
@@ -587,6 +597,10 @@ async def schedule_shift_alarm(body: ShiftScheduleIn, driver: Dict = Depends(get
         "hub_id": body.hub_id,
         "alarm_fires_at": iso(_parse_iso(body.shift_start) - timedelta(hours=1)),
         "state": "scheduled",             # scheduled | responded | no_response
+        # End-alarm fields — populated only when shift_end is provided.
+        "shift_end": body.shift_end,
+        "end_buffer_min": body.end_buffer_min if body.shift_end else None,
+        "end_state": "scheduled" if body.shift_end else "na",
         "created_at": iso(now_utc()),
         "client_action_id": body.client_action_id,
     }
@@ -597,13 +611,130 @@ async def schedule_shift_alarm(body: ShiftScheduleIn, driver: Dict = Depends(get
 
 @api.get("/shift-alarm/next")
 async def next_shift_alarm(driver: Dict = Depends(get_driver)):
-    """Native side calls this on app open / boot to (re)schedule the alarm."""
+    """Native side calls this on app open / boot to (re)schedule the alarm.
+    Returns the MOST RECENTLY created schedule that still has an active
+    phase (start or end). This mirrors the driver's mental model — the
+    latest schedule overrides an older stale one on the same day.
+    """
     row = await db.shift_schedules.find_one(
-        {"driver_id": driver["id"], "state": {"$in": ["scheduled", "no_response"]}},
+        {
+            "driver_id": driver["id"],
+            "$or": [
+                {"state": {"$in": ["scheduled", "no_response"]}},
+                {"end_state": {"$in": ["scheduled", "no_response"]}},
+            ],
+        },
         {"_id": 0},
-        sort=[("shift_start", 1)],
+        sort=[("created_at", -1)],
     )
     return row or {}
+
+
+# ---------------------------------------------------------------------------
+# Shift-end ETA — recomputed on each poll from live GPS to hub.
+# Alarm fires when (shift_end - now) <= eta_minutes + end_buffer_min.
+# ---------------------------------------------------------------------------
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0088
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    )
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+# Conservative Bengaluru city assumption — used when we don't have a fresh
+# average from the driver's own recent pings.
+DEFAULT_ETA_SPEED_KMPH = 22.0
+MIN_ETA_SPEED_KMPH = 12.0
+MAX_ETA_SPEED_KMPH = 45.0
+
+
+async def _avg_speed_from_pings(vehicle_id: str) -> float:
+    """Average of the last 20 non-zero-speed pings for this vehicle.
+    Falls back to DEFAULT_ETA_SPEED_KMPH when we don't have enough data."""
+    cursor = db.vehicle_pings.find(
+        {"vehicle_id": vehicle_id, "speed_kmph": {"$gt": 3}},
+        {"_id": 0, "speed_kmph": 1},
+    ).sort("recorded_at", -1).limit(20)
+    speeds = [p["speed_kmph"] async for p in cursor]
+    if len(speeds) < 5:
+        return DEFAULT_ETA_SPEED_KMPH
+    avg = sum(speeds) / len(speeds)
+    return max(MIN_ETA_SPEED_KMPH, min(MAX_ETA_SPEED_KMPH, avg))
+
+
+@api.get("/shift-alarm/end-eta")
+async def shift_end_eta(
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    driver: Dict = Depends(get_driver),
+):
+    row = await db.shift_schedules.find_one(
+        {
+            "driver_id": driver["id"],
+            "shift_end": {"$ne": None},
+            "end_state": {"$in": ["scheduled", "no_response"]},
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if not row:
+        return {"has_end_alarm": False}
+    hub_lat = driver.get("hub_lat")
+    hub_lng = driver.get("hub_lng")
+    if hub_lat is None or hub_lng is None:
+        return {
+            "has_end_alarm": True,
+            "has_hub": False,
+            "schedule_id": row["id"],
+            "shift_end": row["shift_end"],
+        }
+    # Live position: query param > last vehicle ping > hub itself (0km).
+    cur_lat = lat
+    cur_lng = lng
+    if cur_lat is None or cur_lng is None:
+        last = await db.vehicle_pings.find_one(
+            {"vehicle_id": driver["vehicle_id"]},
+            {"_id": 0},
+            sort=[("recorded_at", -1)],
+        )
+        if last:
+            cur_lat = last["lat"]
+            cur_lng = last["lng"]
+    if cur_lat is None or cur_lng is None:
+        cur_lat = hub_lat
+        cur_lng = hub_lng
+    distance_km = _haversine_km(cur_lat, cur_lng, hub_lat, hub_lng)
+    avg_speed = await _avg_speed_from_pings(driver["vehicle_id"])
+    eta_min = (distance_km / avg_speed) * 60 if avg_speed > 0 else 0
+    buffer_min = row.get("end_buffer_min") or 10
+    shift_end_dt = _parse_iso(row["shift_end"])
+    alarm_at_dt = shift_end_dt - timedelta(minutes=eta_min + buffer_min)
+    now_dt = now_utc()
+    remaining_min = (shift_end_dt - now_dt).total_seconds() / 60
+    return {
+        "has_end_alarm": True,
+        "has_hub": True,
+        "schedule_id": row["id"],
+        "shift_end": row["shift_end"],
+        "hub_lat": hub_lat,
+        "hub_lng": hub_lng,
+        "hub_name": driver.get("hub_name"),
+        "current_lat": cur_lat,
+        "current_lng": cur_lng,
+        "distance_km": round(distance_km, 3),
+        "avg_speed_kmph": round(avg_speed, 1),
+        "eta_minutes": round(eta_min, 1),
+        "buffer_minutes": buffer_min,
+        "remaining_minutes": round(remaining_min, 1),
+        "alarm_at": iso(alarm_at_dt),
+        "should_alarm_now": alarm_at_dt <= now_dt <= shift_end_dt,
+    }
 
 
 @api.post("/shift-alarm/response")
@@ -611,6 +742,11 @@ async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(ge
     if body.response == "not_coming":
         if not body.reason_code or body.reason_code not in ALARM_REASONS:
             raise HTTPException(400, "reason_required")
+    # End-phase-specific response validation.
+    if body.phase == "end" and body.response not in {"heading_back", "delayed", "snooze"}:
+        raise HTTPException(400, "invalid_response_for_end_phase")
+    if body.phase == "start" and body.response not in {"awake", "not_coming", "snooze"}:
+        raise HTTPException(400, "invalid_response_for_start_phase")
     existing = await db.alarm_responses.find_one(
         {"driver_id": driver["id"], "client_action_id": body.client_action_id},
         {"_id": 0},
@@ -621,21 +757,28 @@ async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(ge
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
         "schedule_id": body.schedule_id,
+        "phase": body.phase,
         "response": body.response,
         "reason_code": body.reason_code,
         "reason_note": body.reason_note if body.reason_code == "other" else None,
         "back_by": body.back_by,
+        "eta_minutes": body.eta_minutes,
         "fired_at": body.fired_at,
         "responded_at": body.responded_at,
         "created_at": iso(now_utc()),
         "client_action_id": body.client_action_id,
     }
     await db.alarm_responses.insert_one(row.copy())
-    # Advance the schedule state.
-    if body.response in ("awake", "not_coming"):
+    # Advance the correct phase's state on the schedule.
+    if body.phase == "start" and body.response in ("awake", "not_coming"):
         await db.shift_schedules.update_one(
             {"id": body.schedule_id, "driver_id": driver["id"]},
             {"$set": {"state": "responded"}},
+        )
+    if body.phase == "end" and body.response in ("heading_back", "delayed"):
+        await db.shift_schedules.update_one(
+            {"id": body.schedule_id, "driver_id": driver["id"]},
+            {"$set": {"end_state": "responded"}},
         )
     row.pop("_id", None)
     return row
@@ -1097,6 +1240,16 @@ async def vehicle_latest(vehicle_id: str, driver: Dict = Depends(get_driver)):
 # SEEDING
 # ---------------------------------------------------------------------------
 async def _seed_if_empty() -> None:
+    # One-shot migration: backfill hub coords for drivers created before hubs
+    # were introduced. Safe to run every boot — it's a no-op after the first.
+    await db.drivers.update_many(
+        {"hub_lat": {"$exists": False}},
+        {"$set": {
+            "hub_name": "Koramangala Hub",
+            "hub_lat": 12.9352,
+            "hub_lng": 77.6245,
+        }},
+    )
     if await db.drivers.count_documents({}) > 0:
         return
     driver_id = str(uuid.uuid4())
@@ -1119,6 +1272,10 @@ async def _seed_if_empty() -> None:
             "qr_code": f"RIDE91-DEPOSIT-{driver_id[:8].upper()}",
             "active": True,
             "shift_type": "day",
+            # Home hub (fleet garage) — used to compute shift-end alarm ETA.
+            "hub_name": "Koramangala Hub",
+            "hub_lat": 12.9352,
+            "hub_lng": 77.6245,
         }
     )
     await db.advances.insert_one(
