@@ -243,6 +243,68 @@ class InspectionIn(BaseModel):
     client_action_id: str
 
 
+class GoOnlineCaptureIn(BaseModel):
+    """The 20s guided walk-around video + one selfie, captured once per
+    business day before the driver picks their first platform. Includes
+    GPS at capture start and end so ops can detect fraudulent submissions
+    where the driver isn't near the vehicle.
+    """
+    walkaround_video_b64: str         # data URL or raw base64 of the mp4/webm
+    walkaround_video_mime: str = "video/mp4"
+    selfie_photo_b64: str             # data URL or raw base64 of the JPEG
+    walkaround_started_at: str        # ISO
+    walkaround_ended_at: str          # ISO
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
+    client_action_id: str
+
+
+# ---------------------------------------------------------------------------
+# Documents & consents (Part 9)
+# ---------------------------------------------------------------------------
+# Document types the ops team currently tracks for every driver. We seed
+# empty placeholders on first login so the UI always has a row per type.
+DOCUMENT_TYPES = {
+    "driving_licence",
+    "vehicle_rc",
+    "insurance",
+    "puc",
+    "permit",
+    "aadhaar",
+    "pan",
+}
+
+# Consent kinds the driver can grant / withdraw individually.
+CONSENT_KINDS = {
+    "location_tracking",
+    "camera_and_video",
+    "cash_handling",
+    "communications",
+    "terms_of_service",
+}
+
+
+class DocumentUpsertIn(BaseModel):
+    type: Literal[
+        "driving_licence", "vehicle_rc", "insurance", "puc", "permit", "aadhaar", "pan"
+    ]
+    number: Optional[str] = None
+    expires_on: Optional[str] = None       # YYYY-MM-DD
+    image_b64: Optional[str] = None        # data URL or raw base64
+    client_action_id: str
+
+
+class ConsentIn(BaseModel):
+    kind: Literal[
+        "location_tracking", "camera_and_video", "cash_handling",
+        "communications", "terms_of_service",
+    ]
+    granted: bool
+    client_action_id: str
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -376,6 +438,104 @@ async def inspection_today(driver: Dict = Depends(get_driver)):
     if not row:
         return {"completed": False, "day_key": day_key}
     return {"completed": True, "id": row["id"], "created_at": row["created_at"], "day_key": day_key}
+
+
+# ---------------------------------------------------------------------------
+# GO-ONLINE CAPTURE (Part 7) — 20 s guided walkaround + selfie + GPS gate.
+# One capture per business day per driver. The client (Home tab) hard-gates
+# platform selection on this endpoint's status.
+# ---------------------------------------------------------------------------
+HUB_HARD_BLOCK_KM = 30.0       # Beyond this, cannot go online at all.
+HUB_WARN_KM = 3.0              # Beyond this, UI warns; still allowed.
+CAPTURE_MAX_MOVEMENT_M = 60.0  # Between start and end of the 20s recording.
+
+
+@api.post("/go-online-capture")
+async def create_go_online_capture(
+    body: GoOnlineCaptureIn, driver: Dict = Depends(get_driver)
+):
+    # Dedup on client_action_id — the sync queue may retry.
+    existing = await db.go_online_captures.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
+    )
+    if existing:
+        return {"completed": True, **existing}
+    day_key = _ist_day_key()
+    dup = await db.go_online_captures.find_one(
+        {"driver_id": driver["id"], "day_key": day_key},
+        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
+    )
+    if dup:
+        return {"completed": True, **dup, "already_done_today": True}
+    # Duration must be within a sane range (18–30s inclusive of jitter).
+    try:
+        started = _parse_iso(body.walkaround_started_at)
+        ended = _parse_iso(body.walkaround_ended_at)
+    except Exception:
+        raise HTTPException(400, "bad_timestamps")
+    duration_s = (ended - started).total_seconds()
+    if duration_s < 15 or duration_s > 60:
+        raise HTTPException(400, "duration_out_of_range")
+    # Movement between endpoints — anti-fraud check.
+    movement_m = _haversine_m(body.start_lat, body.start_lng, body.end_lat, body.end_lng)
+    # Distance from home hub (if known).
+    hub_lat = driver.get("hub_lat")
+    hub_lng = driver.get("hub_lng")
+    distance_from_hub_km: Optional[float] = None
+    if hub_lat is not None and hub_lng is not None:
+        distance_from_hub_km = round(
+            _haversine_km(body.start_lat, body.start_lng, hub_lat, hub_lng), 3
+        )
+        if distance_from_hub_km > HUB_HARD_BLOCK_KM:
+            raise HTTPException(
+                403,
+                {
+                    "code": "too_far_from_hub",
+                    "hub_km": distance_from_hub_km,
+                    "limit_km": HUB_HARD_BLOCK_KM,
+                },
+            )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "vehicle_id": driver["vehicle_id"],
+        "day_key": day_key,
+        "walkaround_video_b64": body.walkaround_video_b64,
+        "walkaround_video_mime": body.walkaround_video_mime,
+        "selfie_photo_b64": body.selfie_photo_b64,
+        "walkaround_started_at": body.walkaround_started_at,
+        "walkaround_ended_at": body.walkaround_ended_at,
+        "duration_s": round(duration_s, 2),
+        "start_lat": body.start_lat,
+        "start_lng": body.start_lng,
+        "end_lat": body.end_lat,
+        "end_lng": body.end_lng,
+        "movement_m": round(movement_m, 2),
+        "distance_from_hub_km": distance_from_hub_km,
+        "hub_warn": bool(distance_from_hub_km is not None and distance_from_hub_km > HUB_WARN_KM),
+        "review_flag_movement": movement_m > CAPTURE_MAX_MOVEMENT_M,
+        "created_at": iso(now_utc()),
+        "client_action_id": body.client_action_id,
+    }
+    await db.go_online_captures.insert_one(row.copy())
+    row.pop("_id", None)
+    # Never echo the base64 back — clients only need the meta.
+    row.pop("walkaround_video_b64", None)
+    row.pop("selfie_photo_b64", None)
+    return {"completed": True, **row}
+
+
+@api.get("/go-online-capture/today")
+async def go_online_capture_today(driver: Dict = Depends(get_driver)):
+    day_key = _ist_day_key()
+    row = await db.go_online_captures.find_one(
+        {"driver_id": driver["id"], "day_key": day_key},
+        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
+    )
+    if not row:
+        return {"completed": False, "day_key": day_key}
+    return {"completed": True, **row}
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +953,247 @@ async def list_alarm_responses(driver: Dict = Depends(get_driver)):
 
 
 # ---------------------------------------------------------------------------
+# DOCUMENT WALLET (Part 9)
+# ---------------------------------------------------------------------------
+DOCUMENT_LABELS = {
+    "driving_licence": "Driving licence",
+    "vehicle_rc": "Vehicle RC",
+    "insurance": "Vehicle insurance",
+    "puc": "Pollution certificate (PUC)",
+    "permit": "Commercial permit",
+    "aadhaar": "Aadhaar",
+    "pan": "PAN card",
+}
+
+
+def _document_status(expires_on: Optional[str]) -> str:
+    """`expired`, `expiring_soon` (<=30 days), `ok`, or `missing`."""
+    if not expires_on:
+        return "missing"
+    try:
+        exp = datetime.strptime(expires_on, "%Y-%m-%d").date()
+    except ValueError:
+        return "missing"
+    today = now_utc().astimezone(IST).date()
+    delta = (exp - today).days
+    if delta < 0:
+        return "expired"
+    if delta <= 30:
+        return "expiring_soon"
+    return "ok"
+
+
+async def _ensure_document_placeholders(driver_id: str) -> None:
+    """Insert one row per required document type on first read, so the UI
+    can always render a full grid. Never overwrites existing rows."""
+    existing = {
+        d["type"]
+        async for d in db.documents.find(
+            {"driver_id": driver_id}, {"_id": 0, "type": 1}
+        )
+    }
+    to_add = DOCUMENT_TYPES - existing
+    if not to_add:
+        return
+    now = iso(now_utc())
+    await db.documents.insert_many(
+        [
+            {
+                "id": str(uuid.uuid4()),
+                "driver_id": driver_id,
+                "type": t,
+                "number": None,
+                "expires_on": None,
+                "image_b64": None,
+                "verified": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            for t in to_add
+        ]
+    )
+
+
+@api.get("/documents")
+async def list_documents(driver: Dict = Depends(get_driver)):
+    await _ensure_document_placeholders(driver["id"])
+    cursor = db.documents.find({"driver_id": driver["id"]}, {"_id": 0})
+    rows: List[Dict[str, Any]] = []
+    async for r in cursor:
+        r["label"] = DOCUMENT_LABELS.get(r["type"], r["type"])
+        r["status"] = _document_status(r.get("expires_on"))
+        # Never leak the base64 payload on list — it's large and clients
+        # ask for the full record via GET /documents/{id}.
+        r.pop("image_b64", None)
+        rows.append(r)
+    # Sort: expired first, then expiring_soon, then ok, then missing.
+    order = {"expired": 0, "expiring_soon": 1, "ok": 2, "missing": 3}
+    rows.sort(key=lambda r: (order.get(r["status"], 4), r.get("expires_on") or "z"))
+    return {"items": rows}
+
+
+@api.get("/documents/{document_id}")
+async def get_document(document_id: str, driver: Dict = Depends(get_driver)):
+    row = await db.documents.find_one(
+        {"id": document_id, "driver_id": driver["id"]}, {"_id": 0}
+    )
+    if not row:
+        raise HTTPException(404, "document_not_found")
+    row["label"] = DOCUMENT_LABELS.get(row["type"], row["type"])
+    row["status"] = _document_status(row.get("expires_on"))
+    return row
+
+
+@api.post("/documents")
+async def upsert_document(body: DocumentUpsertIn, driver: Dict = Depends(get_driver)):
+    # Idempotent: dedupe on (driver_id, client_action_id).
+    prior = await db.documents.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if prior:
+        prior["label"] = DOCUMENT_LABELS.get(prior["type"], prior["type"])
+        prior["status"] = _document_status(prior.get("expires_on"))
+        prior.pop("image_b64", None)
+        return prior
+    # Validate expires_on shape.
+    if body.expires_on:
+        try:
+            datetime.strptime(body.expires_on, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "expires_on_must_be_yyyy_mm_dd")
+    existing = await db.documents.find_one(
+        {"driver_id": driver["id"], "type": body.type}, {"_id": 0}
+    )
+    now = iso(now_utc())
+    if existing:
+        update = {
+            "number": body.number if body.number is not None else existing.get("number"),
+            "expires_on": body.expires_on if body.expires_on is not None else existing.get("expires_on"),
+            "image_b64": body.image_b64 if body.image_b64 is not None else existing.get("image_b64"),
+            "verified": False,   # Re-uploads require re-verification.
+            "updated_at": now,
+            "client_action_id": body.client_action_id,
+        }
+        await db.documents.update_one(
+            {"id": existing["id"], "driver_id": driver["id"]}, {"$set": update}
+        )
+        row = {**existing, **update}
+    else:
+        row = {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver["id"],
+            "type": body.type,
+            "number": body.number,
+            "expires_on": body.expires_on,
+            "image_b64": body.image_b64,
+            "verified": False,
+            "created_at": now,
+            "updated_at": now,
+            "client_action_id": body.client_action_id,
+        }
+        await db.documents.insert_one(row.copy())
+        row.pop("_id", None)
+    row["label"] = DOCUMENT_LABELS.get(row["type"], row["type"])
+    row["status"] = _document_status(row.get("expires_on"))
+    # Don't echo the base64 image payload back — it's already stored.
+    row.pop("image_b64", None)
+    return row
+
+
+@api.get("/documents/expiring/summary")
+async def documents_expiring_summary(driver: Dict = Depends(get_driver)):
+    await _ensure_document_placeholders(driver["id"])
+    counts = {"expired": 0, "expiring_soon": 0, "ok": 0, "missing": 0}
+    cursor = db.documents.find({"driver_id": driver["id"]}, {"_id": 0, "expires_on": 1})
+    async for r in cursor:
+        counts[_document_status(r.get("expires_on"))] += 1
+    counts["needs_attention"] = counts["expired"] + counts["expiring_soon"] + counts["missing"]
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# CONSENTS (Part 9)
+# ---------------------------------------------------------------------------
+CONSENT_LABELS = {
+    "location_tracking": "Location tracking during duty",
+    "camera_and_video": "Camera & video capture for inspections",
+    "cash_handling": "Handling and reconciling cash on our behalf",
+    "communications": "Operational SMS / WhatsApp / email",
+    "terms_of_service": "Ride91 driver terms of service",
+}
+
+
+async def _record_consent(
+    driver_id: str, kind: str, granted: bool, client_action_id: str
+) -> Dict[str, Any]:
+    """Append-only. Each grant / withdrawal is its own row so we retain
+    the full audit trail. The 'current' state is the newest row per kind.
+    """
+    prior = await db.consent_events.find_one(
+        {"driver_id": driver_id, "client_action_id": client_action_id}, {"_id": 0}
+    )
+    if prior:
+        return prior
+    now = iso(now_utc())
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver_id,
+        "kind": kind,
+        "granted": granted,
+        "occurred_at": now,
+        "client_action_id": client_action_id,
+    }
+    await db.consent_events.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+async def _current_consents(driver_id: str) -> List[Dict[str, Any]]:
+    # Get the newest event per kind by iterating newest-first once.
+    cursor = db.consent_events.find(
+        {"driver_id": driver_id}, {"_id": 0}
+    ).sort("occurred_at", -1)
+    seen: Dict[str, Dict[str, Any]] = {}
+    async for e in cursor:
+        if e["kind"] not in seen:
+            seen[e["kind"]] = e
+    out: List[Dict[str, Any]] = []
+    for kind in CONSENT_KINDS:
+        latest = seen.get(kind)
+        out.append(
+            {
+                "kind": kind,
+                "label": CONSENT_LABELS[kind],
+                "granted": bool(latest and latest["granted"]),
+                "last_change_at": latest["occurred_at"] if latest else None,
+            }
+        )
+    # Sort ungranted-first so the driver sees anything they've withdrawn on top.
+    out.sort(key=lambda x: (x["granted"], x["kind"]))
+    return out
+
+
+@api.get("/consents")
+async def list_consents(driver: Dict = Depends(get_driver)):
+    return {"items": await _current_consents(driver["id"])}
+
+
+@api.post("/consents")
+async def upsert_consent(body: ConsentIn, driver: Dict = Depends(get_driver)):
+    await _record_consent(driver["id"], body.kind, body.granted, body.client_action_id)
+    return {"items": await _current_consents(driver["id"])}
+
+
+@api.get("/consents/history")
+async def consent_history(driver: Dict = Depends(get_driver)):
+    cursor = db.consent_events.find(
+        {"driver_id": driver["id"]}, {"_id": 0}
+    ).sort("occurred_at", -1)
+    return {"items": [r async for r in cursor]}
+
+
+# ---------------------------------------------------------------------------
 # PLATFORM CASH (screenshot upload → provisional, or fleet job → settled)
 # ---------------------------------------------------------------------------
 @api.post("/platform-cash")
@@ -1188,10 +1589,40 @@ async def earnings_extract(body: EarningsExtractIn, driver: Dict = Depends(get_d
 # VEHICLE PING helpers
 
 
-async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> float:
-    cursor = db.vehicle_pings.find({"vehicle_id": vehicle_id}, {"_id": 0}).sort("recorded_at", 1)
-    prev = None
+async def _compute_distance(
+    vehicle_id: str, start: datetime, end: datetime
+) -> Dict[str, Any]:
+    """Compute usable driven distance between `start` (incl) and `end` (excl).
+
+    Filters applied (in order — each ping is counted in exactly one bucket):
+      1. Accuracy filter: skip pings with `accuracy_m > 30` (GPS uncertainty
+         swamps meaningful movement).
+      2. Speed filter: skip pings whose reported `speed_kmph > 120` (spike
+         from receiver glitches — a real EV is limited well below this).
+      3. Implied-speed filter: for consecutive kept pings, if the great-circle
+         speed between them exceeds 120 km/h, treat as a teleport and reset
+         the anchor without adding to distance.
+      4. Gap filter: if the time gap between the anchor and the next kept
+         ping exceeds 5 minutes, we cannot trust the intervening path —
+         reset the anchor without adding to distance.
+
+    Returns a diagnostics dict so callers can display / test the numbers.
+    """
+    cursor = db.vehicle_pings.find({"vehicle_id": vehicle_id}, {"_id": 0}).sort(
+        "recorded_at", 1
+    )
+    stats = {
+        "points_total": 0,
+        "points_kept": 0,
+        "points_rejected_accuracy": 0,
+        "points_rejected_speed": 0,
+        "segments_rejected_teleport": 0,
+        "segments_rejected_gap": 0,
+        "distance_km": 0.0,
+    }
     total_m = 0.0
+    anchor: Optional[Dict[str, Any]] = None
+    anchor_ts: Optional[datetime] = None
     async for p in cursor:
         try:
             ts = _parse_iso(p["recorded_at"])
@@ -1199,23 +1630,39 @@ async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> fl
             continue
         if ts < start or ts >= end:
             continue
+        stats["points_total"] += 1
         if p.get("accuracy_m", 0) > 30:
+            stats["points_rejected_accuracy"] += 1
             continue
-        if prev is not None:
-            d_m = _haversine_m(prev["lat"], prev["lng"], p["lat"], p["lng"])
-            try:
-                dt_s = (ts - _parse_iso(prev["recorded_at"])).total_seconds()
-            except Exception:
-                dt_s = 0
-            if dt_s > 0:
-                implied_kmph = (d_m / dt_s) * 3.6
-                if implied_kmph > 120:
-                    # noisy jump — reset the anchor and skip this segment
-                    prev = p
-                    continue
+        if p.get("speed_kmph", 0) > 120:
+            stats["points_rejected_speed"] += 1
+            continue
+        stats["points_kept"] += 1
+        if anchor is not None and anchor_ts is not None:
+            dt_s = (ts - anchor_ts).total_seconds()
+            if dt_s > 300:
+                # Gap too long — cannot infer path.
+                stats["segments_rejected_gap"] += 1
+                anchor = p
+                anchor_ts = ts
+                continue
+            d_m = _haversine_m(anchor["lat"], anchor["lng"], p["lat"], p["lng"])
+            implied_kmph = (d_m / dt_s) * 3.6 if dt_s > 0 else 0
+            if implied_kmph > 120:
+                stats["segments_rejected_teleport"] += 1
+                anchor = p
+                anchor_ts = ts
+                continue
             total_m += d_m
-        prev = p
-    return total_m / 1000.0
+        anchor = p
+        anchor_ts = ts
+    stats["distance_km"] = round(total_m / 1000.0, 3)
+    return stats
+
+
+async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> float:
+    stats = await _compute_distance(vehicle_id, start, end)
+    return float(stats["distance_km"])
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1234,6 +1681,40 @@ async def vehicle_latest(vehicle_id: str, driver: Dict = Depends(get_driver)):
         {"vehicle_id": vehicle_id}, {"_id": 0}, sort=[("recorded_at", -1)]
     )
     return row or {}
+
+
+@api.get("/vehicles/{vehicle_id}/distance")
+async def vehicle_distance(
+    vehicle_id: str,
+    business_date: Optional[str] = None,
+    from_iso: Optional[str] = None,
+    to_iso: Optional[str] = None,
+    driver: Dict = Depends(get_driver),
+):
+    """Filtered driven distance for a window.
+
+    Provide EITHER `business_date=YYYY-MM-DD` (04:00–03:59 IST bucket) OR
+    `from_iso=&to_iso=` (arbitrary UTC range). Defaults to today's business
+    day when nothing is passed. Restricted to the caller's own vehicle to
+    avoid leaking one driver's mileage to another.
+    """
+    if vehicle_id != driver["vehicle_id"]:
+        raise HTTPException(403, "not_your_vehicle")
+    if business_date:
+        start, end = business_day_bounds(business_date)
+    elif from_iso and to_iso:
+        start = _parse_iso(from_iso)
+        end = _parse_iso(to_iso)
+    else:
+        start, end = business_day_bounds(business_date_now())
+    stats = await _compute_distance(vehicle_id, start, end)
+    return {
+        "vehicle_id": vehicle_id,
+        "business_date": business_date or business_date_now(),
+        "from": iso(start),
+        "to": iso(end),
+        **stats,
+    }
 
 
 # ---------------------------------------------------------------------------

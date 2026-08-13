@@ -63,12 +63,18 @@ export default function Home() {
 
   // Inspection status. Auto-redirect on first-of-day if not complete.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
+  const [captureOk, setCaptureOk] = useState<boolean | null>(null);
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        const r = await api.get<{ completed: boolean }>("/inspection/today");
-        if (alive) setInspectionOk(r.completed);
+        const [insp, cap] = await Promise.all([
+          api.get<{ completed: boolean }>("/inspection/today"),
+          api.get<{ completed: boolean }>("/go-online-capture/today"),
+        ]);
+        if (!alive) return;
+        setInspectionOk(insp.completed);
+        setCaptureOk(cap.completed);
       } catch {
         // keep prev
       }
@@ -104,10 +110,18 @@ export default function Home() {
     async (state: string) => {
       if (!onDuty) return;
       if (currentPlatform === state) return;
+      // Gate: once per business day the driver must complete the guided
+      // walk-around + selfie capture BEFORE going online on any platform.
+      // Skips for "not_online" so drivers can toggle offline without
+      // being forced through capture again.
+      if (state !== "not_online" && captureOk === false) {
+        router.push("/go-online-capture");
+        return;
+      }
       await switchState(state, () => {});
       setTimeout(refresh, 400);
     },
-    [onDuty, currentPlatform, switchState, refresh],
+    [onDuty, currentPlatform, captureOk, switchState, refresh, router],
   );
 
   return (

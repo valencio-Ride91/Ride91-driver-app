@@ -5,6 +5,8 @@ import { useRouter } from "expo-router";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
+import { DocumentsCard } from "@/src/components/DocumentsCard";
+import { ConsentsCard } from "@/src/components/ConsentsCard";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatIST } from "@/src/i18n";
 import { useShiftAlarm } from "@/src/shift-alarms";
@@ -288,6 +290,14 @@ export default function Profile() {
               <Text style={styles.ghostText}>Refresh</Text>
             </TouchableOpacity>
           </View>
+        </Card>
+
+        <Card testID="profile-documents-card" style={{ marginTop: spacing.md }}>
+          <DocumentsCard />
+        </Card>
+
+        <Card testID="profile-consents-card" style={{ marginTop: spacing.md }}>
+          <ConsentsCard />
         </Card>
 
         <TouchableOpacity onPress={signOut} style={styles.logout} testID="logout-btn">

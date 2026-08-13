@@ -102,6 +102,194 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
+user_problem_statement_v3: |
+  Parts 6, 7, 9 for the Ride91 driver app.
+  Part 6: server-side vehicle GPS distance calculation with accuracy > 30m,
+    ping speed > 120 kmph, implied-speed > 120 kmph, and > 5-min-gap
+    filters. Endpoint: GET /api/vehicles/{vehicle_id}/distance
+    ?business_date=|from_iso=&to_iso= — returns diagnostics
+    (points_total, points_kept, points_rejected_accuracy,
+     points_rejected_speed, segments_rejected_teleport,
+     segments_rejected_gap, distance_km).
+  Part 9: Document wallet (7 doc types w/ expiry statuses & +Nd helper
+    buttons) and Consents (5 kinds, append-only audit trail w/ withdraw
+    confirmation). New endpoints: GET/POST /api/documents,
+    GET /api/documents/{id}, GET /api/documents/expiring/summary,
+    GET/POST /api/consents, GET /api/consents/history. Profile tab
+    renders two new cards.
+  Part 7: Go-Online Capture Gate (one/day). Full-screen route
+    /go-online-capture with intro → 20s guided walkaround
+    (Front/Driver/Back/Passenger, 5s each with prompts) → selfie →
+    review → submit. Uses expo-camera + offline sync queue. Server
+    endpoint POST /api/go-online-capture validates duration (15–60s),
+    hard-blocks when > 30km from hub, warns > 3km, flags
+    movement_m > 60. GET /api/go-online-capture/today powers the gate
+    on Home — first platform pick (Uber/Rapido/Ola) redirects to the
+    capture route until completed. Deduped by (driver_id, day_key)
+    AND (driver_id, client_action_id).
+
+backend:
+  - task: "Vehicle GPS distance filters (Part 6)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: >
+          Manual curl on 2026-08-08 seeded data: 324 total pings, 323 kept,
+          1 accuracy reject, 2 teleport segments, 1 gap segment, distance
+          8.685 km. Please add unit tests: (a) accuracy_m > 30 counted &
+          skipped; (b) ping speed_kmph > 120 counted & skipped;
+          (c) implied speed > 120 between kept pings resets anchor and
+          counted as teleport; (d) gap > 300s counted as gap;
+          (e) window bounds filter honours business_date OR from/to;
+          (f) 403 when calling for a vehicle that isn't the driver's.
+          Insert synthetic pings via db.vehicle_pings.insert_many, then
+          call the endpoint and assert the diagnostics.
+
+  - task: "Document wallet endpoints (Part 9)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: >
+          GET /api/documents seeds one row per DOCUMENT_TYPES on first
+          call, sorts by status severity, drops image_b64. POST
+          /api/documents upserts (idempotent on client_action_id, dedup
+          on (driver_id, type)), returns row with status + label. GET
+          /api/documents/expiring/summary counts by status. Manual curl
+          verified: 7 placeholders, DL updated to expire in 5 days →
+          expiring_soon → summary needs_attention=7.
+
+  - task: "Consents endpoints (Part 9)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: >
+          Append-only consent_events. GET /consents returns 5 rows
+          (default label + granted=false when never touched). POST
+          /consents appends a new event; GET /consents returns updated
+          state derived from newest-per-kind. Idempotent by
+          client_action_id. GET /consents/history returns full audit
+          trail newest-first.
+
+  - task: "Go-Online Capture endpoints (Part 7)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: >
+          POST /go-online-capture validates duration_s ∈ [15, 60],
+          computes movement_m, distance_from_hub_km, sets hub_warn +
+          review_flag_movement. Hard-blocks with 403 code=too_far_from_hub
+          when > 30 km from hub. Idempotent by (driver_id,
+          client_action_id) AND (driver_id, day_key). GET
+          /go-online-capture/today returns latest for the business day.
+          Manual curl verified end-to-end.
+
+frontend:
+  - task: "Profile documents card (Part 9)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/DocumentsCard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: >
+          Lists all 7 default docs sorted by status severity, badges
+          for expiring soon / expired / missing / valid. Tapping a row
+          opens a sheet with number, expiry (YYYY-MM-DD input + +30/+90/
+          +180/+365 helpers), and an image picker (base64 upload).
+          Enqueued through the offline sync queue.
+
+  - task: "Profile consents card (Part 9)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/ConsentsCard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: >
+          5 switch rows. Withdrawing an already-granted consent shows
+          native Alert confirm before flipping. Toggle enqueued to
+          POST /consents; optimistic UI flip.
+
+  - task: "Go-Online Capture Gate UI (Part 7)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/go-online-capture.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: >
+          Full-screen route mounted from _layout.tsx. Home tab pickPlatform
+          checks GET /go-online-capture/today; if not completed and picking
+          uber/rapido/ola, routes to /go-online-capture. Route has 5 phases:
+          intro (shows hub-distance with warn/block bands), walkaround
+          (guided stage bar), selfie, review, done. Uses expo-camera and
+          the offline sync queue for upload. Web preview has a placeholder
+          video for QA.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.3"
+  test_sequence: 7
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Vehicle GPS distance filters (Part 6)"
+    - "Document wallet endpoints (Part 9)"
+    - "Consents endpoints (Part 9)"
+    - "Go-Online Capture endpoints (Part 7)"
+    - "Profile documents card (Part 9)"
+    - "Profile consents card (Part 9)"
+    - "Go-Online Capture Gate UI (Part 7)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: >
+      Parts 6, 7, 9 all shipped in one iteration. Please add backend
+      tests for the distance filter, and frontend E2E for Profile
+      Documents/Consents cards + Go-Online Capture Gate (use the
+      cap-video-web-placeholder testID on the web build to skip real
+      recording). Regression on prior alarm & duty tests. Native
+      camera / native alarm still require APK build to fully validate.
+      Login: +919900000001 / OTP 123456.
+
+
 user_problem_statement_v2: |
   Ride91 driver app — Part 8b (Shift-end alarm with ETA-to-hub).
   Extends Part 8 with a second alarm per shift:
@@ -373,3 +561,68 @@ agent_communication:
       No React Native issues (no deprecated packages, no red screens, all testIDs present).
       Full details + curl-verified evidence: /app/test_reports/iteration_6.json.
 
+
+  - task: "Parts 6, 7, 9 — Vehicle distance, Go-Online-Capture, Documents + Consents"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: >
+          Iteration 7 complete — Parts 6, 7, 9 verified end-to-end. Backend: 3 new pytest
+          modules (test_vehicle_distance.py, test_documents_consents.py,
+          test_go_online_capture.py) totalling 26 tests, ALL PASS.
+
+          Part 6 (GET /api/vehicles/{vid}/distance): 3 clean 60s-apart 50m-step pings →
+          points_kept=3, distance≈0.09 km (within 0.07–0.13); one accuracy_m=45 ping →
+          points_rejected_accuracy=1, kept=3; one speed_kmph=180 →
+          points_rejected_speed=1; 2 pings 60s apart ~3km away →
+          segments_rejected_teleport=1, distance=0; 2 pings 10min apart →
+          segments_rejected_gap=1, distance=0. Foreign vehicle_id → 403
+          'not_your_vehicle'. Seeded 2026-08-08 window returns non-zero km (regression).
+          Isolated by using synthetic 2099 window so tests don't collide with seed pings.
+
+          Part 9 (docs + consents): GET /api/documents seeds exactly 7 placeholder rows on
+          first call, GET again still returns 7 (no dup seed). POST driving_licence with
+          expiry today+15 → status=expiring_soon; today-5 → expired; today+120 → ok.
+          Same client_action_id replays return identical row (single Mongo row confirmed).
+          expires_on='invalid' → 400 expires_on_must_be_yyyy_mm_dd. Summary endpoint:
+          needs_attention == expired + expiring_soon + missing (verified). GET
+          /documents/{id} returns 200 for own doc; 404 for stranger's doc (inserted with
+          driver_id='not-me'). GET /api/consents returns 5 rows all granted=false initially.
+          POST location_tracking granted=true → GET reflects; POST granted=false → GET
+          reflects false. GET /consents/history returns newest-first (verified
+          occurred_at ordering). Idempotent by client_action_id (single consent_events row).
+
+          Part 7 (go-online-capture): GET .../today before capture →
+          {completed:false, day_key:...}. POST valid body (20s duration, start/end at
+          hub) → completed:true, hub_warn:false, distance_from_hub_km<0.1,
+          review_flag_movement:false, no walkaround_video_b64/selfie_photo_b64 in
+          response. duration_s=5 → 400 duration_out_of_range. Mumbai coords
+          (19.076, 72.877) → 403 with detail dict {code:'too_far_from_hub', hub_km,
+          limit_km}. Idempotent by client_action_id. Same-day different client_action_id
+          → same row + already_done_today:true. GET .../today after → full meta, no
+          base64.
+
+          Frontend (Expo web, 390×844): login → tab-profile → documents-card renders
+          with all 7 doc-row-* + doc-status-* pills, consents-card renders with all 5
+          consent-row-* + consent-toggle-*. Tapping doc-row-driving_licence opens the
+          editor sheet — doc-input-number filled with 'KA0120200001234',
+          doc-expiry-plus-30 sets doc-input-expires='2026-09-12', doc-save closes sheet.
+          Backend verified: driving_licence document persisted with correct number and
+          expiry (status=expiring_soon at 30d). consent-toggle-location_tracking tap
+          persists granted=true in consent_events. Go-Online-Capture UI flow was NOT
+          exercised (GPS/camera unavailable in web preview — allowed by review request).
+
+          LOW-priority UX notes (not blocking): (1) DocumentsCard.refresh() runs
+          immediately after enqueue() returns, so the pill can briefly show the pre-save
+          status before the offline sync worker flushes — DB is correct either way.
+          (2) React Native Switch does not expose aria-checked on web; add
+          accessibilityState={{ checked: value }} for E2E parity.
+
+          Full report: /app/test_reports/iteration_7.json. Pytest XML:
+          /app/test_reports/pytest/pytest_iter7.xml.
