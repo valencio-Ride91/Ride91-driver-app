@@ -336,6 +336,41 @@ def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Admin auth (admin.ride91.green)
+# ---------------------------------------------------------------------------
+# Single service account gated by fixed credentials in the backend .env.
+# This is intentionally the simplest safe design for an ops team of 1-3
+# people. Tokens are opaque UUIDs stored in the `admin_sessions` collection
+# with a rolling 12-hour TTL that refreshes on activity.
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ride91-admin-2026")
+ADMIN_SESSION_HOURS = 12
+
+
+class AdminLoginIn(BaseModel):
+    username: str
+    password: str
+
+
+async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing_admin_token")
+    token = authorization.split(" ", 1)[1]
+    sess = await db.admin_sessions.find_one({"token": token}, {"_id": 0})
+    if not sess:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_admin_token")
+    if _parse_iso(sess["expires_at"]) <= now_utc():
+        await db.admin_sessions.delete_one({"token": token})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin_token_expired")
+    # Slide the expiry so an active admin doesn't get logged out mid-review.
+    new_exp = iso(now_utc() + timedelta(hours=ADMIN_SESSION_HOURS))
+    await db.admin_sessions.update_one(
+        {"token": token}, {"$set": {"expires_at": new_exp, "last_seen_at": iso(now_utc())}}
+    )
+    return {"username": sess["username"], "token": token}
+
+
+# ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
 @api.post("/auth/otp/request")
@@ -1191,6 +1226,334 @@ async def consent_history(driver: Dict = Depends(get_driver)):
         {"driver_id": driver["id"]}, {"_id": 0}
     ).sort("occurred_at", -1)
     return {"items": [r async for r in cursor]}
+
+
+# ---------------------------------------------------------------------------
+# ADMIN PANEL (admin.ride91.green)
+# ---------------------------------------------------------------------------
+# All /admin/* endpoints require an admin bearer token (see get_admin above).
+# Ops-facing helpers to power a small standalone web UI: drivers list, a live
+# map, and two review queues (walkaround captures + document verification).
+
+
+class ReviewIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: Optional[str] = None
+
+
+@api.post("/admin/login")
+async def admin_login(body: AdminLoginIn):
+    if body.username != ADMIN_USERNAME or body.password != ADMIN_PASSWORD:
+        # Constant-ish message on purpose — no user enumeration.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_credentials")
+    token = str(uuid.uuid4())
+    await db.admin_sessions.insert_one(
+        {
+            "token": token,
+            "username": body.username,
+            "created_at": iso(now_utc()),
+            "last_seen_at": iso(now_utc()),
+            "expires_at": iso(now_utc() + timedelta(hours=ADMIN_SESSION_HOURS)),
+        }
+    )
+    return {"token": token, "username": body.username, "hours_valid": ADMIN_SESSION_HOURS}
+
+
+@api.post("/admin/logout")
+async def admin_logout(admin: Dict = Depends(get_admin)):
+    await db.admin_sessions.delete_one({"token": admin["token"]})
+    return {"ok": True}
+
+
+@api.get("/admin/me")
+async def admin_me(admin: Dict = Depends(get_admin)):
+    return {"username": admin["username"]}
+
+
+# ---- Drivers ---------------------------------------------------------------
+
+
+@api.get("/admin/drivers")
+async def admin_drivers(admin: Dict = Depends(get_admin)):
+    """List all drivers with the ops-relevant snapshot: on-duty + platform,
+    cash in hand, last GPS ping, vehicle plate, hub. Optimised for a single
+    table view — never returns base64 media."""
+    drivers = [d async for d in db.drivers.find({}, {"_id": 0})]
+    vehicles = {
+        v["id"]: v async for v in db.vehicles.find({}, {"_id": 0})
+    }
+    out: List[Dict[str, Any]] = []
+    now = now_utc()
+    day_key = business_date_from_dt(now)
+    day_start, day_end = business_day_bounds(day_key)
+    for d in drivers:
+        vid = d.get("vehicle_id")
+        v = vehicles.get(vid, {})
+        # Current duty/platform state.
+        last_state = await db.duty_states.find_one(
+            {"driver_id": d["id"]}, {"_id": 0}, sort=[("started_at", -1)]
+        )
+        on_duty_row = await db.duty_states.find_one(
+            {"driver_id": d["id"], "state": "start_duty",
+             "started_at": {"$gte": iso(day_start), "$lt": iso(day_end)}},
+            {"_id": 0},
+            sort=[("started_at", -1)],
+        )
+        # Cash in hand for today (platform_cash - qr_payments of type=deposit).
+        platform_sum = 0.0
+        async for r in db.platform_cash.find(
+            {"driver_id": d["id"], "business_date": day_key}, {"_id": 0, "cash_amount": 1}
+        ):
+            platform_sum += float(r.get("cash_amount", 0))
+        deposit_sum = 0.0
+        async for r in db.qr_payments.find(
+            {"driver_id": d["id"], "business_date": day_key, "type": "deposit"},
+            {"_id": 0, "amount": 1},
+        ):
+            deposit_sum += float(r.get("amount", 0))
+        cash_in_hand = max(0.0, platform_sum - deposit_sum)
+        # Last GPS ping (for the driver's own vehicle).
+        last_ping = None
+        if vid:
+            last_ping = await db.vehicle_pings.find_one(
+                {"vehicle_id": vid}, {"_id": 0}, sort=[("recorded_at", -1)]
+            )
+        out.append(
+            {
+                "id": d["id"],
+                "name": d.get("name"),
+                "phone": d.get("phone"),
+                "hub_name": d.get("hub_name"),
+                "vehicle_number": v.get("number"),
+                "vehicle_id": vid,
+                "vehicle_soc": v.get("current_soc"),
+                "vehicle_range_km": v.get("current_range_km"),
+                "on_duty": bool(on_duty_row and (not last_state or last_state["state"] != "end_duty")),
+                "current_state": last_state["state"] if last_state else None,
+                "cash_in_hand": round(cash_in_hand, 2),
+                "cash_over_limit": cash_in_hand > CASH_LIMIT,
+                "last_ping_at": last_ping["recorded_at"] if last_ping else None,
+                "last_lat": last_ping["lat"] if last_ping else None,
+                "last_lng": last_ping["lng"] if last_ping else None,
+            }
+        )
+    out.sort(key=lambda x: (not x["on_duty"], x["name"] or ""))
+    return {"items": out, "business_date": day_key, "count": len(out)}
+
+
+# ---- Live map --------------------------------------------------------------
+
+
+@api.get("/admin/vehicles/live")
+async def admin_vehicles_live(admin: Dict = Depends(get_admin)):
+    """Latest ping per vehicle joined with the assigned driver.
+    Returns only the fields the map dot + tooltip needs."""
+    vehicles = [v async for v in db.vehicles.find({}, {"_id": 0})]
+    drivers_by_vehicle: Dict[str, Dict[str, Any]] = {}
+    async for d in db.drivers.find({"vehicle_id": {"$ne": None}}, {"_id": 0}):
+        drivers_by_vehicle[d["vehicle_id"]] = d
+    out: List[Dict[str, Any]] = []
+    now = now_utc()
+    for v in vehicles:
+        last = await db.vehicle_pings.find_one(
+            {"vehicle_id": v["id"]}, {"_id": 0}, sort=[("recorded_at", -1)]
+        )
+        if not last:
+            continue
+        d = drivers_by_vehicle.get(v["id"], {})
+        try:
+            age_min = (now - _parse_iso(last["recorded_at"])).total_seconds() / 60
+        except Exception:
+            age_min = None
+        out.append(
+            {
+                "vehicle_id": v["id"],
+                "vehicle_number": v.get("number"),
+                "driver_id": d.get("id"),
+                "driver_name": d.get("name"),
+                "hub_name": d.get("hub_name"),
+                "lat": last["lat"],
+                "lng": last["lng"],
+                "speed_kmph": last.get("speed_kmph"),
+                "soc_pct": last.get("soc_pct") or v.get("current_soc"),
+                "accuracy_m": last.get("accuracy_m"),
+                "recorded_at": last["recorded_at"],
+                "age_minutes": round(age_min, 1) if age_min is not None else None,
+                "stale": bool(age_min is not None and age_min > 10),
+            }
+        )
+    return {"items": out, "count": len(out), "server_ts": iso(now)}
+
+
+# ---- Capture review queue --------------------------------------------------
+
+
+@api.get("/admin/captures/pending")
+async def admin_captures_pending(
+    include_all: bool = False, admin: Dict = Depends(get_admin)
+):
+    """Captures that need ops review. By default: flagged for movement or
+    beyond the hub-warn radius and not yet reviewed. `include_all=true`
+    returns every capture regardless of flags."""
+    query: Dict[str, Any] = {}
+    if not include_all:
+        query = {
+            "$or": [{"review_flag_movement": True}, {"hub_warn": True}],
+            "review_decision": {"$exists": False},
+        }
+    cursor = db.go_online_captures.find(
+        query,
+        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
+    ).sort("created_at", -1)
+    items: List[Dict[str, Any]] = []
+    drivers_by_id: Dict[str, Dict[str, Any]] = {}
+    async for r in cursor:
+        did = r.get("driver_id")
+        if did and did not in drivers_by_id:
+            drivers_by_id[did] = await db.drivers.find_one(
+                {"id": did}, {"_id": 0, "name": 1, "phone": 1, "hub_name": 1}
+            ) or {}
+        d = drivers_by_id.get(did, {})
+        r["driver_name"] = d.get("name")
+        r["driver_phone"] = d.get("phone")
+        r["driver_hub"] = d.get("hub_name")
+        items.append(r)
+    return {"items": items, "count": len(items)}
+
+
+@api.get("/admin/captures/{capture_id}/media")
+async def admin_capture_media(capture_id: str, admin: Dict = Depends(get_admin)):
+    row = await db.go_online_captures.find_one({"id": capture_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "capture_not_found")
+    return {
+        "id": row["id"],
+        "walkaround_video_b64": row.get("walkaround_video_b64"),
+        "walkaround_video_mime": row.get("walkaround_video_mime"),
+        "selfie_photo_b64": row.get("selfie_photo_b64"),
+    }
+
+
+@api.post("/admin/captures/{capture_id}/review")
+async def admin_capture_review(
+    capture_id: str, body: ReviewIn, admin: Dict = Depends(get_admin)
+):
+    row = await db.go_online_captures.find_one({"id": capture_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "capture_not_found")
+    await db.go_online_captures.update_one(
+        {"id": capture_id},
+        {
+            "$set": {
+                "review_decision": body.decision,
+                "review_note": body.note,
+                "reviewed_at": iso(now_utc()),
+                "reviewed_by": admin["username"],
+            }
+        },
+    )
+    return {"ok": True, "capture_id": capture_id, "decision": body.decision}
+
+
+# ---- Document verification queue ------------------------------------------
+
+
+@api.get("/admin/documents/pending")
+async def admin_documents_pending(
+    include_all: bool = False, admin: Dict = Depends(get_admin)
+):
+    """Documents where an image has been uploaded but not yet verified.
+    `include_all=true` returns every document regardless of state."""
+    query: Dict[str, Any] = {} if include_all else {
+        "verified": False,
+        "image_b64": {"$ne": None},
+    }
+    cursor = db.documents.find(
+        query, {"_id": 0, "image_b64": 0}
+    ).sort("updated_at", -1)
+    items: List[Dict[str, Any]] = []
+    drivers_by_id: Dict[str, Dict[str, Any]] = {}
+    async for r in cursor:
+        did = r.get("driver_id")
+        if did and did not in drivers_by_id:
+            drivers_by_id[did] = await db.drivers.find_one(
+                {"id": did}, {"_id": 0, "name": 1, "phone": 1}
+            ) or {}
+        d = drivers_by_id.get(did, {})
+        r["driver_name"] = d.get("name")
+        r["driver_phone"] = d.get("phone")
+        r["label"] = DOCUMENT_LABELS.get(r["type"], r["type"])
+        r["status"] = _document_status(r.get("expires_on"))
+        items.append(r)
+    return {"items": items, "count": len(items)}
+
+
+@api.get("/admin/documents/{document_id}/media")
+async def admin_document_media(document_id: str, admin: Dict = Depends(get_admin)):
+    row = await db.documents.find_one({"id": document_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "document_not_found")
+    return {"id": row["id"], "image_b64": row.get("image_b64")}
+
+
+@api.post("/admin/documents/{document_id}/review")
+async def admin_document_review(
+    document_id: str, body: ReviewIn, admin: Dict = Depends(get_admin)
+):
+    row = await db.documents.find_one({"id": document_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "document_not_found")
+    await db.documents.update_one(
+        {"id": document_id},
+        {
+            "$set": {
+                "verified": body.decision == "approve",
+                "review_decision": body.decision,
+                "review_note": body.note,
+                "reviewed_at": iso(now_utc()),
+                "reviewed_by": admin["username"],
+                "updated_at": iso(now_utc()),
+            }
+        },
+    )
+    return {"ok": True, "document_id": document_id, "decision": body.decision}
+
+
+@api.get("/admin/summary")
+async def admin_summary(admin: Dict = Depends(get_admin)):
+    """One-shot counts for the dashboard tiles."""
+    total_drivers = await db.drivers.count_documents({})
+    today_key = business_date_now()
+    day_start, day_end = business_day_bounds(today_key)
+    duty_starts = await db.duty_states.count_documents(
+        {"state": "start_duty",
+         "started_at": {"$gte": iso(day_start), "$lt": iso(day_end)}}
+    )
+    duty_ends = await db.duty_states.count_documents(
+        {"state": "end_duty",
+         "started_at": {"$gte": iso(day_start), "$lt": iso(day_end)}}
+    )
+    captures_pending = await db.go_online_captures.count_documents(
+        {"$or": [{"review_flag_movement": True}, {"hub_warn": True}],
+         "review_decision": {"$exists": False}}
+    )
+    docs_pending = await db.documents.count_documents(
+        {"verified": False, "image_b64": {"$ne": None}}
+    )
+    docs_expiring = await db.documents.count_documents(
+        # Naive: rely on the status helper by fetching a small projection.
+        {"expires_on": {"$ne": None}}
+    )
+    # Refine docs_expiring with the helper (small collection).
+    async for r in db.documents.find({"expires_on": {"$ne": None}}, {"_id": 0, "expires_on": 1}):
+        pass  # count above is loose; the review queue is the authoritative source
+    return {
+        "total_drivers": total_drivers,
+        "on_duty_now": max(0, duty_starts - duty_ends),
+        "captures_pending": captures_pending,
+        "documents_pending": docs_pending,
+        "business_date": today_key,
+    }
 
 
 # ---------------------------------------------------------------------------
