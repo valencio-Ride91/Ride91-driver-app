@@ -1,0 +1,10 @@
+[build]
+  command = "yarn build"
+  publish = "dist"
+
+# SPA fallback — every unknown path returns index.html so client-side
+# routing works.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
