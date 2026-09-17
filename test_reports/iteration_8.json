@@ -1,0 +1,43 @@
+{
+  "summary": "Backend-only tests for the new Google (Emergent OAuth) sign-in endpoints on Ride91 driver app. 14/14 new tests pass. Covers /api/auth/session 401 paths (session_id_invalid, session_id_already_used), /api/auth/session/link/start (link_token_invalid, link_token_expired, driver_not_registered, phone_linked_to_different_google, happy path writes OTP to otp_codes), /api/auth/session/link/verify (bad_otp, google_linked_to_other_driver, happy path with google_email set + sessions row source='google' + expires_at ~ now+7d, client_action_id idempotency returns same token even after link_token is consumed), /api/auth/logout (session row deleted and follow-up /auth/me returns 401), and get_driver invariants (OTP tokens without expires_at still work, Google tokens whose expires_at is in the past return 401 session_expired and the row is deleted). OTP flow regression still passes (idempotent verify + no expires_at on OTP sessions). Cross-file regression with test_shift_end_alarm.py also green (26/26).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/auth/session/link/verify",
+        "issue": "Idempotency on client_action_id only works if a FRESH pending_google_links row exists on retry. The endpoint calls _consume_link_token() BEFORE the client_action_id short-circuit, so a straight replay with the same link_token returns 401 link_token_invalid (row was deleted on the first success). Real-world OK because a retry from a bad-network client will always re-run /auth/session first and mint a new link_token; but if a caller genuinely retries only /link/verify with the exact same link_token they'll get 401 not the cached token. Consider moving the client_action_id lookup ABOVE _consume_link_token for stricter idempotency."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_google_auth.py",
+    "/app/test_reports/pytest/pytest_iter8.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Reorder /auth/session/link/verify so the client_action_id session lookup runs BEFORE _consume_link_token, so a same-link_token replay is fully idempotent (currently a fresh link_token is required for the idempotent-retry path).",
+    "OPTIONAL: Add a small unit-level test that server-side monkeypatches httpx.AsyncClient.get to exercise the /auth/session Case A (Google email already bound to driver) and Case C (needs_link true) happy paths end-to-end. This iteration seeded pending_google_links directly to avoid a real Emergent call; both happy branches are covered logically via /link/verify but not via a full round-trip through /auth/session."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1600+ lines; the auth section alone is ~350 lines and would benefit from being split into a routers/auth.py module (protected via existing include_router). Not blocking.",
+    "_consume_link_token catches all exceptions on _parse_iso silently — good defensively, but consider logging so a malformed expires_at doesn't hide bugs.",
+    "get_driver silently swallows _parse_iso errors on expires_at as 'never expires'. Consistent with the OTP-flow no-expiry contract, but log at WARN so an ops team notices corrupted rows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_google_auth.py (NEW)"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "not_tested"
+  },
+  "seed_data_creation": "Each test seeds ephemeral pending_google_links / consumed_google_sessions / sessions rows scoped to the demo driver +919900000001, and one throw-away 'TEST_' driver on +919000000099 for the google_linked_to_other_driver case. All seed data is wiped in the autouse fixture teardown; no long-lived state.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_google_auth.py uses direct Mongo seeding of pending_google_links to test the /auth/session/link/* flows without calling Emergent. The two /auth/session 401 paths ARE exercised via HTTP (bogus session_id lets the real Emergent 401 bubble up as 'session_id_invalid' — or 'oauth_exchange_failed' if the network hop fails; both are accepted as 401 in the assertion). If you need to test /auth/session Case A/C happy paths end-to-end you must either use pytest-httpx to intercept httpx in the backend process (requires an import hook) or add a hidden test-mode env var on the backend that stubs EMERGENT_OAUTH_URL.",
+  "rca_of_issue": "No bugs found. One minor idempotency ordering observation on /auth/session/link/verify (documented under backend_issues.minor and action_items) — repro: POST /link/verify twice with the same link_token and same client_action_id; the second call 401s with link_token_invalid because _consume_link_token deletes the pending row on the first success. Mitigation: move the client_action_id short-circuit above _consume_link_token in google_link_verify()."
+}

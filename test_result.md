@@ -626,3 +626,85 @@ agent_communication:
 
           Full report: /app/test_reports/iteration_7.json. Pytest XML:
           /app/test_reports/pytest/pytest_iter7.xml.
+
+
+  - task: "Google (Emergent OAuth) sign-in — /api/auth/session, /link/start, /link/verify, /logout + get_driver invariants (Iteration 8)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "testing"
+        -comment: |
+          Backend-only. 14 new tests in /app/backend/tests/test_google_auth.py, all
+          pass (100%). Cross-file regression with test_shift_end_alarm.py also green
+          (26/26). Report: /app/test_reports/iteration_8.json. JUnit:
+          /app/test_reports/pytest/pytest_iter8.xml.
+
+          /api/auth/session — 401 paths covered via HTTP:
+          - Bogus session_id → 401 session_id_invalid (real Emergent call returns
+            non-200; test accepts either session_id_invalid or oauth_exchange_failed
+            as valid 401 detail codes so a transient network hop failure doesn't
+            flake the suite).
+          - Session_id already used → seed consumed_google_sessions row with a
+            synthetic sid, POST → 401 session_id_already_used.
+          NOTE: /auth/session Case A (email matches driver) and Case C (needs_link
+          true) happy paths were NOT exercised via HTTP end-to-end because we cannot
+          server-side-monkeypatch httpx from an out-of-process test. The logical
+          equivalent of Case C is fully covered via /link/verify below (which is what
+          Case C's link_token would drive to anyway); Case A produces the same shape
+          of {token, driver, needs_link:false} as /link/verify success does.
+
+          /api/auth/session/link/start — all 5 branches covered by seeding
+          pending_google_links directly:
+          - Random link_token → 401 link_token_invalid.
+          - Seeded row with expires_at 1 min in the past → 401 link_token_expired
+            AND the expired row is deleted by the endpoint (verified in Mongo).
+          - Unknown phone (+919000000099) → 404 driver_not_registered.
+          - Demo driver's google_email pre-set to someone.else@test.local, link
+            row's email is different → 409 phone_linked_to_different_google.
+          - Happy path with demo phone → 200 {otp_sent:true} AND an otp_codes row
+            for +919900000001 is present.
+
+          /api/auth/session/link/verify — all branches covered:
+          - Force stored OTP to '999999' (so the DEMO_OTP fallback doesn't hide
+            the bug) then POST with code '000000' → 400 bad_otp.
+          - Insert a second TEST_ driver on +919000000099 with google_email=
+            taken@test.local, seed pending link with the same email, verify with
+            demo phone → 409 google_linked_to_other_driver.
+          - Happy path: seed pending link with email=linked@test.local and a
+            picture URL, POST with DEMO_OTP → 200 needs_link:false, token, driver
+            payload with google_email/google_picture_url set. Confirmed in Mongo:
+            drivers.google_email == linked@test.local; sessions row exists with
+            source='google' and expires_at drift < 120s from now+7d;
+            pending_google_links row deleted.
+          - Idempotency (partial): replay with same client_action_id + SAME
+            link_token → 401 link_token_invalid (row was consumed). Replay with
+            same client_action_id + FRESH link_token for the same email → 200 and
+            SAME token returned (true idempotent short-circuit works when a fresh
+            link_token is provided). Documented as a minor ordering observation
+            in the iteration report — fix would be to move the client_action_id
+            lookup above _consume_link_token in google_link_verify().
+
+          /api/auth/logout — fresh OTP login, POST /auth/logout with Bearer token
+          → 200 {ok:true}, sessions row for that token deleted, follow-up
+          /api/auth/me with the same token → 401. The shared session-scoped `auth`
+          fixture token is not touched (test logs in via a separate OTP round-
+          trip to avoid poisoning other suites).
+
+          get_driver invariants:
+          - OTP-flow token: sessions row for the shared `auth` fixture has no
+            expires_at field; /api/auth/me → 200 with driver.phone matching
+            +919900000001.
+          - Expired Google token: seed sessions row with source='google' and
+            expires_at 1 min in the past; /api/auth/me → 401 detail
+            'session_expired' AND the expired row is deleted (verified in Mongo).
+
+          OTP regression: /api/auth/otp/request → 200 sent:true, verify with same
+          client_action_id twice returns the identical token, and the minted
+          session row carries NO expires_at (offline-driver contract preserved).
+
+          Full iteration report: /app/test_reports/iteration_8.json.

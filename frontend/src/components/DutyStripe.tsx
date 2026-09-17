@@ -85,9 +85,9 @@ const styles = StyleSheet.create({
   },
   segment: { height: "100%" },
   hatchWrap: { flex: 1, overflow: "hidden" },
-  hatchBase: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.muted },
+  hatchBase: { ...StyleSheet.absoluteFill, backgroundColor: colors.muted },
   hatchLines: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     flexDirection: "row",
     justifyContent: "space-between",
     opacity: 0.35,

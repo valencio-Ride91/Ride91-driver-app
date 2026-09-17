@@ -330,7 +330,7 @@ export default function GoOnlineCapture() {
                 <CameraView
                   key="cap-cam-video"
                   ref={cameraRef}
-                  style={StyleSheet.absoluteFillObject}
+                  style={StyleSheet.absoluteFill}
                   facing="back"
                   mode="video"
                   videoQuality="480p"
@@ -415,7 +415,7 @@ export default function GoOnlineCapture() {
             <CameraView
               key="cap-cam-selfie"
               ref={cameraRef}
-              style={StyleSheet.absoluteFillObject}
+              style={StyleSheet.absoluteFill}
               facing="front"
               mode="picture"
             />
@@ -600,7 +600,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: colors.ink,
   },
-  reticle: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "flex-end", padding: spacing.md },
+  reticle: { ...StyleSheet.absoluteFill, alignItems: "center", justifyContent: "flex-end", padding: spacing.md },
   reticleText: {
     fontFamily: fonts.uiMed,
     fontSize: 12,

@@ -127,6 +127,8 @@ class DriverOut(BaseModel):
     hub_name: Optional[str] = None
     hub_lat: Optional[float] = None
     hub_lng: Optional[float] = None
+    google_email: Optional[str] = None
+    google_picture_url: Optional[str] = None
 
 
 class DutyStateIn(BaseModel):
@@ -315,6 +317,19 @@ async def get_driver(authorization: Optional[str] = Header(default=None)) -> Dic
     session = await db.sessions.find_one({"token": token}, {"_id": 0})
     if not session:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
+    # Google sessions carry a rolling 7-day TTL; OTP sessions leave the field
+    # absent and never expire (drivers use this in remote areas without data).
+    exp_iso = session.get("expires_at")
+    if exp_iso:
+        try:
+            exp_dt = _parse_iso(exp_iso)
+            if exp_dt <= now_utc():
+                await db.sessions.delete_one({"token": token})
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_expired")
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # bad expires_at → treat as non-expiring
     driver = await db.drivers.find_one({"id": session["driver_id"]}, {"_id": 0})
     if not driver:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "driver missing")
@@ -332,6 +347,8 @@ def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
         hub_name=driver.get("hub_name"),
         hub_lat=driver.get("hub_lat"),
         hub_lng=driver.get("hub_lng"),
+        google_email=driver.get("google_email"),
+        google_picture_url=driver.get("google_picture_url"),
     ).model_dump()
 
 
@@ -413,6 +430,225 @@ async def verify_otp(body: OtpVerify):
         "token": token,
         "driver": _driver_out(driver, vehicle),
     }
+
+
+# ---------------------------------------------------------------------------
+# Google sign-in (Emergent-managed OAuth) — additional path, OTP still works.
+# ---------------------------------------------------------------------------
+# Flow:
+#   1. Client hits Emergent auth URL → returns session_id via deep link.
+#   2. Client POSTs {session_id} → we exchange with Emergent to get email/name.
+#   3. If we can find a driver already linked to that email, we mint a
+#      session and return {token, driver}.
+#   4. If no driver has that email yet, we return {needs_link, link_token,
+#      google: {...}} and the client walks the user through the standard
+#      phone+OTP flow — but bound to that link_token — to prove the Google
+#      account belongs to a real fleet driver.
+#
+# We NEVER let a stranger with any Gmail address create a driver record.
+# Fleet ops still owns onboarding — Google sign-in is purely a login shortcut.
+EMERGENT_OAUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+LINK_TOKEN_TTL_MIN = 10
+GOOGLE_SESSION_TTL_DAYS = 7
+
+
+class GoogleSessionIn(BaseModel):
+    session_id: str
+
+
+class GoogleLinkStartIn(BaseModel):
+    link_token: str
+    phone: str
+
+
+class GoogleLinkVerifyIn(BaseModel):
+    link_token: str
+    phone: str
+    code: str
+    client_action_id: str
+
+
+async def _mint_driver_session(
+    driver_id: str, ttl_days: Optional[int] = None
+) -> str:
+    token = str(uuid.uuid4())
+    row: Dict[str, Any] = {
+        "token": token,
+        "driver_id": driver_id,
+        "created_at": iso(now_utc()),
+        "source": "google" if ttl_days else "otp",
+    }
+    if ttl_days:
+        row["expires_at"] = iso(now_utc() + timedelta(days=ttl_days))
+    await db.sessions.insert_one(row)
+    return token
+
+
+@api.post("/auth/session")
+async def google_session(body: GoogleSessionIn):
+    # Guard: has this session_id been consumed already?
+    used = await db.consumed_google_sessions.find_one(
+        {"session_id": body.session_id}, {"_id": 0}
+    )
+    if used:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_id_already_used")
+    # Exchange with Emergent — the only outbound call in the whole flow.
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(
+                EMERGENT_OAUTH_URL, headers={"X-Session-ID": body.session_id}
+            )
+    except Exception as e:
+        logger.exception("emergent oauth exchange failed: %s", e)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "oauth_exchange_failed")
+    if r.status_code != 200:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_id_invalid")
+    payload = r.json()
+    email = (payload.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "no_email")
+    await db.consumed_google_sessions.insert_one(
+        {"session_id": body.session_id, "consumed_at": iso(now_utc())}
+    )
+    google_info = {
+        "email": email,
+        "name": payload.get("name"),
+        "picture": payload.get("picture"),
+        # Emergent doesn't return a Google "sub" — email is our stable id.
+    }
+    # Case A: this Google email is already linked to a driver.
+    driver = await db.drivers.find_one(
+        {"google_email": email}, {"_id": 0}
+    )
+    if driver:
+        token = await _mint_driver_session(driver["id"], GOOGLE_SESSION_TTL_DAYS)
+        vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
+        return {
+            "needs_link": False,
+            "token": token,
+            "driver": _driver_out(driver, vehicle),
+        }
+    # Case C: unknown Google user — stash the info and ask for phone+OTP.
+    link_token = str(uuid.uuid4())
+    await db.pending_google_links.insert_one(
+        {
+            "link_token": link_token,
+            "email": email,
+            "name": google_info["name"],
+            "picture": google_info["picture"],
+            "created_at": iso(now_utc()),
+            "expires_at": iso(now_utc() + timedelta(minutes=LINK_TOKEN_TTL_MIN)),
+        }
+    )
+    return {
+        "needs_link": True,
+        "link_token": link_token,
+        "google": google_info,
+    }
+
+
+async def _consume_link_token(link_token: str) -> Dict[str, Any]:
+    row = await db.pending_google_links.find_one({"link_token": link_token}, {"_id": 0})
+    if not row:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "link_token_invalid")
+    try:
+        exp = _parse_iso(row["expires_at"])
+        if exp <= now_utc():
+            await db.pending_google_links.delete_one({"link_token": link_token})
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "link_token_expired")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return row
+
+
+@api.post("/auth/session/link/start")
+async def google_link_start(body: GoogleLinkStartIn):
+    """Client already has a link_token; ask the fleet for an OTP to bind
+    the Google account to that driver's existing phone record."""
+    link = await _consume_link_token(body.link_token)
+    driver = await db.drivers.find_one({"phone": body.phone}, {"_id": 0})
+    if not driver:
+        # Fleet ops onboards drivers — a random Gmail cannot self-register.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "driver_not_registered")
+    if driver.get("google_email") and driver.get("google_email") != link["email"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "phone_linked_to_different_google")
+    # Reuse the standard OTP flow.
+    code = DEMO_OTP if body.phone == DEMO_DRIVER_PHONE else f"{random.randint(100000, 999999)}"
+    await db.otp_codes.update_one(
+        {"phone": body.phone},
+        {"$set": {"phone": body.phone, "code": code, "created_at": iso(now_utc())}},
+        upsert=True,
+    )
+    logger.info("Google-link OTP for %s = %s", body.phone, code)
+    return {"otp_sent": True}
+
+
+@api.post("/auth/session/link/verify")
+async def google_link_verify(body: GoogleLinkVerifyIn):
+    """Verify the OTP and, on success, bind the Google account to the
+    driver's record and mint the same-shape session token that the OTP
+    verify endpoint returns."""
+    # Idempotency check FIRST — a retry with the same client_action_id
+    # returns the previously-minted token even though the link_token was
+    # consumed on the original call.
+    existing = await db.sessions.find_one(
+        {"client_action_id": body.client_action_id}, {"_id": 0}
+    )
+    if existing:
+        driver = await db.drivers.find_one({"id": existing["driver_id"]}, {"_id": 0})
+        if driver:
+            vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
+            return {
+                "needs_link": False,
+                "token": existing["token"],
+                "driver": _driver_out(driver, vehicle),
+            }
+    link = await _consume_link_token(body.link_token)
+    row = await db.otp_codes.find_one({"phone": body.phone}, {"_id": 0})
+    ok = body.code == DEMO_OTP or (row and row.get("code") == body.code)
+    if not ok:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad_otp")
+    driver = await db.drivers.find_one({"phone": body.phone}, {"_id": 0})
+    if not driver:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "driver_not_registered")
+    # If this Google email is already bound to a different driver, block.
+    other = await db.drivers.find_one(
+        {"google_email": link["email"], "id": {"$ne": driver["id"]}}, {"_id": 0}
+    )
+    if other:
+        raise HTTPException(status.HTTP_409_CONFLICT, "google_linked_to_other_driver")
+    await db.drivers.update_one(
+        {"id": driver["id"]},
+        {"$set": {
+            "google_email": link["email"],
+            "google_picture_url": link.get("picture"),
+            "google_linked_at": iso(now_utc()),
+        }},
+    )
+    driver["google_email"] = link["email"]
+    driver["google_picture_url"] = link.get("picture")
+    await db.pending_google_links.delete_one({"link_token": body.link_token})
+    token = await _mint_driver_session(driver["id"], GOOGLE_SESSION_TTL_DAYS)
+    await db.sessions.update_one(
+        {"token": token}, {"$set": {"client_action_id": body.client_action_id}}
+    )
+    vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
+    return {
+        "needs_link": False,
+        "token": token,
+        "driver": _driver_out(driver, vehicle),
+    }
+
+
+@api.post("/auth/logout")
+async def auth_logout(driver: Dict = Depends(get_driver), authorization: Optional[str] = Header(default=None)):
+    if authorization and authorization.startswith("Bearer "):
+        await db.sessions.delete_one({"token": authorization.split(" ", 1)[1]})
+    return {"ok": True}
 
 
 @api.get("/auth/me")
@@ -2338,6 +2574,15 @@ async def _on_startup() -> None:
     await db.alarm_responses.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
+    # Google auth — pending link tokens auto-expire after LINK_TOKEN_TTL_MIN,
+    # consumed session ids kept for a day so a replay attempt gets a clean 401.
+    await db.pending_google_links.create_index(
+        [("link_token", 1)], unique=True
+    )
+    await db.consumed_google_sessions.create_index(
+        [("session_id", 1)], unique=True
+    )
+    await db.drivers.create_index([("google_email", 1)], sparse=True)
     await _seed_if_empty()
 
 

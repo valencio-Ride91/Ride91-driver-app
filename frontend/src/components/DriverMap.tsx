@@ -21,10 +21,10 @@ export const DriverMap: React.FC<Props> = ({ lat, lng }) => {
     longitudeDelta: 0.02,
   };
   return (
-    <View style={StyleSheet.absoluteFillObject}>
+    <View style={StyleSheet.absoluteFill}>
       <MapView
         provider={MAP_PROVIDER}
-        style={StyleSheet.absoluteFillObject}
+        style={StyleSheet.absoluteFill}
         region={region}
         showsUserLocation
         showsCompass={false}

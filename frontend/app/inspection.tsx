@@ -236,7 +236,7 @@ export default function Inspection() {
         <View style={styles.cameraWrap}>
           <CameraView
             ref={cameraRef}
-            style={StyleSheet.absoluteFillObject}
+            style={StyleSheet.absoluteFill}
             facing={facing}
             mode="picture"
           />
@@ -309,7 +309,7 @@ export default function Inspection() {
               <CameraView
                 key="cam-video"
                 ref={cameraRef}
-                style={StyleSheet.absoluteFillObject}
+                style={StyleSheet.absoluteFill}
                 facing="back"
                 mode="video"
                 videoQuality="480p"
@@ -488,7 +488,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.ink,
   },
   reticle: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: "center",
     justifyContent: "flex-end",
     padding: spacing.md,

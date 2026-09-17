@@ -32,19 +32,19 @@ export const DriverMap: React.FC<Props> = ({ lat, lng }) => (
 
 const styles = StyleSheet.create({
   wrap: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: "#DEE6DF",
     overflow: "hidden",
   },
   grid: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     flexDirection: "row",
     justifyContent: "space-between",
     opacity: 0.5,
   },
   gridLine: { width: 1, backgroundColor: colors.line, height: "100%" },
   center: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: "center",
     justifyContent: "center",
     gap: spacing.xs,
