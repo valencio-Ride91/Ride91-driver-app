@@ -1,11 +1,14 @@
 // Icon font loader for Expo apps. Fonts are loaded from a CDN only under
-// Expo Go (StoreClient) — that's where @expo/vector-icons' .ttf files come
-// back as 0 bytes from Metro's asset resolver on Android. Native dev/prod
-// builds and web pass an empty map, so useFonts resolves to [true, null]
-// immediately via react-native-vector-icons autolinking / web stubs.
-// ICON_VECTOR_VERSION must match @expo/vector-icons in package.json.
-// Usage: const [loaded, error] = useIconFonts();
-
+// Expo Go (StoreClient) — that's where react-native-vector-icons' .ttf
+// files come back as 0 bytes from Metro's asset resolver on Android.
+// Native dev/prod builds and web pass an empty map, so useFonts resolves
+// to [true, null] immediately via autolinking / web stubs.
+//
+// The CDN pins a specific version of the (now-legacy) @expo/vector-icons
+// package — that npm tarball is cached forever on jsdelivr and still ships
+// the exact .ttf files react-native-vector-icons expects, so keeping this
+// pin is a stable minimal way to feed Expo Go the fonts without dragging
+// the legacy package back into the app's dependency graph.
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import { useFonts } from "expo-font";
 
