@@ -2,6 +2,7 @@
 import { storage } from "@/src/utils/storage";
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL as string;
+export const API_BASE = BASE;
 export const AUTH_TOKEN_KEY = "ride91.token";
 
 async function tokenHeader(): Promise<Record<string, string>> {

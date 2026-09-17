@@ -10,6 +10,7 @@ import Drivers from "./pages/Drivers";
 import LiveMap from "./pages/LiveMap";
 import Captures from "./pages/Captures";
 import Documents from "./pages/Documents";
+import Payouts from "./pages/Payouts";
 
 import { AdminIdentity, me } from "./auth";
 
@@ -41,6 +42,7 @@ export default function App() {
             <Route path="/live-map" element={<LiveMap />} />
             <Route path="/review/captures" element={<Captures />} />
             <Route path="/review/documents" element={<Documents />} />
+            <Route path="/payouts" element={<Payouts />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         ) : (

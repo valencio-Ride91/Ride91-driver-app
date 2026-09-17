@@ -53,3 +53,20 @@ Endpoints:
 4. ✅ Settlement number expands to its inputs on tap.
 5. ✅ Every screen works in en/hi/kn via header selector.
 6. ✅ `duty_states` contains an append-only ordered history.
+
+## Payments (added June 2026)
+### Part A — Razorpay Collections (driver pays dues)
+- Hosted Checkout via `expo-web-browser` (avoids native SDK).
+- `/api/payments/razorpay/orders` → `/api/payments/razorpay/verify`.
+- Webhook `/api/webhooks/razorpay` (HMAC-SHA256, dedup by event id).
+
+### Part B — RazorpayX Payouts (fleet → driver)
+- Driver saves bank a/c or UPI VPA in Profile (`/api/payouts/bank-account`).
+- Ops triggers payout from admin panel `/payouts` route.
+- Contact + Fund Account created lazily on first payout to save quota.
+- Payouts sent with `X-Payout-Idempotency` header; local dedup on
+  `client_action_id`.
+- Webhook `/api/webhooks/razorpayx` (HMAC-SHA256 raw body, dedup by
+  `X-Razorpay-Event-Id`).
+- Test-mode payouts stay in `processing` until manually advanced on the
+  RazorpayX dashboard.

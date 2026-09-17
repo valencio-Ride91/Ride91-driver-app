@@ -6,6 +6,8 @@ import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { DepositSheet } from "@/src/components/DepositSheet";
 import { EarningsUploader } from "@/src/components/EarningsUploader";
+import { PayDuesButton } from "@/src/components/PayDuesButton";
+import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatINR } from "@/src/i18n";
@@ -169,6 +171,10 @@ export default function Money() {
           >
             <Text style={styles.depositCtaText}>Deposit now</Text>
           </TouchableOpacity>
+          <PayDuesButton
+            duesPaise={Math.round(Math.max(0, today?.cash_in_hand ?? 0) * 100)}
+            onPaid={load}
+          />
         </Card>
 
         {/* CARD 3 — Earnings this week (settled vs provisional) */}
@@ -278,6 +284,11 @@ export default function Money() {
               </View>
             }
           />
+        </Card>
+
+        {/* CARD 5 — Payouts history (RazorpayX) */}
+        <Card testID="payouts-card" style={{ marginTop: spacing.md }}>
+          <PayoutsHistoryCard />
         </Card>
       </ScrollView>
 

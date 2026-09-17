@@ -708,3 +708,212 @@ agent_communication:
           session row carries NO expires_at (offline-driver contract preserved).
 
           Full iteration report: /app/test_reports/iteration_8.json.
+
+
+  - task: "Razorpay Standard Checkout — Part A (config / orders / verify / status / checkout HTML / webhooks)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Iteration 9 — backend-only. 17 new tests in
+          /app/backend/tests/test_razorpay.py, all pass. Regression: 95/95
+          pre-existing tests remain green when run serially (`-n 0` → 112/112);
+          the xdist parallel-mode flake in TestCC_InspectionGate/TestKK
+          predates Part A and reproduces without the new tests. JUnit:
+          /app/test_reports/pytest/pytest_iter9_razorpay.xml and
+          /app/test_reports/pytest/pytest_iter9_all.xml. Full report:
+          /app/test_reports/iteration_9.json.
+
+          Coverage highlights (all 16 spec scenarios + 1 extra for /status
+          404):
+
+          /config — enabled=true, key_id == rzp_test_TdEvgeFtKea2cH,
+          dues_paise/dues_rupees mirror /money/today.cash_in_hand exactly
+          (seeded via a TEST_ platform_cash row for a dedicated TEST_
+          driver so we don't touch the demo driver's real dues).
+
+          /orders happy path (dues=0 + amount_rupees=150) → 200 with
+          amount_paise=15000, order_id starting with 'order_', Mongo row
+          persisted. NOTE: cannot monkeypatch httpx in an out-of-process
+          test suite, so this test hits Razorpay TEST mode directly
+          (rzp_test_* keys — no side effects). Idempotent replay of the
+          same client_action_id returns identical order_id; Mongo has
+          exactly one razorpay_orders row for the cid. amount_rupees=0.5
+          → 400 amount_below_minimum. dues=0 + no amount_rupees → 400
+          no_dues. dues=100 + amount_rupees=500 → 200 amount_paise=10000
+          (capped).
+
+          /verify valid signature — pre-seeded razorpay_orders row, HMAC
+          computed with RAZORPAY_KEY_SECRET on 'order_id|payment_id',
+          POST → 200 {status:'reconciled', amount_paise:15000}. Order
+          row.status flips to 'reconciled', razorpay_payment_id set,
+          reconciled_at populated. qr_payments row landed with
+          type='deposit', source='razorpay', amount=150.00,
+          razorpay_order_id / razorpay_payment_id / client_action_id
+          all correct. Invalid signature → 400 invalid_signature; order
+          stays 'created'. Unknown order/cid → 404 order_not_found.
+          Replay of same verify body twice → both 200; order stays
+          reconciled and qr_payments has exactly one row for the cid.
+
+          /status/{cid} — 200 after verify with
+          {status, order_id, payment_id, amount_paise, reconciled_at}
+          all populated; 404 for unknown cid.
+
+          /checkout HTML — GET with order_id/amount/action/redirect/name
+          returns 200 text/html containing
+          'checkout.razorpay.com/v1/checkout.js', the order_id, and the
+          test key_id. NOTE: the 503-when-KEY_ID-empty branch cannot be
+          exercised end-to-end because we cannot patch server-process env
+          from an out-of-process test — code path reviewed at
+          server.py:2238 and matches the spec.
+
+          /webhooks bad signature — POST with wrong HMAC → 400
+          bad_signature. Valid signature payment.captured — compute HMAC
+          on RAW body with RAZORPAY_WEBHOOK_SECRET; payload.notes carries
+          driver_id + client_action_id matching a seeded razorpay_orders
+          row → 200; that order flips to reconciled and a qr_payments
+          deposit row exists. Dedup — POST same event.id twice → first
+          200 (dedup falsy), second 200 {ok:true, dedup:true}; only the
+          FIRST payment_id is persisted (proves reconciliation ran once).
+          payment.failed — order.status → 'failed' with failed_at set.
+
+          Fixture design: class-scoped `rzp_driver` seeds a dedicated
+          TEST_ driver + TEST_ session token directly in Mongo, cleans
+          up all TEST_-prefixed rows (drivers, sessions, platform_cash,
+          qr_payments, razorpay_orders, webhook_events) in teardown.
+
+  - task: "RazorpayX Payouts (Part B) — Fleet-to-driver bank/UPI payouts"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Added RazorpayX Part B endpoints in /app/backend/server.py:
+              GET  /api/payouts/bank-account         (driver reads saved dest)
+              POST /api/payouts/bank-account         (driver saves bank/VPA)
+              GET  /api/payouts/history              (driver lists own payouts)
+              POST /api/admin/payouts/create         (ops triggers payout)
+              GET  /api/admin/payouts                (ops lists all payouts)
+              GET  /api/admin/payouts/{id}/refresh   (ops reconciles from RzpX)
+              POST /api/webhooks/razorpayx           (RzpX status callbacks)
+
+            Contact + Fund Account are created lazily inside
+            _ensure_rzpx_contact_and_fund_account on the first payout to
+            avoid consuming RazorpayX quota for drivers who never receive
+            a payout. Bank / VPA input is validated (6-26 digit account,
+            standard IFSC regex 'AAAA0XXXXXX', VPA must contain '@').
+            All payouts sent with X-Payout-Idempotency header (fresh UUID
+            per business payout) and queue_if_low_balance=true. Local row
+            uniqueness enforced by db.payouts index on client_action_id
+            (admin-side idempotency).
+
+            Webhook HMAC uses raw body + RAZORPAYX_WEBHOOK_SECRET (SHA-256).
+            Dedup keyed on X-Razorpay-Event-Id via db.webhook_events. On
+            payout.* events (processed/reversed/failed/updated), the row
+            in db.payouts is upserted with status/utr/status_details.
+
+            Test-mode notes:
+              - RazorpayX Test Mode uses the same base URL
+                (https://api.razorpay.com/v1); no wire changes for prod.
+              - Test payouts stay in 'processing' until manually advanced
+                on the RazorpayX dashboard; test does not move real money.
+              - RAZORPAYX_WEBHOOK_SECRET is currently a placeholder in
+                backend/.env — real signature verification requires the
+                user to configure the webhook in the RzpX dashboard.
+
+            NOT YET TESTED. Needs testing_agent run against:
+              - Save bank account (valid + all invalid variants).
+              - Save VPA (valid + invalid).
+              - Get bank account (empty + saved states).
+              - Payouts history (empty + seeded rows).
+              - Admin payout create with unknown driver / bank-not-saved
+                / mode mismatch / too-small amount → 4xx.
+              - Admin payout create happy path — must invoke real
+                RazorpayX test API and persist row (won't be idempotent-
+                reusable across runs because payout create is not
+                idempotent per-content; test only once per unique
+                client_action_id or clean between runs).
+              - Idempotent replay of same client_action_id returns dedup.
+              - Webhook signature verification (bad sig → 400,
+                dedup on event id).
+
+      - agent: testing
+        message: |
+          Iteration 10 — RazorpayX Payouts (Part B) backend testing complete.
+          21/21 pytest cases pass in /app/backend/tests/test_razorpayx_payouts.py.
+
+          Validation branches verified:
+            - GET /api/payouts/bank-account → {"saved": false} (empty) / masked
+              view (present) with verified=false until first payout.
+            - POST /api/payouts/bank-account:
+              * missing bank fields → 400 missing_bank_fields
+              * invalid IFSC 'ABCDE1234' → 400 invalid_ifsc
+              * account_number '12' → 400 invalid_account_number
+              * VPA missing '@' → 400 invalid_vpa
+              * valid bank_account & valid VPA persist correctly.
+              * Switching bank_account → VPA CLEARS razorpayx_fund_account_id
+                AND razorpayx_contact_id (verified via DB inspection with
+                stale sentinel values pre-populated).
+            - GET /api/payouts/history → empty {items: []}, then returns the
+              seeded row with razorpayx_fund_account_id / razorpayx_contact_id
+              STRIPPED from response (sensitive fields not leaked).
+            - POST /api/admin/payouts/create validation:
+              * no auth → 401
+              * amount < ₹1 → 400 amount_below_minimum
+              * unknown driver → 400 bank_account_not_saved
+              * VPA saved + mode=IMPS → 400 imps_requires_bank_account
+              * bank saved + mode=UPI → 400 upi_requires_vpa
+
+          Happy path (actually hit RazorpayX test API — one real call):
+            - ₹1 IMPS payout for a fresh TEST_ driver with valid HDFC bank
+              details returned 200 with razorpayx_id starting `pout_` ✔
+            - db.payouts row persisted with local id + razorpayx_payout_id
+              + amount_paise=100 + mode=IMPS + status + client_action_id
+              + created_by='admin'. ✔
+            - db.driver_bank_accounts row got razorpayx_contact_id AND
+              razorpayx_fund_account_id populated after the call. ✔
+            - Replay of same client_action_id returned {payout_id: <same>,
+              dedup: true} without a second RazorpayX call. ✔
+            - GET /api/admin/payouts?driver_id=<id> listed the row. ✔
+            - GET /api/admin/payouts/{payout_id}/refresh returned 200 with
+              {status, utr} keys. ✔
+
+          Webhook (/api/webhooks/razorpayx):
+            - Missing X-Razorpay-Signature → 400 bad_signature. ✔
+            - Wrong signature → 400 bad_signature. ✔
+            - Valid HMAC-SHA256 signature with payout.processed payload
+              updates db.payouts row (status=processed, utr populated,
+              last_event=payout.processed). ✔
+            - Same X-Razorpay-Event-Id sent twice → second returns
+              {ok:true, dedup:true} via the db.webhook_events unique-index
+              race → InsertOne exception path. ✔
+
+          No 5xx errors observed anywhere. No product bugs found.
+          All TEST_-prefixed data cleaned up (drivers, vehicles, sessions,
+          driver_bank_accounts, payouts, webhook_events).
+
+          One minor pytest hygiene warning: the class-scoped autouse
+          teardown fixture is defined as an instance method (deprecated in
+          pytest 10). Non-blocking — cleanup happened via the class body's
+          instance-attributes fallback + a follow-up manual sweep. Suggest
+          main agent refactor to @classmethod if desired.
+
+          RazorpayX API reached successfully at test-mode base
+          (https://api.razorpay.com/v1). No network / auth issues with the
+          provided rzp_test_ keys.
+
+          Files:
+            - NEW: /app/backend/tests/test_razorpayx_payouts.py
+            - NEW: /app/test_reports/pytest/pytest_iter10_razorpayx.xml
+            - NEW: /app/test_reports/iteration_10.json

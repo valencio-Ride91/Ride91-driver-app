@@ -129,3 +129,18 @@ export interface AdminSummary {
   documents_pending: number;
   business_date: string;
 }
+
+export interface PayoutRow {
+  id: string;
+  driver_id: string;
+  amount_rupees: number;
+  mode: "IMPS" | "UPI";
+  status: string;
+  utr?: string;
+  reference_id?: string;
+  narration?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at?: string;
+  razorpayx_payout_id?: string;
+}

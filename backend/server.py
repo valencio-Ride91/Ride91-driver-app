@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -1986,6 +1986,703 @@ async def money_weekly(driver: Dict = Depends(get_driver)):
 
 
 # ---------------------------------------------------------------------------
+# RAZORPAY STANDARD CHECKOUT — driver pays cash-in-hand dues via UPI/card.
+# ---------------------------------------------------------------------------
+# The client never sees the secret. Server creates the order, hosts a small
+# Checkout HTML page opened via expo-web-browser, and verifies the returned
+# signature against the stored order id. Webhook is the source of truth —
+# the /verify endpoint only accelerates the UX; even if the webhook lags,
+# reconciliation runs exactly once (unique client_action_id ⇒ ledger row).
+
+import hashlib
+import hmac
+import html as html_lib
+import json as _json
+
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+RAZORPAY_BASE = "https://api.razorpay.com/v1"
+
+
+class RazorpayOrderIn(BaseModel):
+    client_action_id: str
+    amount_rupees: Optional[float] = None      # optional override; caps at dues
+    note: Optional[str] = None
+
+
+class RazorpayVerifyIn(BaseModel):
+    client_action_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+def _razorpay_configured() -> bool:
+    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+
+async def _driver_dues_paise(driver_id: str) -> int:
+    """Server-authoritative dues (paise). Uses cash_in_hand — same source
+    as the Money tab. Never trust a client-supplied amount."""
+    today_bd = business_date_now()
+    tomorrow_bd = (
+        datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    snap = await _cash_snapshot(driver_id, today_bd, tomorrow_bd)
+    cash = max(0.0, float(snap["cash_in_hand"]))
+    return int(round(cash * 100))
+
+
+async def _rzp_request(method: str, path: str, **kw) -> Dict[str, Any]:
+    if not _razorpay_configured():
+        raise HTTPException(500, "razorpay_not_configured")
+    import httpx
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.request(
+            method,
+            RAZORPAY_BASE + path,
+            auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+            **kw,
+        )
+    if r.status_code >= 400:
+        logger.error("razorpay %s %s -> %s %s", method, path, r.status_code, r.text[:200])
+        raise HTTPException(502, "razorpay_request_failed")
+    return r.json()
+
+
+async def _reconcile_razorpay_once(
+    driver_id: str,
+    client_action_id: str,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    amount_paise: int,
+) -> None:
+    """Idempotently mark the order reconciled and append the deposit row
+    to qr_payments (same collection the app uses for QR-based deposits so
+    downstream money/today calculations pick it up)."""
+    # Only the first transition writes the ledger row.
+    r = await db.razorpay_orders.find_one_and_update(
+        {"razorpay_order_id": razorpay_order_id, "status": {"$ne": "reconciled"}},
+        {"$set": {
+            "status": "reconciled",
+            "razorpay_payment_id": razorpay_payment_id,
+            "reconciled_at": iso(now_utc()),
+        }},
+        return_document=False,
+    )
+    if not r:
+        return  # already reconciled — safe no-op
+    # Mirror as a "deposit" row in qr_payments so the cash-in-hand ledger
+    # decreases and the Money tab shows the payment.
+    today_bd = business_date_now()
+    await db.qr_payments.update_one(
+        {"driver_id": driver_id, "client_action_id": client_action_id},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "type": "deposit",
+            "amount": round(amount_paise / 100, 2),
+            "ts": iso(now_utc()),
+            "business_date": today_bd,
+            "source": "razorpay",
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "client_action_id": client_action_id,
+        }},
+        upsert=True,
+    )
+
+
+@api.get("/payments/razorpay/config")
+async def razorpay_config(driver: Dict = Depends(get_driver)):
+    """Small helper so the client knows if Razorpay is enabled and what
+    the driver's current dues are before opening Checkout."""
+    dues_paise = await _driver_dues_paise(driver["id"])
+    return {
+        "enabled": _razorpay_configured(),
+        "key_id": RAZORPAY_KEY_ID if _razorpay_configured() else None,
+        "dues_paise": dues_paise,
+        "dues_rupees": round(dues_paise / 100, 2),
+    }
+
+
+@api.post("/payments/razorpay/orders")
+async def create_razorpay_order(
+    body: RazorpayOrderIn, driver: Dict = Depends(get_driver)
+):
+    if not _razorpay_configured():
+        raise HTTPException(503, "razorpay_not_configured")
+    # Idempotent replay.
+    existing = await db.razorpay_orders.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return {
+            "order_id": existing["razorpay_order_id"],
+            "amount_paise": existing["amount_paise"],
+            "currency": "INR",
+            "key_id": RAZORPAY_KEY_ID,
+            "status": existing["status"],
+        }
+    dues_paise = await _driver_dues_paise(driver["id"])
+    # Support partial payment. If client asked for a specific amount, cap
+    # it at dues; if dues == 0 we still allow a driver to prepay a small
+    # amount (min ₹1 = 100 paise per Razorpay).
+    amount_paise = dues_paise
+    if body.amount_rupees is not None:
+        req = int(round(float(body.amount_rupees) * 100))
+        if req < 100:
+            raise HTTPException(400, "amount_below_minimum")
+        amount_paise = min(req, dues_paise) if dues_paise > 0 else req
+    if amount_paise < 100:
+        raise HTTPException(400, "no_dues")
+    order = await _rzp_request(
+        "POST", "/orders",
+        json={
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": body.client_action_id[:40],
+            "notes": {
+                "driver_id": driver["id"],
+                "driver_name": driver.get("name") or "",
+                "client_action_id": body.client_action_id,
+            },
+            "payment_capture": 1,
+        },
+    )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "client_action_id": body.client_action_id,
+        "razorpay_order_id": order["id"],
+        "amount_paise": amount_paise,
+        "note": body.note,
+        "status": "created",
+        "created_at": iso(now_utc()),
+    }
+    await db.razorpay_orders.insert_one(row)
+    return {
+        "order_id": order["id"],
+        "amount_paise": amount_paise,
+        "currency": "INR",
+        "key_id": RAZORPAY_KEY_ID,
+        "status": "created",
+    }
+
+
+@api.post("/payments/razorpay/verify")
+async def verify_razorpay_payment(body: RazorpayVerifyIn):
+    """Called by the hosted Checkout page — runs unauthenticated because
+    the browser tab can't carry a Bearer token. The HMAC signature (which
+    only Razorpay + our server can produce) is the actual auth here."""
+    rec = await db.razorpay_orders.find_one(
+        {
+            "client_action_id": body.client_action_id,
+            "razorpay_order_id": body.razorpay_order_id,
+        },
+        {"_id": 0},
+    )
+    if not rec:
+        raise HTTPException(404, "order_not_found")
+    msg = f"{rec['razorpay_order_id']}|{body.razorpay_payment_id}".encode()
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(), msg, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature):
+        raise HTTPException(400, "invalid_signature")
+    await _reconcile_razorpay_once(
+        driver_id=rec["driver_id"],
+        client_action_id=body.client_action_id,
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        amount_paise=rec["amount_paise"],
+    )
+    return {"status": "reconciled", "amount_paise": rec["amount_paise"]}
+
+
+@api.get("/payments/razorpay/status/{client_action_id}")
+async def razorpay_order_status(
+    client_action_id: str, driver: Dict = Depends(get_driver)
+):
+    rec = await db.razorpay_orders.find_one(
+        {"driver_id": driver["id"], "client_action_id": client_action_id},
+        {"_id": 0},
+    )
+    if not rec:
+        raise HTTPException(404, "order_not_found")
+    return {
+        "status": rec["status"],
+        "order_id": rec["razorpay_order_id"],
+        "payment_id": rec.get("razorpay_payment_id"),
+        "amount_paise": rec["amount_paise"],
+        "reconciled_at": rec.get("reconciled_at"),
+    }
+
+
+@api.get("/payments/razorpay/checkout", response_class=Response)
+async def razorpay_checkout_page(
+    order_id: str,
+    amount: int,
+    action: str,
+    redirect: str,
+    name: str = "Ride91 driver",
+):
+    """Hosted Checkout page — opened by the app inside expo-web-browser.
+    All params are already validated by the /orders call. The client
+    action id lives in Razorpay `notes` and drives our reconciliation.
+    This page is intentionally self-contained and does NOT require an
+    auth header (the Bearer token can't be forwarded through a WebView).
+    """
+    if not _razorpay_configured():
+        raise HTTPException(503, "razorpay_not_configured")
+    safe_order = html_lib.escape(order_id)
+    safe_action = html_lib.escape(action)
+    safe_redirect = html_lib.escape(redirect)
+    safe_name = html_lib.escape(name)
+    verify_url = "/api/payments/razorpay/verify"
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ride91 · Pay dues</title><style>body{{font-family:-apple-system,system-ui,sans-serif;background:#EEF1EC;color:#10231C;margin:0;padding:40px 24px;text-align:center}} .card{{max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(16,35,28,.08)}} h1{{margin:0 0 8px}} .amt{{font-size:36px;font-weight:700;color:#0B7A4B;margin:16px 0}} button{{background:#0B7A4B;color:#fff;border:none;border-radius:8px;padding:14px 28px;font-size:16px;font-weight:600;cursor:pointer;width:100%}} .muted{{color:#67756D;font-size:13px;margin-top:16px}}</style></head><body><div class="card"><h1>Ride91 · Pay dues</h1><div class="amt">₹{amount/100:.2f}</div><button id="pay">Open Razorpay</button><div class="muted">Test card: 4111 1111 1111 1111 · any CVV · any future date</div></div><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const CFG={_json.dumps({"key":RAZORPAY_KEY_ID,"order_id":safe_order,"amount":amount,"action":safe_action,"redirect":safe_redirect,"name":safe_name,"verify":verify_url})};function pay(){{const rzp=new Razorpay({{key:CFG.key,order_id:CFG.order_id,amount:CFG.amount,currency:"INR",name:CFG.name,description:"Driver dues",theme:{{color:"#0B7A4B"}},handler:async function(r){{await fetch(CFG.verify,{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{client_action_id:CFG.action,razorpay_payment_id:r.razorpay_payment_id,razorpay_order_id:r.razorpay_order_id,razorpay_signature:r.razorpay_signature}})}}).catch(()=>{{}});location.href=CFG.redirect+"#status=paid&order_id="+encodeURIComponent(r.razorpay_order_id);}},modal:{{ondismiss:function(){{location.href=CFG.redirect+"#status=dismissed";}}}}}});rzp.open();}}document.getElementById("pay").onclick=pay;setTimeout(pay,300);</script></body></html>"""
+    return Response(content=page, media_type="text/html")
+
+
+@api.post("/webhooks/razorpay")
+async def razorpay_webhook(req: Request):
+    """Razorpay → us. Source of truth for payment state. Verify HMAC on
+    the RAW body before parsing JSON. Dedup by event id."""
+    raw = await req.body()
+    got = req.headers.get("X-Razorpay-Signature", "")
+    if not RAZORPAY_WEBHOOK_SECRET:
+        raise HTTPException(503, "webhook_not_configured")
+    want = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(got, want):
+        raise HTTPException(400, "bad_signature")
+    event = _json.loads(raw)
+    event_id = event.get("id") or hashlib.sha256(raw).hexdigest()
+    try:
+        await db.webhook_events.insert_one(
+            {"event_id": event_id, "received_at": iso(now_utc()), "kind": event.get("event")}
+        )
+    except Exception:
+        return {"ok": True, "dedup": True}
+    kind = event.get("event") or ""
+    if kind in ("payment.captured", "order.paid"):
+        # Pull amount + order + client_action_id from the payload.
+        payload = event.get("payload") or {}
+        payment = (payload.get("payment") or {}).get("entity") or {}
+        order = (payload.get("order") or {}).get("entity") or {}
+        notes = payment.get("notes") or order.get("notes") or {}
+        order_id = payment.get("order_id") or order.get("id")
+        payment_id = payment.get("id")
+        client_action_id = notes.get("client_action_id")
+        driver_id = notes.get("driver_id")
+        amount_paise = payment.get("amount") or order.get("amount") or 0
+        if order_id and payment_id and client_action_id and driver_id:
+            await _reconcile_razorpay_once(
+                driver_id=driver_id,
+                client_action_id=client_action_id,
+                razorpay_order_id=order_id,
+                razorpay_payment_id=payment_id,
+                amount_paise=int(amount_paise),
+            )
+    elif kind == "payment.failed":
+        payload = event.get("payload") or {}
+        payment = (payload.get("payment") or {}).get("entity") or {}
+        order_id = payment.get("order_id")
+        if order_id:
+            await db.razorpay_orders.update_one(
+                {"razorpay_order_id": order_id, "status": {"$ne": "reconciled"}},
+                {"$set": {"status": "failed", "failed_at": iso(now_utc())}},
+            )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# RAZORPAYX PAYOUTS (Part B) — fleet → driver bank/UPI payouts.
+# ---------------------------------------------------------------------------
+# Two-sided design:
+#   Driver side  : saves bank account or VPA, views their payouts history.
+#   Admin/Ops    : creates a Contact + Fund Account per driver on demand,
+#                  then triggers a payout (IMPS/UPI). Status updates arrive
+#                  via /webhooks/razorpayx and update the local payout row.
+#
+# RazorpayX API base is the same as regular Razorpay (v1). Auth = Basic Auth
+# with RAZORPAYX_KEY_ID / RAZORPAYX_KEY_SECRET. Idempotency header required
+# for every payout create so retries don't double-pay.
+
+RAZORPAYX_KEY_ID = os.environ.get("RAZORPAYX_KEY_ID", "")
+RAZORPAYX_KEY_SECRET = os.environ.get("RAZORPAYX_KEY_SECRET", "")
+RAZORPAYX_ACCOUNT_NUMBER = os.environ.get("RAZORPAYX_ACCOUNT_NUMBER", "")
+RAZORPAYX_WEBHOOK_SECRET = os.environ.get("RAZORPAYX_WEBHOOK_SECRET", "")
+RAZORPAYX_BASE = "https://api.razorpay.com/v1"
+
+
+def _razorpayx_configured() -> bool:
+    return bool(
+        RAZORPAYX_KEY_ID and RAZORPAYX_KEY_SECRET and RAZORPAYX_ACCOUNT_NUMBER
+    )
+
+
+async def _rzpx_request(method: str, path: str, **kw) -> Dict[str, Any]:
+    if not _razorpayx_configured():
+        raise HTTPException(503, "razorpayx_not_configured")
+    import httpx
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.request(
+            method,
+            RAZORPAYX_BASE + path,
+            auth=(RAZORPAYX_KEY_ID, RAZORPAYX_KEY_SECRET),
+            **kw,
+        )
+    if r.status_code >= 400:
+        logger.error(
+            "razorpayx %s %s -> %s %s", method, path, r.status_code, r.text[:300]
+        )
+        # Bubble up gateway-friendly context so admin UI can show it.
+        try:
+            body = r.json()
+            msg = ((body.get("error") or {}).get("description")) or r.text[:200]
+        except Exception:
+            msg = r.text[:200]
+        raise HTTPException(502, f"razorpayx: {msg}")
+    return r.json()
+
+
+# ---------- Driver-facing: bank account & payout history --------------------
+
+class BankAccountIn(BaseModel):
+    kind: Literal["bank_account", "vpa"]
+    # bank_account
+    account_holder: Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc: Optional[str] = None
+    # vpa
+    vpa: Optional[str] = None
+
+
+def _validate_bank_input(b: BankAccountIn) -> None:
+    if b.kind == "bank_account":
+        if not (b.account_holder and b.account_number and b.ifsc):
+            raise HTTPException(400, "missing_bank_fields")
+        if len(b.account_number) < 6 or len(b.account_number) > 26:
+            raise HTTPException(400, "invalid_account_number")
+        import re
+        if not re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", b.ifsc.upper()):
+            raise HTTPException(400, "invalid_ifsc")
+    else:
+        if not b.vpa or "@" not in b.vpa:
+            raise HTTPException(400, "invalid_vpa")
+
+
+def _mask_account(s: str) -> str:
+    if not s:
+        return ""
+    if "@" in s:  # vpa
+        u, d = s.split("@", 1)
+        return (u[:2] + "***@" + d) if len(u) > 3 else "***@" + d
+    if len(s) <= 4:
+        return "****"
+    return "*" * (len(s) - 4) + s[-4:]
+
+
+@api.get("/payouts/bank-account")
+async def get_bank_account(driver: Dict = Depends(get_driver)):
+    row = await db.driver_bank_accounts.find_one(
+        {"driver_id": driver["id"]}, {"_id": 0}
+    )
+    if not row:
+        return {"saved": False}
+    return {
+        "saved": True,
+        "kind": row.get("kind"),
+        "masked": row.get("masked"),
+        "account_holder": row.get("account_holder"),
+        "ifsc": row.get("ifsc"),
+        "verified": bool(row.get("razorpayx_fund_account_id")),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+@api.post("/payouts/bank-account")
+async def save_bank_account(
+    body: BankAccountIn, driver: Dict = Depends(get_driver)
+):
+    """Store the driver's payout destination. We don't call RazorpayX
+    yet — the Contact + Fund Account are created lazily when ops
+    triggers the first payout. This avoids consuming RazorpayX quota for
+    drivers who never receive a payout."""
+    _validate_bank_input(body)
+    ifsc = (body.ifsc or "").upper() if body.kind == "bank_account" else None
+    doc = {
+        "driver_id": driver["id"],
+        "kind": body.kind,
+        "account_holder": body.account_holder,
+        "account_number": body.account_number,   # kept for RazorpayX call later
+        "ifsc": ifsc,
+        "vpa": body.vpa,
+        "masked": _mask_account(
+            body.account_number or body.vpa or ""
+        ),
+        # Invalidate any old fund account when destination changes.
+        "razorpayx_contact_id": None,
+        "razorpayx_fund_account_id": None,
+        "updated_at": iso(now_utc()),
+    }
+    await db.driver_bank_accounts.update_one(
+        {"driver_id": driver["id"]},
+        {"$set": doc, "$setOnInsert": {"created_at": iso(now_utc())}},
+        upsert=True,
+    )
+    return {
+        "saved": True,
+        "kind": doc["kind"],
+        "masked": doc["masked"],
+        "verified": False,
+    }
+
+
+@api.get("/payouts/history")
+async def payouts_history(driver: Dict = Depends(get_driver)):
+    cursor = db.payouts.find(
+        {"driver_id": driver["id"]}, {"_id": 0}
+    ).sort("created_at", -1).limit(50)
+    items = [p async for p in cursor]
+    # Strip fields that mustn't leave the server.
+    for p in items:
+        p.pop("razorpayx_fund_account_id", None)
+        p.pop("razorpayx_contact_id", None)
+    return {"items": items}
+
+
+# ---------- Admin-facing: create Contact/FundAccount + trigger payout --------
+
+async def _ensure_rzpx_contact_and_fund_account(driver_id: str) -> Dict[str, Any]:
+    """Idempotently create/reuse a Contact and Fund Account for the driver
+    using their saved bank details. Returns fund_account_id."""
+    drv = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
+    if not drv:
+        raise HTTPException(404, "driver_not_found")
+    ba = await db.driver_bank_accounts.find_one(
+        {"driver_id": driver_id}, {"_id": 0}
+    )
+    if not ba:
+        raise HTTPException(400, "bank_account_not_saved")
+    # Reuse existing.
+    if ba.get("razorpayx_fund_account_id"):
+        return {"fund_account_id": ba["razorpayx_fund_account_id"]}
+
+    # ---- Contact
+    contact_id = ba.get("razorpayx_contact_id")
+    if not contact_id:
+        contact_payload = {
+            "name": (drv.get("name") or "Ride91 driver")[:50],
+            "email": drv.get("email") or (drv.get("google_email") or ""),
+            "contact": (drv.get("phone") or "").lstrip("+"),
+            "type": "employee",
+            "reference_id": f"driver-{driver_id}",
+            "notes": {"driver_id": driver_id},
+        }
+        # RazorpayX rejects empty email/contact — trim keys.
+        contact_payload = {k: v for k, v in contact_payload.items() if v}
+        c = await _rzpx_request("POST", "/contacts", json=contact_payload)
+        contact_id = c["id"]
+
+    # ---- Fund Account
+    if ba["kind"] == "bank_account":
+        fa_payload = {
+            "contact_id": contact_id,
+            "account_type": "bank_account",
+            "bank_account": {
+                "name": ba["account_holder"],
+                "ifsc": ba["ifsc"],
+                "account_number": ba["account_number"],
+            },
+        }
+    else:
+        fa_payload = {
+            "contact_id": contact_id,
+            "account_type": "vpa",
+            "vpa": {"address": ba["vpa"]},
+        }
+    fa = await _rzpx_request("POST", "/fund_accounts", json=fa_payload)
+    await db.driver_bank_accounts.update_one(
+        {"driver_id": driver_id},
+        {"$set": {
+            "razorpayx_contact_id": contact_id,
+            "razorpayx_fund_account_id": fa["id"],
+            "verified_at": iso(now_utc()),
+        }},
+    )
+    return {"fund_account_id": fa["id"]}
+
+
+class AdminPayoutIn(BaseModel):
+    driver_id: str
+    amount_rupees: float = Field(gt=0)
+    mode: Literal["IMPS", "UPI"] = "IMPS"
+    narration: Optional[str] = "Ride91 driver payout"
+    reference_id: Optional[str] = None
+    client_action_id: Optional[str] = None  # ops-side idempotency
+
+
+@api.post("/admin/payouts/create")
+async def admin_create_payout(
+    body: AdminPayoutIn, admin: Dict = Depends(get_admin)
+):
+    """Ops-triggered payout. Enforces:
+      - min ₹1 (100 paise) per Razorpay rules.
+      - IMPS requires bank_account destination; UPI requires vpa.
+      - Idempotent per (admin, client_action_id) to survive retries.
+    """
+    amount_paise = int(round(body.amount_rupees * 100))
+    if amount_paise < 100:
+        raise HTTPException(400, "amount_below_minimum")
+
+    action = body.client_action_id or str(uuid.uuid4())
+    existing = await db.payouts.find_one(
+        {"client_action_id": action}, {"_id": 0}
+    )
+    if existing:
+        return {"payout_id": existing["id"], "status": existing["status"], "dedup": True}
+
+    # Ensure destination compatibility.
+    ba = await db.driver_bank_accounts.find_one(
+        {"driver_id": body.driver_id}, {"_id": 0}
+    )
+    if not ba:
+        raise HTTPException(400, "bank_account_not_saved")
+    if body.mode == "IMPS" and ba["kind"] != "bank_account":
+        raise HTTPException(400, "imps_requires_bank_account")
+    if body.mode == "UPI" and ba["kind"] != "vpa":
+        raise HTTPException(400, "upi_requires_vpa")
+
+    fa = await _ensure_rzpx_contact_and_fund_account(body.driver_id)
+    ref_id = body.reference_id or f"ride91-{action[:20]}"
+    idem = str(uuid.uuid4())
+    payload = {
+        "account_number": RAZORPAYX_ACCOUNT_NUMBER,
+        "fund_account_id": fa["fund_account_id"],
+        "amount": amount_paise,
+        "currency": "INR",
+        "mode": body.mode,
+        "purpose": "payout",
+        "queue_if_low_balance": True,
+        "reference_id": ref_id,
+        "narration": (body.narration or "Ride91 driver payout")[:30],
+        "notes": {
+            "driver_id": body.driver_id,
+            "client_action_id": action,
+        },
+    }
+    resp = await _rzpx_request(
+        "POST", "/payouts",
+        json=payload,
+        headers={"X-Payout-Idempotency": idem},
+    )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": body.driver_id,
+        "razorpayx_payout_id": resp["id"],
+        "razorpayx_fund_account_id": fa["fund_account_id"],
+        "amount_paise": amount_paise,
+        "amount_rupees": round(amount_paise / 100, 2),
+        "mode": body.mode,
+        "reference_id": ref_id,
+        "narration": payload["narration"],
+        "status": resp.get("status") or "processing",
+        "utr": resp.get("utr"),
+        "status_details": resp.get("status_details"),
+        "client_action_id": action,
+        "created_by": admin["username"],
+        "created_at": iso(now_utc()),
+        "updated_at": iso(now_utc()),
+    }
+    await db.payouts.insert_one(row.copy())
+    return {"payout_id": row["id"], "status": row["status"], "razorpayx_id": resp["id"]}
+
+
+@api.get("/admin/payouts")
+async def admin_list_payouts(
+    driver_id: Optional[str] = None,
+    limit: int = 100,
+    admin: Dict = Depends(get_admin),
+):
+    q: Dict[str, Any] = {}
+    if driver_id:
+        q["driver_id"] = driver_id
+    cursor = db.payouts.find(q, {"_id": 0}).sort("created_at", -1).limit(min(limit, 500))
+    items = [p async for p in cursor]
+    return {"items": items}
+
+
+@api.get("/admin/payouts/{payout_id}/refresh")
+async def admin_refresh_payout(
+    payout_id: str, admin: Dict = Depends(get_admin)
+):
+    """Reconciliation fallback: pull latest state from RazorpayX by id."""
+    rec = await db.payouts.find_one({"id": payout_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "payout_not_found")
+    data = await _rzpx_request("GET", f"/payouts/{rec['razorpayx_payout_id']}")
+    await db.payouts.update_one(
+        {"id": payout_id},
+        {"$set": {
+            "status": data.get("status") or rec["status"],
+            "utr": data.get("utr"),
+            "status_details": data.get("status_details"),
+            "updated_at": iso(now_utc()),
+        }},
+    )
+    return {"status": data.get("status"), "utr": data.get("utr")}
+
+
+# ---------- Webhook -----------------------------------------------------------
+
+@api.post("/webhooks/razorpayx")
+async def razorpayx_webhook(req: Request):
+    """RazorpayX → us. Same signature scheme as regular Razorpay webhooks
+    (HMAC-SHA256 of raw body). Deduped by X-Razorpay-Event-Id."""
+    raw = await req.body()
+    got = req.headers.get("X-Razorpay-Signature", "")
+    event_hdr = req.headers.get("X-Razorpay-Event-Id", "")
+    if not RAZORPAYX_WEBHOOK_SECRET:
+        raise HTTPException(503, "webhook_not_configured")
+    want = hmac.new(
+        RAZORPAYX_WEBHOOK_SECRET.encode(), raw, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(got, want):
+        raise HTTPException(400, "bad_signature")
+    event = _json.loads(raw)
+    event_id = event_hdr or event.get("id") or hashlib.sha256(raw).hexdigest()
+    try:
+        await db.webhook_events.insert_one({
+            "event_id": event_id,
+            "kind": event.get("event"),
+            "received_at": iso(now_utc()),
+            "source": "razorpayx",
+        })
+    except Exception:
+        return {"ok": True, "dedup": True}
+    name = event.get("event") or ""
+    if name.startswith("payout."):
+        payload = event.get("payload") or {}
+        entity = (payload.get("payout") or {}).get("entity") or {}
+        rzpx_id = entity.get("id")
+        if rzpx_id:
+            await db.payouts.update_one(
+                {"razorpayx_payout_id": rzpx_id},
+                {"$set": {
+                    "status": entity.get("status") or "updated",
+                    "utr": entity.get("utr"),
+                    "status_details": entity.get("status_details"),
+                    "updated_at": iso(now_utc()),
+                    "last_event": name,
+                }},
+            )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # REQUESTS
 # ---------------------------------------------------------------------------
 @api.post("/requests")
@@ -2583,6 +3280,17 @@ async def _on_startup() -> None:
         [("session_id", 1)], unique=True
     )
     await db.drivers.create_index([("google_email", 1)], sparse=True)
+    # Razorpay dedup — order per driver+action; unique order id from Razorpay.
+    await db.razorpay_orders.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.razorpay_orders.create_index([("razorpay_order_id", 1)], unique=True)
+    await db.webhook_events.create_index([("event_id", 1)], unique=True)
+    # RazorpayX payouts (Part B).
+    await db.driver_bank_accounts.create_index([("driver_id", 1)], unique=True)
+    await db.payouts.create_index([("client_action_id", 1)], unique=True)
+    await db.payouts.create_index([("razorpayx_payout_id", 1)], unique=True)
+    await db.payouts.create_index([("driver_id", 1), ("created_at", -1)])
     await _seed_if_empty()
 
 

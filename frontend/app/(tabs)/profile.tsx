@@ -7,6 +7,7 @@ import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { DocumentsCard } from "@/src/components/DocumentsCard";
 import { ConsentsCard } from "@/src/components/ConsentsCard";
+import { BankAccountCard } from "@/src/components/BankAccountCard";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatIST } from "@/src/i18n";
 import { useShiftAlarm } from "@/src/shift-alarms";
@@ -294,6 +295,10 @@ export default function Profile() {
 
         <Card testID="profile-documents-card" style={{ marginTop: spacing.md }}>
           <DocumentsCard />
+        </Card>
+
+        <Card testID="profile-bank-card" style={{ marginTop: spacing.md }}>
+          <BankAccountCard />
         </Card>
 
         <Card testID="profile-consents-card" style={{ marginTop: spacing.md }}>

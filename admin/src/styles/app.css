@@ -159,10 +159,31 @@ input:focus, textarea:focus, select:focus {
   border-radius: 999px;
   margin-top: 8px;
 }
-.tag.warn { background: #FBEAC8; color: #8A5A00; }
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.tag.warn, .tag.amber { background: #FBEAC8; color: #8A5A00; }
 .tag.alert { background: #F5D4CE; color: var(--alert); }
-.tag.ok { background: #DCEEE3; color: var(--live); }
+.tag.ok, .tag.live { background: #DCEEE3; color: var(--live); }
 .tag.muted { background: var(--line); color: var(--muted); }
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.ghost:hover { background: var(--paper); }
 
 /* Card */
 .card {

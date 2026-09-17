@@ -9,6 +9,7 @@ const NAV = [
   { to: "/live-map", label: "Live map" },
   { to: "/review/captures", label: "Capture reviews" },
   { to: "/review/documents", label: "Document reviews" },
+  { to: "/payouts", label: "Payouts" },
 ];
 
 interface Props {
