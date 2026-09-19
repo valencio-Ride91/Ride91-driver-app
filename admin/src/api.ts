@@ -199,3 +199,77 @@ export interface PayoutRow {
   updated_at?: string;
   razorpayx_payout_id?: string;
 }
+
+// ---- Ops queues ------------------------------------------------------------
+
+export interface CashRow {
+  driver_id: string;
+  name: string | null;
+  phone: string | null;
+  hub_name: string | null;
+  collected_to_yesterday: number;
+  paid_in_total: number;
+  paid_in_today: number;
+  balance: number;
+  you_owe: number;
+  in_credit: number;
+  over_limit: boolean;
+}
+
+export interface CashResponse {
+  items: CashRow[];
+  totals: {
+    collected_to_yesterday: number;
+    paid_in_total: number;
+    paid_in_today: number;
+    owed: number;
+    over_limit: number;
+  };
+  count: number;
+  cash_limit: number;
+  as_of_business_date: string;
+}
+
+export interface RequestRow {
+  id: string;
+  driver_id: string;
+  driver_name: string | null;
+  driver_phone: string | null;
+  type: "advance" | "holiday" | "extra_hours" | string;
+  payload: Record<string, unknown>;
+  state: "pending" | "approved" | "rejected" | string;
+  created_at: string;
+  decided_at: string | null;
+  decided_by?: string;
+  decision_note?: string | null;
+}
+
+export interface InspectionRow {
+  id: string;
+  driver_id: string;
+  driver_name: string | null;
+  driver_phone: string | null;
+  vehicle_id: string | null;
+  vehicle_number: string | null;
+  day_key: string;
+  created_at: string;
+  exterior_video_mime: string | null;
+  has_photo: boolean;
+}
+
+export interface AlarmRow {
+  id: string;
+  driver_id: string;
+  driver_name: string | null;
+  driver_phone: string | null;
+  schedule_id: string;
+  phase: "start" | "end" | string;
+  response: string;
+  reason_code: string | null;
+  reason_note: string | null;
+  back_by: string | null;
+  eta_minutes: number | null;
+  fired_at: string | null;
+  responded_at: string | null;
+  created_at: string;
+}

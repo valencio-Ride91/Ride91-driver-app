@@ -7,9 +7,13 @@ const NAV = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/bookings", label: "Bookings" },
   { to: "/drivers", label: "Drivers" },
+  { to: "/cash", label: "Cash" },
+  { to: "/requests", label: "Requests" },
   { to: "/live-map", label: "Live map" },
   { to: "/review/captures", label: "Capture reviews" },
   { to: "/review/documents", label: "Document reviews" },
+  { to: "/review/inspections", label: "Inspections" },
+  { to: "/shift-alarms", label: "Shift alarms" },
   { to: "/payouts", label: "Payouts" },
 ];
 

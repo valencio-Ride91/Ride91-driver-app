@@ -12,6 +12,10 @@ import LiveMap from "./pages/LiveMap";
 import Captures from "./pages/Captures";
 import Documents from "./pages/Documents";
 import Payouts from "./pages/Payouts";
+import Cash from "./pages/Cash";
+import Requests from "./pages/Requests";
+import Inspections from "./pages/Inspections";
+import ShiftAlarms from "./pages/ShiftAlarms";
 
 import { AdminIdentity, me } from "./auth";
 
@@ -41,9 +45,13 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/bookings" element={<Bookings />} />
             <Route path="/drivers" element={<Drivers />} />
+            <Route path="/cash" element={<Cash />} />
+            <Route path="/requests" element={<Requests />} />
             <Route path="/live-map" element={<LiveMap />} />
             <Route path="/review/captures" element={<Captures />} />
             <Route path="/review/documents" element={<Documents />} />
+            <Route path="/review/inspections" element={<Inspections />} />
+            <Route path="/shift-alarms" element={<ShiftAlarms />} />
             <Route path="/payouts" element={<Payouts />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

@@ -2234,6 +2234,167 @@ async def admin_record_cash_deposit(
 
 
 # ---------------------------------------------------------------------------
+# OPS QUEUES (admin) — cash reconciliation, driver requests, daily vehicle
+# inspections, and shift-alarm responses. Read-mostly views over data the
+# driver app produces, plus the few write actions ops needs.
+# ---------------------------------------------------------------------------
+async def _drivers_by_ids(ids: List[str]) -> Dict[str, Dict]:
+    """One query: id -> {name, phone, hub_name, vehicle_id}. Decorates a list
+    of rows with their driver without an N+1 lookup per row."""
+    uniq = [i for i in dict.fromkeys(ids) if i]
+    if not uniq:
+        return {}
+    out: Dict[str, Dict] = {}
+    async for d in db.drivers.find(
+        {"id": {"$in": uniq}},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "hub_name": 1, "vehicle_id": 1},
+    ):
+        out[d["id"]] = d
+    return out
+
+
+class RequestDecisionIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: Optional[str] = None
+
+
+@api.get("/admin/cash")
+async def admin_cash(admin: Dict = Depends(get_admin)):
+    """Fleet cash reconciliation: per driver, settled platform cash collected
+    (to yesterday) minus trusted deposits paid in. Reuses the single balance
+    rule in `_driver_balances` so this never drifts from the driver's screen."""
+    drivers = [d async for d in db.drivers.find(
+        {"active": True},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "hub_name": 1},
+    )]
+    ids = [d["id"] for d in drivers]
+    balances = await _driver_balances(ids)
+    rows: List[Dict[str, Any]] = []
+    for d in drivers:
+        b = balances.get(d["id"], {})
+        rows.append({
+            "driver_id": d["id"],
+            "name": d.get("name"),
+            "phone": d.get("phone"),
+            "hub_name": d.get("hub_name"),
+            "collected_to_yesterday": b.get("collected_to_yesterday", 0.0),
+            "paid_in_total": b.get("paid_in_total", 0.0),
+            "paid_in_today": b.get("paid_in_today", 0.0),
+            "balance": b.get("balance", 0.0),
+            "you_owe": b.get("you_owe", 0.0),
+            "in_credit": b.get("in_credit", 0.0),
+            "over_limit": b.get("over_limit", False),
+        })
+    rows.sort(key=lambda r: r["you_owe"], reverse=True)
+    totals = {
+        "collected_to_yesterday": round(sum(r["collected_to_yesterday"] for r in rows), 2),
+        "paid_in_total": round(sum(r["paid_in_total"] for r in rows), 2),
+        "paid_in_today": round(sum(r["paid_in_today"] for r in rows), 2),
+        "owed": round(sum(r["you_owe"] for r in rows), 2),
+        "over_limit": sum(1 for r in rows if r["over_limit"]),
+    }
+    return {
+        "items": rows, "totals": totals, "count": len(rows),
+        "cash_limit": CASH_LIMIT, "as_of_business_date": business_date_now(),
+    }
+
+
+@api.get("/admin/requests")
+async def admin_requests(state: Optional[str] = None, admin: Dict = Depends(get_admin)):
+    """Driver requests (advance / holiday / extra hours). `?state=pending`
+    filters the queue."""
+    query: Dict[str, Any] = {}
+    if state:
+        query["state"] = state
+    rows = [r async for r in db.requests.find(query, {"_id": 0}).sort("created_at", -1)]
+    who = await _drivers_by_ids([r.get("driver_id") for r in rows])
+    for r in rows:
+        d = who.get(r.get("driver_id"), {})
+        r["driver_name"] = d.get("name")
+        r["driver_phone"] = d.get("phone")
+    pending = sum(1 for r in rows if r.get("state") == "pending")
+    return {"items": rows, "count": len(rows), "pending": pending}
+
+
+@api.post("/admin/requests/{request_id}/decide")
+async def admin_decide_request(
+    request_id: str, body: RequestDecisionIn, admin: Dict = Depends(get_admin)
+):
+    """Approve or reject a driver request. Records who decided and when. An
+    approved `advance` does NOT itself touch the advances ledger — that stays a
+    separate, deliberate action so a balance is never moved by a click here."""
+    row = await db.requests.find_one({"id": request_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "request_not_found")
+    if row.get("state") != "pending":
+        raise HTTPException(409, "already_decided")
+    state = "approved" if body.decision == "approve" else "rejected"
+    await db.requests.update_one(
+        {"id": request_id},
+        {"$set": {
+            "state": state,
+            "decided_at": iso(now_utc()),
+            "decided_by": admin["username"],
+            "decision_note": body.note,
+        }},
+    )
+    return {"ok": True, "id": request_id, "state": state}
+
+
+@api.get("/admin/inspections")
+async def admin_inspections(admin: Dict = Depends(get_admin)):
+    """Daily vehicle inspections (dashboard photo + walkaround video). Media
+    blobs are excluded here; fetch one via /admin/inspections/{id}/media."""
+    rows = [r async for r in db.inspections.find(
+        {}, {"_id": 0, "dashboard_photo_b64": 0, "exterior_video_b64": 0},
+    ).sort("created_at", -1).limit(500)]
+    who = await _drivers_by_ids([r.get("driver_id") for r in rows])
+    veh_ids = list({r.get("vehicle_id") for r in rows if r.get("vehicle_id")})
+    veh: Dict[str, Optional[str]] = {}
+    if veh_ids:
+        async for v in db.vehicles.find(
+            {"id": {"$in": veh_ids}}, {"_id": 0, "id": 1, "number": 1}
+        ):
+            veh[v["id"]] = v.get("number")
+    for r in rows:
+        d = who.get(r.get("driver_id"), {})
+        r["driver_name"] = d.get("name")
+        r["driver_phone"] = d.get("phone")
+        r["vehicle_number"] = veh.get(r.get("vehicle_id"))
+        r["has_photo"] = True   # every inspection carries a dashboard photo
+    return {"items": rows, "count": len(rows)}
+
+
+@api.get("/admin/inspections/{inspection_id}/media")
+async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(get_admin)):
+    row = await db.inspections.find_one({"id": inspection_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "inspection_not_found")
+    return {
+        "id": row["id"],
+        "dashboard_photo_b64": row.get("dashboard_photo_b64"),
+        "exterior_video_b64": row.get("exterior_video_b64"),
+        "exterior_video_mime": row.get("exterior_video_mime"),
+    }
+
+
+@api.get("/admin/shift-alarms")
+async def admin_shift_alarms(admin: Dict = Depends(get_admin)):
+    """Recent shift-alarm responses across the fleet — who acknowledged, who
+    said they weren't coming, and the reason given."""
+    rows = [r async for r in db.alarm_responses.find(
+        {}, {"_id": 0}
+    ).sort("created_at", -1).limit(500)]
+    who = await _drivers_by_ids([r.get("driver_id") for r in rows])
+    for r in rows:
+        d = who.get(r.get("driver_id"), {})
+        r["driver_name"] = d.get("name")
+        r["driver_phone"] = d.get("phone")
+    not_coming = sum(1 for r in rows if r.get("response") == "not_coming")
+    return {"items": rows, "count": len(rows), "not_coming": not_coming}
+
+
+# ---------------------------------------------------------------------------
 # BOOKINGS (admin) — map-free scheduled rides
 # ---------------------------------------------------------------------------
 def _booking_ref() -> str:
