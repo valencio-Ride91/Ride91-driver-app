@@ -621,12 +621,16 @@ async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict
         await db.admin_sessions.delete_one({"token": token})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin_token_expired")
     # Resolve the live user so a role change or deactivation takes effect at
-    # once, without waiting for the session to expire.
+    # once, without waiting for the session to expire. Fail closed: a session
+    # whose user no longer exists is rejected rather than granted privileges.
     user = await db.admin_users.find_one({"username": sess["username"]}, {"_id": 0})
-    if user and not user.get("active", True):
+    if not user:
+        await db.admin_sessions.delete_one({"token": token})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_admin_token")
+    if not user.get("active", True):
         await db.admin_sessions.delete_one({"token": token})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "account_disabled")
-    role = user.get("role", "owner") if user else "owner"
+    role = user.get("role", "viewer")
     # Slide the expiry so an active admin doesn't get logged out mid-review.
     new_exp = iso(now_utc() + timedelta(hours=ADMIN_SESSION_HOURS))
     await db.admin_sessions.update_one(
@@ -635,7 +639,7 @@ async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict
     return {
         "username": sess["username"],
         "role": role,
-        "user_id": user.get("id") if user else None,
+        "user_id": user.get("id"),
         "token": token,
     }
 
