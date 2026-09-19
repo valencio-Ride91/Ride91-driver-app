@@ -21,7 +21,7 @@ DB_NAME = os.environ.get("DB_NAME")
 assert MONGO_URL and DB_NAME, "MONGO_URL / DB_NAME missing"
 
 DEMO_PHONE = "+919900000001"
-DEMO_OTP = "123456"
+DEMO_PASSWORD = "ride91"   # seed driver's admin-set password
 
 
 def _ist_day_key() -> str:
@@ -58,10 +58,9 @@ def today_key() -> str:
 @pytest.fixture(scope="session")
 def auth(api_client):
     """Login demo driver and return (token, driver, headers)."""
-    api_client.post(f"{BASE_URL}/api/auth/otp/request", json={"phone": DEMO_PHONE})
     r = api_client.post(
-        f"{BASE_URL}/api/auth/otp/verify",
-        json={"phone": DEMO_PHONE, "code": DEMO_OTP, "client_action_id": str(uuid.uuid4())},
+        f"{BASE_URL}/api/auth/login",
+        json={"phone": DEMO_PHONE, "password": DEMO_PASSWORD, "client_action_id": str(uuid.uuid4())},
     )
     assert r.status_code == 200, r.text
     data = r.json()

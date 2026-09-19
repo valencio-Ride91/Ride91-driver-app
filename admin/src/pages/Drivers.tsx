@@ -22,6 +22,7 @@ interface EditState {
   hub_name: string;
   shift_type: string;
   vehicle_id: string;
+  password: string;   // blank = leave unchanged
 }
 
 export default function Drivers() {
@@ -38,6 +39,7 @@ export default function Drivers() {
   // driver form
   const [dName, setDName] = useState("");
   const [dPhone, setDPhone] = useState("+91");
+  const [dPassword, setDPassword] = useState("");
   const [dVehicle, setDVehicle] = useState("");
   const [dHub, setDHub] = useState("");
   const [dShift, setDShift] = useState("day");
@@ -93,13 +95,15 @@ export default function Drivers() {
     setErr(null);
     if (!dName.trim()) return setErr("Name is required.");
     if (dPhone.trim().length < 6) return setErr("Enter a valid phone number.");
+    if (dPassword.length < 6) return setErr("Password must be at least 6 characters.");
     setSaving(true);
     try {
       await api.post("/admin/drivers", {
-        name: dName.trim(), phone: dPhone.trim(), vehicle_id: dVehicle || null,
+        name: dName.trim(), phone: dPhone.trim(), password: dPassword,
+        vehicle_id: dVehicle || null,
         hub_name: dHub.trim() || null, shift_type: dShift,
       });
-      setDName(""); setDPhone("+91"); setDVehicle(""); setDHub("");
+      setDName(""); setDPhone("+91"); setDPassword(""); setDVehicle(""); setDHub("");
       setPanel("none");
       await load();
       flash("Driver added.");
@@ -145,6 +149,7 @@ export default function Drivers() {
     if (!edit) return;
     if (!edit.name.trim()) return setErr("Name is required.");
     if (edit.phone.trim().length < 6) return setErr("Enter a valid phone number.");
+    if (edit.password && edit.password.length < 6) return setErr("New password must be at least 6 characters.");
     setSaving(true);
     setErr(null);
     try {
@@ -152,6 +157,7 @@ export default function Drivers() {
         name: edit.name.trim(), phone: edit.phone.trim(),
         hub_name: edit.hub_name.trim() || null, shift_type: edit.shift_type,
         vehicle_id: edit.vehicle_id || null,
+        ...(edit.password ? { password: edit.password } : {}),
       });
       setEdit(null);
       await load();
@@ -238,8 +244,11 @@ export default function Drivers() {
             <label>Name *
               <input value={dName} onChange={(e) => setDName(e.target.value)} placeholder="Full name" />
             </label>
-            <label>Phone * (login identity)
+            <label>Phone * (login username)
               <input value={dPhone} onChange={(e) => setDPhone(e.target.value)} placeholder="+9198…" />
+            </label>
+            <label>Password * (for the driver app)
+              <input value={dPassword} onChange={(e) => setDPassword(e.target.value)} placeholder="min 6 characters" autoComplete="new-password" />
             </label>
             <label>Vehicle
               <select value={dVehicle} onChange={(e) => setDVehicle(e.target.value)}>
@@ -308,7 +317,7 @@ export default function Drivers() {
                       <button className="ghost" onClick={() => setEdit({
                         id: r.id, name: r.name, phone: r.phone,
                         hub_name: r.hub_name ?? "", shift_type: r.shift_type ?? "day",
-                        vehicle_id: r.vehicle_id ?? "",
+                        vehicle_id: r.vehicle_id ?? "", password: "",
                       })}>Edit</button>
                       {r.active ? (
                         <button className="ghost" onClick={() => patchDriver(r.id, { active: false }, `${r.name} deactivated.`)} title="Deactivate">Off</button>
@@ -348,8 +357,11 @@ export default function Drivers() {
                   <option value="night">Night</option>
                 </select>
               </label>
-              <label className="col-2">Hub
+              <label>Hub
                 <input value={edit.hub_name} onChange={(e) => setEdit({ ...edit, hub_name: e.target.value })} />
+              </label>
+              <label>Reset password (blank = keep)
+                <input value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} placeholder="new password" autoComplete="new-password" />
               </label>
             </div>
             {err ? <div className="err">{err}</div> : null}

@@ -112,7 +112,7 @@ TRUSTED_CASH_SOURCES = {"razorpay", "admin_manual"}
 # Bounds the sort: a driver with no row in this window is not on duty now.
 STATE_LOOKBACK_DAYS = 7
 DEMO_DRIVER_PHONE = "+919900000001"
-DEMO_OTP = "123456"  # any OTP works; this one is guaranteed
+DEMO_DRIVER_PASSWORD = "ride91"  # seed driver's admin-set password (demo only)
 
 # Business day runs 04:00 IST to 03:59 IST next day. Matches Uber's cut-off.
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -177,13 +177,10 @@ def week_bounds_for_business_date(business_date: str) -> tuple[str, str, int]:
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
-class OtpRequest(BaseModel):
+class DriverLoginIn(BaseModel):
+    # Drivers log in with their phone (username) and an admin-set password.
     phone: str
-
-
-class OtpVerify(BaseModel):
-    phone: str
-    code: str
+    password: str
     client_action_id: str
 
 
@@ -329,7 +326,8 @@ class VehicleUpdateIn(BaseModel):
 
 class DriverCreateIn(BaseModel):
     name: str = Field(min_length=1)
-    phone: str = Field(min_length=5)           # login identity; must be unique
+    phone: str = Field(min_length=5)           # login identity (username); unique
+    password: str = Field(min_length=6)        # admin-set driver app password
     vehicle_id: Optional[str] = None
     hub_name: Optional[str] = None
     hub_lat: Optional[float] = None
@@ -342,6 +340,7 @@ class DriverUpdateIn(BaseModel):
     # All optional — only the provided fields change.
     name: Optional[str] = None
     phone: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=6)  # reset password
     vehicle_id: Optional[str] = None
     hub_name: Optional[str] = None
     hub_lat: Optional[float] = None
@@ -661,31 +660,21 @@ async def require_owner(admin: Dict = Depends(get_admin)) -> Dict:
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
-@api.post("/auth/otp/request")
-async def request_otp(body: OtpRequest):
-    code = DEMO_OTP if body.phone == DEMO_DRIVER_PHONE else f"{random.randint(100000, 999999)}"
-    await db.otp_codes.update_one(
-        {"phone": body.phone},
-        {"$set": {"code": code, "expires_at": iso(now_utc() + timedelta(minutes=10))}},
-        upsert=True,
+@api.post("/auth/login")
+async def driver_login(body: DriverLoginIn):
+    """Driver login with phone (username) + admin-set password. The generic
+    error message avoids revealing whether a phone is registered."""
+    driver = await db.drivers.find_one({"phone": body.phone.strip()}, {"_id": 0})
+    ok = (
+        bool(driver)
+        and driver.get("active", True)
+        and not driver.get("archived")
+        and verify_password(body.password, driver.get("password_hash"))
     )
-    logger.info("OTP for %s = %s", body.phone, code)
-    # For demo: return the code in response as well so it's discoverable.
-    return {"sent": True, "debug_code": code}
-
-
-@api.post("/auth/otp/verify")
-async def verify_otp(body: OtpVerify):
-    row = await db.otp_codes.find_one({"phone": body.phone}, {"_id": 0})
-    # Accept the demo OTP for anyone, or the stored code.
-    ok = body.code == DEMO_OTP or (row and row.get("code") == body.code)
     if not ok:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad_otp")
-    driver = await db.drivers.find_one({"phone": body.phone}, {"_id": 0})
-    if not driver:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "driver_not_found")
-    vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
-    # Reuse token per client_action_id to keep verify idempotent under retry.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_credentials")
+    vehicle = await db.vehicles.find_one({"id": driver.get("vehicle_id")}, {"_id": 0})
+    # Reuse token per client_action_id to keep login idempotent under retry.
     existing = await db.sessions.find_one({"client_action_id": body.client_action_id}, {"_id": 0})
     token = existing["token"] if existing else str(uuid.uuid4())
     if not existing:
@@ -1948,6 +1937,7 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
         "id": driver_id,
         "name": body.name.strip(),
         "phone": phone,
+        "password_hash": hash_password(body.password),
         "vehicle_id": body.vehicle_id,
         "qr_code": f"RIDE91-DEPOSIT-{driver_id[:8].upper()}",
         "active": True,
@@ -1961,6 +1951,7 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
     }
     await db.drivers.insert_one(row.copy())
     row.pop("_id", None)
+    row.pop("password_hash", None)   # never return the hash
     await _audit(admin, "create_driver", driver_id, {"name": row["name"], "phone": phone})
     return row
 
@@ -1987,12 +1978,21 @@ async def admin_update_driver(
     if updates.get("vehicle_id"):
         if not await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "id": 1}):
             raise HTTPException(404, "vehicle_not_found")
+    # Password reset is handled separately so the raw value never enters the
+    # audit trail or the list of "updated" field names.
+    password_reset = body.password is not None
+    if password_reset:
+        updates["password_hash"] = hash_password(body.password)
     if not updates:
         return {"ok": True, "unchanged": True}
     updates["updated_at"] = iso(now_utc())
     updates["updated_by"] = admin["username"]
     await db.drivers.update_one({"id": driver_id}, {"$set": updates})
-    return {"ok": True, "id": driver_id, "updated": list(updates.keys())}
+    changed = [k for k in updates if k != "password_hash"]
+    if password_reset:
+        changed.append("password")
+        await _audit(admin, "reset_driver_password", driver_id)
+    return {"ok": True, "id": driver_id, "updated": changed}
 
 
 @api.get("/admin/drivers/{driver_id}")
@@ -4442,6 +4442,7 @@ async def _seed_if_empty() -> None:
             "id": driver_id,
             "name": "Ravi Kumar",
             "phone": DEMO_DRIVER_PHONE,
+            "password_hash": hash_password(DEMO_DRIVER_PASSWORD),
             "vehicle_id": vehicle_id,
             "qr_code": f"RIDE91-DEPOSIT-{driver_id[:8].upper()}",
             "active": True,
