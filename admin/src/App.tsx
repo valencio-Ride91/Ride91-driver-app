@@ -16,6 +16,8 @@ import Cash from "./pages/Cash";
 import Requests from "./pages/Requests";
 import Inspections from "./pages/Inspections";
 import ShiftAlarms from "./pages/ShiftAlarms";
+import DriverDetail from "./pages/DriverDetail";
+import Vehicles from "./pages/Vehicles";
 
 import { AdminIdentity, me } from "./auth";
 
@@ -45,6 +47,8 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/bookings" element={<Bookings />} />
             <Route path="/drivers" element={<Drivers />} />
+            <Route path="/drivers/:id" element={<DriverDetail />} />
+            <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/cash" element={<Cash />} />
             <Route path="/requests" element={<Requests />} />
             <Route path="/live-map" element={<LiveMap />} />

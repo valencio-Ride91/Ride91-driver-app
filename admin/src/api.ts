@@ -46,6 +46,7 @@ export const api = {
   get: <T>(p: string) => request<T>("GET", p),
   post: <T>(p: string, b?: unknown) => request<T>("POST", p, b),
   patch: <T>(p: string, b?: unknown) => request<T>("PATCH", p, b),
+  del: <T>(p: string) => request<T>("DELETE", p),
 };
 
 export interface VehicleRow {
@@ -55,6 +56,8 @@ export interface VehicleRow {
   current_soc: number | null;
   current_range_km: number | null;
   assigned: boolean;
+  assigned_driver?: string | null;
+  retired?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +114,10 @@ export interface DriverRow {
   name: string;
   phone: string;
   hub_name: string | null;
+  shift_type: string | null;
+  active: boolean;
+  archived: boolean;
+  status: string;
   vehicle_number: string | null;
   vehicle_id: string | null;
   vehicle_soc: number | null;
@@ -122,6 +129,41 @@ export interface DriverRow {
   last_ping_at: string | null;
   last_lat: number | null;
   last_lng: number | null;
+}
+
+export interface DriverDetail {
+  driver: {
+    id: string;
+    name: string;
+    phone: string;
+    hub_name: string | null;
+    hub_lat: number | null;
+    hub_lng: number | null;
+    shift_type: string | null;
+    status: string;
+    active: boolean;
+    archived: boolean;
+    vehicle_id: string | null;
+    qr_code: string | null;
+    created_at: string | null;
+  };
+  vehicle: (VehicleRow & Record<string, unknown>) | null;
+  balance: {
+    collected_to_yesterday: number;
+    paid_in_total: number;
+    paid_in_today: number;
+    balance: number;
+    you_owe: number;
+    in_credit: number;
+    over_limit: boolean;
+    cash_limit: number;
+  };
+  documents: Array<Record<string, any>>;
+  captures: Array<Record<string, any>>;
+  inspections: Array<Record<string, any>>;
+  requests: Array<Record<string, any>>;
+  payouts: Array<Record<string, any>>;
+  deposits: Array<Record<string, any>>;
 }
 
 export interface VehicleLiveRow {

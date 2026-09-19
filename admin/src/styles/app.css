@@ -339,4 +339,7 @@ label.inline input { width: auto; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .onboard { margin-top: 14px; }
 .onboard h2 { margin: 0 0 14px; font-size: 15px; }
+button.danger-ghost { color: var(--alert); }
+button.danger-ghost:hover { background: #F5D4CE; border-color: var(--alert); }
+.data td button.ghost { margin-right: 6px; padding: 5px 10px; font-size: 12px; }
 @media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }

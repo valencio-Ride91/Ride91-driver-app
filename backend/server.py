@@ -286,6 +286,14 @@ class VehicleCreateIn(BaseModel):
     current_range_km: Optional[int] = None
 
 
+class VehicleUpdateIn(BaseModel):
+    # All optional — only the provided fields change.
+    number: Optional[str] = Field(default=None, min_length=3)
+    model: Optional[str] = None
+    current_soc: Optional[int] = None
+    current_range_km: Optional[int] = None
+
+
 class DriverCreateIn(BaseModel):
     name: str = Field(min_length=1)
     phone: str = Field(min_length=5)           # login identity; must be unique
@@ -1452,11 +1460,15 @@ async def admin_me(admin: Dict = Depends(get_admin)):
 
 
 @api.get("/admin/drivers")
-async def admin_drivers(admin: Dict = Depends(get_admin)):
+async def admin_drivers(
+    include_archived: bool = False, admin: Dict = Depends(get_admin)
+):
     """List all drivers with the ops-relevant snapshot: on-duty + platform,
     cash in hand, last GPS ping, vehicle plate, hub. Optimised for a single
-    table view — never returns base64 media."""
-    drivers = [d async for d in db.drivers.find({}, {"_id": 0})]
+    table view — never returns base64 media. Archived drivers are hidden
+    unless `include_archived=true`."""
+    query: Dict[str, Any] = {} if include_archived else {"archived": {"$ne": True}}
+    drivers = [d async for d in db.drivers.find(query, {"_id": 0})]
     vehicles = {
         v["id"]: v async for v in db.vehicles.find({}, {"_id": 0})
     }
@@ -1518,6 +1530,10 @@ async def admin_drivers(admin: Dict = Depends(get_admin)):
                 "name": d.get("name"),
                 "phone": d.get("phone"),
                 "hub_name": d.get("hub_name"),
+                "shift_type": d.get("shift_type"),
+                "active": d.get("active", True),
+                "archived": bool(d.get("archived")),
+                "status": d.get("status", "approved"),
                 "vehicle_number": v.get("number"),
                 "vehicle_id": vid,
                 "vehicle_soc": v.get("current_soc"),
@@ -1539,14 +1555,23 @@ async def admin_drivers(admin: Dict = Depends(get_admin)):
 
 # ---- Fleet onboarding: vehicles + drivers ---------------------------------
 @api.get("/admin/vehicles")
-async def admin_list_vehicles(admin: Dict = Depends(get_admin)):
-    vehicles = [v async for v in db.vehicles.find({}, {"_id": 0}).sort("number", 1)]
-    # Which vehicles already have a driver, so the UI can flag free ones.
-    assigned = set()
-    async for d in db.drivers.find({"vehicle_id": {"$ne": None}}, {"_id": 0, "vehicle_id": 1}):
-        assigned.add(d.get("vehicle_id"))
+async def admin_list_vehicles(
+    include_retired: bool = False, admin: Dict = Depends(get_admin)
+):
+    query: Dict[str, Any] = {} if include_retired else {"retired": {"$ne": True}}
+    vehicles = [v async for v in db.vehicles.find(query, {"_id": 0}).sort("number", 1)]
+    # Which vehicles already have a driver, so the UI can flag free ones and
+    # name who holds each one.
+    holder: Dict[str, str] = {}
+    async for d in db.drivers.find(
+        {"vehicle_id": {"$ne": None}, "archived": {"$ne": True}},
+        {"_id": 0, "vehicle_id": 1, "name": 1},
+    ):
+        holder[d["vehicle_id"]] = d.get("name")
     for v in vehicles:
-        v["assigned"] = v["id"] in assigned
+        v["assigned"] = v["id"] in holder
+        v["assigned_driver"] = holder.get(v["id"])
+        v["retired"] = bool(v.get("retired"))
     return {"items": vehicles, "count": len(vehicles)}
 
 
@@ -1567,6 +1592,67 @@ async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(get_
     await db.vehicles.insert_one(row.copy())
     row.pop("_id", None)
     return row
+
+
+@api.patch("/admin/vehicles/{vehicle_id}")
+async def admin_update_vehicle(
+    vehicle_id: str, body: VehicleUpdateIn, admin: Dict = Depends(get_admin)
+):
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+    if not veh:
+        raise HTTPException(404, "vehicle_not_found")
+    updates: Dict[str, Any] = {}
+    if body.number is not None:
+        number = body.number.strip().upper()
+        clash = await db.vehicles.find_one(
+            {"number": number, "id": {"$ne": vehicle_id}}, {"_id": 0, "id": 1}
+        )
+        if clash:
+            raise HTTPException(409, "vehicle_number_exists")
+        updates["number"] = number
+    for field in ("model", "current_soc", "current_range_km"):
+        val = getattr(body, field)
+        if val is not None:
+            updates[field] = val
+    if not updates:
+        return {"ok": True, "unchanged": True}
+    updates["updated_at"] = iso(now_utc())
+    updates["updated_by"] = admin["username"]
+    await db.vehicles.update_one({"id": vehicle_id}, {"$set": updates})
+    return {"ok": True, "id": vehicle_id, "updated": list(updates.keys())}
+
+
+@api.delete("/admin/vehicles/{vehicle_id}")
+async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin)):
+    """Retire a vehicle (reversible). Refuses while a driver still holds it —
+    unassign the driver first so a plate is never orphaned on a live driver."""
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+    if not veh:
+        raise HTTPException(404, "vehicle_not_found")
+    holder = await db.drivers.find_one(
+        {"vehicle_id": vehicle_id, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1},
+    )
+    if holder:
+        raise HTTPException(409, "vehicle_in_use")
+    await db.vehicles.update_one(
+        {"id": vehicle_id},
+        {"$set": {"retired": True, "retired_at": iso(now_utc()),
+                  "retired_by": admin["username"]}},
+    )
+    return {"ok": True, "id": vehicle_id, "retired": True}
+
+
+@api.post("/admin/vehicles/{vehicle_id}/restore")
+async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin)):
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+    if not veh:
+        raise HTTPException(404, "vehicle_not_found")
+    await db.vehicles.update_one(
+        {"id": vehicle_id},
+        {"$set": {"retired": False}, "$unset": {"retired_at": "", "retired_by": ""}},
+    )
+    return {"ok": True, "id": vehicle_id, "retired": False}
 
 
 @api.post("/admin/drivers")
@@ -1627,6 +1713,120 @@ async def admin_update_driver(
     updates["updated_by"] = admin["username"]
     await db.drivers.update_one({"id": driver_id}, {"$set": updates})
     return {"ok": True, "id": driver_id, "updated": list(updates.keys())}
+
+
+@api.get("/admin/drivers/{driver_id}")
+async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
+    """Everything about one driver on a single screen: profile, vehicle, cash
+    balance, and recent documents / captures / inspections / requests /
+    payouts. Media blobs are excluded — the review pages fetch those."""
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+    vehicle = None
+    if d.get("vehicle_id"):
+        vehicle = await db.vehicles.find_one(
+            {"id": d["vehicle_id"]}, {"_id": 0}
+        )
+    balance = await _driver_balance(driver_id)
+
+    async def _recent(coll, proj: Dict, sort_field: str, limit: int = 10):
+        return [r async for r in coll.find(
+            {"driver_id": driver_id}, {"_id": 0, **proj},
+        ).sort(sort_field, -1).limit(limit)]
+
+    documents = await _recent(
+        db.documents, {"image_b64": 0}, "updated_at")
+    for doc in documents:
+        doc["label"] = DOCUMENT_LABELS.get(doc.get("type"), doc.get("type"))
+        doc["status"] = _document_status(doc.get("expires_on"))
+    captures = await _recent(
+        db.go_online_captures,
+        {"walkaround_video_b64": 0, "selfie_photo_b64": 0}, "created_at")
+    inspections = await _recent(
+        db.inspections,
+        {"dashboard_photo_b64": 0, "exterior_video_b64": 0}, "created_at")
+    requests = await _recent(db.requests, {}, "created_at")
+    payouts = await _recent(db.payouts, {}, "created_at")
+    deposits = [r async for r in db.qr_payments.find(
+        {"driver_id": driver_id, "type": "deposit"}, {"_id": 0},
+    ).sort("occurred_at", -1).limit(20)]
+
+    return {
+        "driver": {
+            "id": d["id"],
+            "name": d.get("name"),
+            "phone": d.get("phone"),
+            "hub_name": d.get("hub_name"),
+            "hub_lat": d.get("hub_lat"),
+            "hub_lng": d.get("hub_lng"),
+            "shift_type": d.get("shift_type"),
+            "status": d.get("status", "approved"),
+            "active": d.get("active", True),
+            "archived": bool(d.get("archived")),
+            "vehicle_id": d.get("vehicle_id"),
+            "qr_code": d.get("qr_code"),
+            "created_at": d.get("created_at"),
+        },
+        "vehicle": vehicle,
+        "balance": balance,
+        "documents": documents,
+        "captures": captures,
+        "inspections": inspections,
+        "requests": requests,
+        "payouts": payouts,
+        "deposits": deposits,
+    }
+
+
+@api.delete("/admin/drivers/{driver_id}")
+async def admin_delete_driver(
+    driver_id: str, hard: bool = False, admin: Dict = Depends(get_admin)
+):
+    """Remove a driver. Default is a reversible archive: the driver is
+    deactivated, hidden from the roster, and their vehicle freed — cash and
+    payout history are preserved for the audit trail. `hard=true` permanently
+    deletes the driver record, and is refused when any financial history
+    exists (deposits, platform cash, or payouts)."""
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+
+    if hard:
+        has_money = (
+            await db.qr_payments.find_one({"driver_id": driver_id}, {"_id": 1})
+            or await db.platform_cash.find_one({"driver_id": driver_id}, {"_id": 1})
+            or await db.payouts.find_one({"driver_id": driver_id}, {"_id": 1})
+        )
+        if has_money:
+            raise HTTPException(409, "has_financial_history")
+        await db.drivers.delete_one({"id": driver_id})
+        return {"ok": True, "id": driver_id, "deleted": True}
+
+    await db.drivers.update_one(
+        {"id": driver_id},
+        {"$set": {
+            "archived": True,
+            "active": False,
+            "vehicle_id": None,          # free the plate for reassignment
+            "archived_at": iso(now_utc()),
+            "archived_by": admin["username"],
+        }},
+    )
+    return {"ok": True, "id": driver_id, "archived": True}
+
+
+@api.post("/admin/drivers/{driver_id}/restore")
+async def admin_restore_driver(driver_id: str, admin: Dict = Depends(get_admin)):
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+    await db.drivers.update_one(
+        {"id": driver_id},
+        {"$set": {"archived": False, "active": True},
+         "$unset": {"archived_at": "", "archived_by": ""}},
+    )
+    return {"ok": True, "id": driver_id, "archived": False}
 
 
 # ---- Live map --------------------------------------------------------------
