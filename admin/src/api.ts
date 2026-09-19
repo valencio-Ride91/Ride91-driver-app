@@ -51,6 +51,51 @@ export const api = {
 // Types shared across screens.
 // ---------------------------------------------------------------------------
 
+export interface DashboardData {
+  business_date: string;
+  cards: {
+    total_drivers: number;
+    approved_drivers: number;
+    drivers_waiting: number;
+    total_vehicles: number;
+    on_duty_now: number;
+    cash_owed: number;
+    over_limit: number;
+    collected_all: number;
+    paid_all: number;
+    paid_today: number;
+  };
+  bookings: {
+    by_status: Record<string, number>;
+    open: number;
+    today: number;
+    scheduled_ahead: number;
+    total: number;
+  };
+  series: { date: string; gross: number; cash: number; deposited: number }[];
+  server_ts: string;
+}
+
+export interface BookingRow {
+  id: string;
+  ref: string;
+  rider_name: string;
+  rider_phone: string;
+  pickup_text: string;
+  drop_text: string;
+  scheduled_at: string | null;
+  vehicle_type: string | null;
+  fare_estimate: number | null;
+  notes: string | null;
+  status: string;
+  driver_id: string | null;
+  vehicle_id: string | null;
+  source: string;
+  business_date: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DriverRow {
   id: string;
   name: string;

@@ -6,6 +6,7 @@ import { Navigate, Route, BrowserRouter, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
+import Bookings from "./pages/Bookings";
 import Drivers from "./pages/Drivers";
 import LiveMap from "./pages/LiveMap";
 import Captures from "./pages/Captures";
@@ -38,6 +39,7 @@ export default function App() {
         {admin ? (
           <Route element={<Layout admin={admin} onLogout={() => setAdmin(null)} />}>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/bookings" element={<Bookings />} />
             <Route path="/drivers" element={<Drivers />} />
             <Route path="/live-map" element={<LiveMap />} />
             <Route path="/review/captures" element={<Captures />} />

@@ -25,13 +25,16 @@ import { storage } from "@/src/utils/storage";
 
 const Q_KEY = "ride91.sync.queue";
 
-export interface QueuedAction {
+// A type alias, not an interface: only aliases get an implicit index
+// signature, which is what lets QueuedAction[] satisfy StorageItemValue
+// when the queue is persisted.
+export type QueuedAction = {
   id: string;              // client_action_id (UUID)
   path: string;            // /duty/state, /close-out, /requests, ...
   body: Record<string, any>;
   device_ts: string;       // when the action happened on the phone
   attempts: number;
-}
+};
 
 interface SyncCtx {
   online: boolean;
@@ -47,7 +50,13 @@ async function readQueue(): Promise<QueuedAction[]> {
 }
 
 async function writeQueue(q: QueuedAction[]): Promise<void> {
-  await storage.setItem(Q_KEY, q);
+  // storage.setItem swallows its own errors and reports false, so without
+  // this check a failed write looked like a successful enqueue: the caller
+  // showed "done" while the action was never persisted or sent. That silently
+  // dropped go-online captures, which are the record that a vehicle was
+  // inspected. A queue that cannot be written has to be an error.
+  const ok = await storage.setItem(Q_KEY, q);
+  if (!ok) throw new Error("queue_write_failed");
 }
 
 export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

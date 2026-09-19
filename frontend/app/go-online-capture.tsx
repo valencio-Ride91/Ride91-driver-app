@@ -43,6 +43,10 @@ import { useSync } from "@/src/sync";
 type Phase = "intro" | "walkaround" | "walkaround-done" | "selfie" | "selfie-done" | "review" | "submitting" | "done";
 
 const WALKAROUND_SECS = 20;
+// Cap on the raw video. The clip is base64-encoded (+33%) and then JSON
+// -stringified into the offline queue, so the in-memory cost is several times
+// this. Keeping it small is what stops the submit step hanging.
+const MAX_VIDEO_BYTES = 4 * 1024 * 1024;
 const STAGE_SECS = 5;
 const HUB_WARN_KM = 3;
 const HUB_HARD_BLOCK_KM = 30;
@@ -143,6 +147,9 @@ export default function GoOnlineCapture() {
     try {
       const v = (await cameraRef.current.recordAsync({
         maxDuration: WALKAROUND_SECS,
+        // Hard backstop: a device that ignores videoBitrate must not be able
+        // to hand us a file too large to encode and queue.
+        maxFileSize: MAX_VIDEO_BYTES,
       })) as { uri?: string } | undefined;
 
       setWalkEndTs(new Date().toISOString());
@@ -334,6 +341,12 @@ export default function GoOnlineCapture() {
                   facing="back"
                   mode="video"
                   videoQuality="480p"
+                  // 480p alone left the bitrate to the device, which produced
+                  // clips big enough that base64-ing them stalled the JS
+                  // thread and blew AsyncStorage's write limit. ~800 kbps over
+                  // WALKAROUND_SECS lands around 2 MB — still easily good
+                  // enough to see panel damage.
+                  videoBitrate={800_000}
                   onCameraReady={() => setCameraReady(true)}
                 />
                 <View style={styles.stageBar} pointerEvents="none">

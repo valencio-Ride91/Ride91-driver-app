@@ -5,6 +5,7 @@ import { AdminIdentity, logout } from "../auth";
 
 const NAV = [
   { to: "/", label: "Dashboard", end: true },
+  { to: "/bookings", label: "Bookings" },
   { to: "/drivers", label: "Drivers" },
   { to: "/live-map", label: "Live map" },
   { to: "/review/captures", label: "Capture reviews" },

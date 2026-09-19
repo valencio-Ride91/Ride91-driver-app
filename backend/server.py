@@ -10,17 +10,32 @@ are new rows with source='admin_correction'.
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import math
 import os
 import random
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -47,18 +62,40 @@ logger = logging.getLogger("ride91")
 # Ride91 is the employment layer — NOT a dispatch platform. The platform list
 # is Uber / Rapido / Ola only.
 PLATFORMS = {"uber", "rapido", "ola"}
-NON_PLATFORM_STATES = {"offline", "shift_end", "charging"}
+# to_charger and charging are on-duty, non-earning states: the car is being
+# driven to a charger or is plugged in. Both count towards on-duty time and
+# neither counts as working time, since no platform is live.
+NON_PLATFORM_STATES = {"offline", "shift_end", "to_charger", "charging"}
 DUTY_LAYER = {"start_duty", "end_duty"}
 PLATFORM_LAYER = {"uber", "rapido", "ola", "not_online"}
 ALL_STATES = PLATFORMS | NON_PLATFORM_STATES | DUTY_LAYER | PLATFORM_LAYER
 CASH_LIMIT = 1500  # ₹
 DRIVER_SHARE = 0.30
+# Sources whose qr_payments rows may reduce a driver's cash_in_hand. The
+# driver's own app is deliberately not on this list: cash is cleared either by
+# paying through Razorpay (webhook-confirmed) or by ops recording a hand-in.
+TRUSTED_CASH_SOURCES = {"razorpay", "admin_manual"}
+# How far back the ops driver list looks for a driver's latest duty state.
+# Bounds the sort: a driver with no row in this window is not on duty now.
+STATE_LOOKBACK_DAYS = 7
 DEMO_DRIVER_PHONE = "+919900000001"
 DEMO_OTP = "123456"  # any OTP works; this one is guaranteed
 
 # Business day runs 04:00 IST to 03:59 IST next day. Matches Uber's cut-off.
 IST = timezone(timedelta(hours=5, minutes=30))
 BUSINESS_DAY_OFFSET_HOURS = 4
+
+
+@api.get("/health")
+async def health():
+    """Unauthenticated liveness + DB reachability, for a host's health check."""
+    db_ok = False
+    try:
+        await db.command("ping")
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"ok": True, "db": db_ok}
 
 
 def now_utc() -> datetime:
@@ -135,11 +172,13 @@ class DutyStateIn(BaseModel):
     # Two separate rows land here:
     #   Duty layer:     start_duty / end_duty
     #   Platform layer: uber / rapido / ola / not_online
-    #   Support:        offline / charging  (kept for backwards-compat)
+    #   Charging:       to_charger / charging
+    #   Support:        offline / shift_end  (kept for backwards-compat)
     state: Literal[
         "start_duty", "end_duty",
         "uber", "rapido", "ola", "not_online",
-        "offline", "shift_end", "charging",
+        "to_charger", "charging",
+        "offline", "shift_end",
     ]
     started_at: str
     lat: float
@@ -209,14 +248,79 @@ class PlatformCashIn(BaseModel):
     client_action_id: str
 
 
-class QrPaymentIn(BaseModel):
-    """Razorpay-tracked payments. Fares vs deposits are tagged apart."""
-    amount: float
-    type: Literal["fare", "deposit"]
-    reference: str
-    platform: Optional[Literal["uber", "rapido", "ola"]] = None
-    occurred_at: Optional[str] = None
+class LinkUberUuidIn(BaseModel):
+    """Wires a Ride91 driver to Uber's stable per-driver identifier."""
+    uber_driver_uuid: str = Field(min_length=8)
+
+
+class QrDepositIn(BaseModel):
+    """Ask for a dynamic UPI QR to clear cash dues.
+
+    No amount is trusted from the client beyond an optional partial-payment
+    request, which the server caps at the driver's actual dues.
+    """
     client_action_id: str
+    amount_rupees: Optional[float] = None
+
+
+class ManualDepositIn(BaseModel):
+    """Cash a driver handed over off-app, recorded by ops.
+
+    `reason` is required and `reference` doubles as the idempotency key, so
+    every row that reduces a balance without a Razorpay payment behind it is
+    attributable to a person and a receipt.
+    """
+    amount: float = Field(gt=0)
+    reference: str = Field(min_length=3)
+    reason: str = Field(min_length=3)
+    occurred_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# BOOKINGS
+#
+# Scheduled Ride91 rides, entered by ops. Deliberately map-free for now:
+# pickup and drop are free text, there is no geolocation, routing, or
+# auto-dispatch. A driver/vehicle is attached by hand, or left unassigned.
+# The lifecycle and the append-only status history are here so the rider app
+# and a dispatcher can be layered on later without a data migration.
+# ---------------------------------------------------------------------------
+BOOKING_STATES = [
+    "requested",   # taken down, nothing promised yet
+    "confirmed",   # ops confirmed it will be serviced
+    "assigned",    # a driver/vehicle is attached
+    "en_route",    # driver heading to pickup
+    "started",     # rider on board
+    "completed",   # done
+    "cancelled",   # called off
+    "no_show",     # rider not there
+]
+BOOKING_OPEN_STATES = {"requested", "confirmed", "assigned", "en_route", "started"}
+BOOKING_CLOSED_STATES = {"completed", "cancelled", "no_show"}
+
+
+class BookingCreateIn(BaseModel):
+    rider_name: str = Field(min_length=1)
+    rider_phone: str = Field(min_length=5)
+    pickup_text: str = Field(min_length=1)
+    drop_text: str = Field(min_length=1)
+    # None means "as soon as possible" rather than a scheduled time.
+    scheduled_at: Optional[str] = None
+    vehicle_type: Optional[str] = None
+    fare_estimate: Optional[float] = Field(default=None, ge=0)
+    notes: Optional[str] = None
+
+
+class BookingStatusIn(BaseModel):
+    status: Literal[
+        "requested", "confirmed", "assigned", "en_route",
+        "started", "completed", "cancelled", "no_show",
+    ]
+    note: Optional[str] = None
+    # Optional assignment when moving to 'assigned'. Not validated against the
+    # fleet yet — no dispatch logic — just recorded.
+    driver_id: Optional[str] = None
+    vehicle_id: Optional[str] = None
 
 
 class HeartbeatIn(BaseModel):
@@ -427,218 +531,6 @@ async def verify_otp(body: OtpVerify):
             }
         )
     return {
-        "token": token,
-        "driver": _driver_out(driver, vehicle),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Google sign-in (Emergent-managed OAuth) — additional path, OTP still works.
-# ---------------------------------------------------------------------------
-# Flow:
-#   1. Client hits Emergent auth URL → returns session_id via deep link.
-#   2. Client POSTs {session_id} → we exchange with Emergent to get email/name.
-#   3. If we can find a driver already linked to that email, we mint a
-#      session and return {token, driver}.
-#   4. If no driver has that email yet, we return {needs_link, link_token,
-#      google: {...}} and the client walks the user through the standard
-#      phone+OTP flow — but bound to that link_token — to prove the Google
-#      account belongs to a real fleet driver.
-#
-# We NEVER let a stranger with any Gmail address create a driver record.
-# Fleet ops still owns onboarding — Google sign-in is purely a login shortcut.
-EMERGENT_OAUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
-LINK_TOKEN_TTL_MIN = 10
-GOOGLE_SESSION_TTL_DAYS = 7
-
-
-class GoogleSessionIn(BaseModel):
-    session_id: str
-
-
-class GoogleLinkStartIn(BaseModel):
-    link_token: str
-    phone: str
-
-
-class GoogleLinkVerifyIn(BaseModel):
-    link_token: str
-    phone: str
-    code: str
-    client_action_id: str
-
-
-async def _mint_driver_session(
-    driver_id: str, ttl_days: Optional[int] = None
-) -> str:
-    token = str(uuid.uuid4())
-    row: Dict[str, Any] = {
-        "token": token,
-        "driver_id": driver_id,
-        "created_at": iso(now_utc()),
-        "source": "google" if ttl_days else "otp",
-    }
-    if ttl_days:
-        row["expires_at"] = iso(now_utc() + timedelta(days=ttl_days))
-    await db.sessions.insert_one(row)
-    return token
-
-
-@api.post("/auth/session")
-async def google_session(body: GoogleSessionIn):
-    # Guard: has this session_id been consumed already?
-    used = await db.consumed_google_sessions.find_one(
-        {"session_id": body.session_id}, {"_id": 0}
-    )
-    if used:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_id_already_used")
-    # Exchange with Emergent — the only outbound call in the whole flow.
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.get(
-                EMERGENT_OAUTH_URL, headers={"X-Session-ID": body.session_id}
-            )
-    except Exception as e:
-        logger.exception("emergent oauth exchange failed: %s", e)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "oauth_exchange_failed")
-    if r.status_code != 200:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_id_invalid")
-    payload = r.json()
-    email = (payload.get("email") or "").strip().lower()
-    if not email:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "no_email")
-    await db.consumed_google_sessions.insert_one(
-        {"session_id": body.session_id, "consumed_at": iso(now_utc())}
-    )
-    google_info = {
-        "email": email,
-        "name": payload.get("name"),
-        "picture": payload.get("picture"),
-        # Emergent doesn't return a Google "sub" — email is our stable id.
-    }
-    # Case A: this Google email is already linked to a driver.
-    driver = await db.drivers.find_one(
-        {"google_email": email}, {"_id": 0}
-    )
-    if driver:
-        token = await _mint_driver_session(driver["id"], GOOGLE_SESSION_TTL_DAYS)
-        vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
-        return {
-            "needs_link": False,
-            "token": token,
-            "driver": _driver_out(driver, vehicle),
-        }
-    # Case C: unknown Google user — stash the info and ask for phone+OTP.
-    link_token = str(uuid.uuid4())
-    await db.pending_google_links.insert_one(
-        {
-            "link_token": link_token,
-            "email": email,
-            "name": google_info["name"],
-            "picture": google_info["picture"],
-            "created_at": iso(now_utc()),
-            "expires_at": iso(now_utc() + timedelta(minutes=LINK_TOKEN_TTL_MIN)),
-        }
-    )
-    return {
-        "needs_link": True,
-        "link_token": link_token,
-        "google": google_info,
-    }
-
-
-async def _consume_link_token(link_token: str) -> Dict[str, Any]:
-    row = await db.pending_google_links.find_one({"link_token": link_token}, {"_id": 0})
-    if not row:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "link_token_invalid")
-    try:
-        exp = _parse_iso(row["expires_at"])
-        if exp <= now_utc():
-            await db.pending_google_links.delete_one({"link_token": link_token})
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "link_token_expired")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
-    return row
-
-
-@api.post("/auth/session/link/start")
-async def google_link_start(body: GoogleLinkStartIn):
-    """Client already has a link_token; ask the fleet for an OTP to bind
-    the Google account to that driver's existing phone record."""
-    link = await _consume_link_token(body.link_token)
-    driver = await db.drivers.find_one({"phone": body.phone}, {"_id": 0})
-    if not driver:
-        # Fleet ops onboards drivers — a random Gmail cannot self-register.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "driver_not_registered")
-    if driver.get("google_email") and driver.get("google_email") != link["email"]:
-        raise HTTPException(status.HTTP_409_CONFLICT, "phone_linked_to_different_google")
-    # Reuse the standard OTP flow.
-    code = DEMO_OTP if body.phone == DEMO_DRIVER_PHONE else f"{random.randint(100000, 999999)}"
-    await db.otp_codes.update_one(
-        {"phone": body.phone},
-        {"$set": {"phone": body.phone, "code": code, "created_at": iso(now_utc())}},
-        upsert=True,
-    )
-    logger.info("Google-link OTP for %s = %s", body.phone, code)
-    return {"otp_sent": True}
-
-
-@api.post("/auth/session/link/verify")
-async def google_link_verify(body: GoogleLinkVerifyIn):
-    """Verify the OTP and, on success, bind the Google account to the
-    driver's record and mint the same-shape session token that the OTP
-    verify endpoint returns."""
-    # Idempotency check FIRST — a retry with the same client_action_id
-    # returns the previously-minted token even though the link_token was
-    # consumed on the original call.
-    existing = await db.sessions.find_one(
-        {"client_action_id": body.client_action_id}, {"_id": 0}
-    )
-    if existing:
-        driver = await db.drivers.find_one({"id": existing["driver_id"]}, {"_id": 0})
-        if driver:
-            vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
-            return {
-                "needs_link": False,
-                "token": existing["token"],
-                "driver": _driver_out(driver, vehicle),
-            }
-    link = await _consume_link_token(body.link_token)
-    row = await db.otp_codes.find_one({"phone": body.phone}, {"_id": 0})
-    ok = body.code == DEMO_OTP or (row and row.get("code") == body.code)
-    if not ok:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad_otp")
-    driver = await db.drivers.find_one({"phone": body.phone}, {"_id": 0})
-    if not driver:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "driver_not_registered")
-    # If this Google email is already bound to a different driver, block.
-    other = await db.drivers.find_one(
-        {"google_email": link["email"], "id": {"$ne": driver["id"]}}, {"_id": 0}
-    )
-    if other:
-        raise HTTPException(status.HTTP_409_CONFLICT, "google_linked_to_other_driver")
-    await db.drivers.update_one(
-        {"id": driver["id"]},
-        {"$set": {
-            "google_email": link["email"],
-            "google_picture_url": link.get("picture"),
-            "google_linked_at": iso(now_utc()),
-        }},
-    )
-    driver["google_email"] = link["email"]
-    driver["google_picture_url"] = link.get("picture")
-    await db.pending_google_links.delete_one({"link_token": body.link_token})
-    token = await _mint_driver_session(driver["id"], GOOGLE_SESSION_TTL_DAYS)
-    await db.sessions.update_one(
-        {"token": token}, {"$set": {"client_action_id": body.client_action_id}}
-    )
-    vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
-    return {
-        "needs_link": False,
         "token": token,
         "driver": _driver_out(driver, vehicle),
     }
@@ -907,12 +799,15 @@ async def duty_today(driver: Dict = Depends(get_driver)):
     working_seconds = sum(totals.get(p, 0) for p in PLATFORMS)
     # On-duty time = anything after start_duty and before end_duty. Simpler:
     # the sum of platform + not_online + charging segments once start_duty
-    # has been seen for the day.
+    # has been seen for the day. Driving to a charger is paid on-duty time
+    # too, so to_charger counts here but never towards working_seconds.
     on_duty_seconds = (
         working_seconds
         + totals.get("not_online", 0)
+        + totals.get("to_charger", 0)
         + totals.get("charging", 0)
     )
+    charging_seconds = totals.get("to_charger", 0) + totals.get("charging", 0)
     # Current state = most recent row across the day.
     current = segs[-1]["state"] if segs else None
     # Is the driver ON DUTY? Yes iff most recent start_duty is more recent
@@ -943,6 +838,7 @@ async def duty_today(driver: Dict = Depends(get_driver)):
         "current_platform": current_platform,
         "on_duty_seconds": on_duty_seconds,
         "working_seconds": working_seconds,
+        "charging_seconds": charging_seconds,
         "current_state": current,
         "distance_km": round(distance_km, 2),
         "business_date": today_bd,
@@ -998,10 +894,22 @@ async def _fetch_platform_cash(
 async def _fetch_qr_payments(
     driver_id: str, from_bd: str, to_bd: str
 ) -> List[Dict]:
+    """Rows that are allowed to move a driver's cash balance.
+
+    Every row here reduces cash_in_hand (see _cash_snapshot), so a row the
+    driver could author would let them clear their own dues. Only rows whose
+    source we control count:
+      * 'razorpay'     — written by _reconcile_razorpay_once from the webhook
+      * 'admin_manual' — recorded by ops, e.g. cash handed in at the hub
+    Legacy rows from the retired driver-facing POST /api/qr-payment carry no
+    'source' field at all, so this filter neutralises the ones already in the
+    database instead of merely stopping new ones.
+    """
     cursor = db.qr_payments.find(
         {
             "driver_id": driver_id,
             "business_date": {"$gte": from_bd, "$lt": to_bd},
+            "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
         },
         {"_id": 0},
     )
@@ -1522,38 +1430,54 @@ async def admin_drivers(admin: Dict = Depends(get_admin)):
     now = now_utc()
     day_key = business_date_from_dt(now)
     day_start, day_end = business_day_bounds(day_key)
+
+    # Fleet-wide lookups, once. Per-driver queries in the loop below are what
+    # makes this endpoint O(drivers): at 400 drivers even two extra awaits
+    # each is ~800 round trips, and the page stops rendering at all.
+    balances = await _driver_balances([d["id"] for d in drivers])
+
+    # Both aggregations below are windowed on purpose. Sorting these two
+    # collections whole would be worse than the per-driver queries it
+    # replaces: vehicle_pings grows by ~200 vehicles x 15/hour, so a full
+    # sort is a scan of every ping ever recorded. A driver who has not
+    # appeared in a week is not on duty now, and a ping older than a day is
+    # not worth plotting, so a window loses nothing this table shows.
+    state_since = iso(now - timedelta(days=STATE_LOOKBACK_DAYS))
+    latest_state: Dict[str, Dict] = {}
+    async for r in db.duty_states.aggregate([
+        {"$match": {"started_at": {"$gte": state_since}}},
+        {"$sort": {"started_at": 1}},
+        {"$group": {"_id": "$driver_id", "state": {"$last": "$state"}}},
+    ]):
+        latest_state[r["_id"]] = r
+    started_today: set = set()
+    async for r in db.duty_states.aggregate([
+        {"$match": {"state": "start_duty",
+                    "started_at": {"$gte": iso(day_start), "$lt": iso(day_end)}}},
+        {"$group": {"_id": "$driver_id"}},
+    ]):
+        started_today.add(r["_id"])
+    ping_since = iso(now - timedelta(days=1))
+    last_pings: Dict[str, Dict] = {}
+    async for r in db.vehicle_pings.aggregate([
+        {"$match": {"recorded_at": {"$gte": ping_since}}},
+        {"$sort": {"recorded_at": 1}},
+        {"$group": {"_id": "$vehicle_id",
+                    "recorded_at": {"$last": "$recorded_at"},
+                    "lat": {"$last": "$lat"}, "lng": {"$last": "$lng"}}},
+    ]):
+        last_pings[r["_id"]] = r
+
     for d in drivers:
         vid = d.get("vehicle_id")
         v = vehicles.get(vid, {})
-        # Current duty/platform state.
-        last_state = await db.duty_states.find_one(
-            {"driver_id": d["id"]}, {"_id": 0}, sort=[("started_at", -1)]
-        )
-        on_duty_row = await db.duty_states.find_one(
-            {"driver_id": d["id"], "state": "start_duty",
-             "started_at": {"$gte": iso(day_start), "$lt": iso(day_end)}},
-            {"_id": 0},
-            sort=[("started_at", -1)],
-        )
-        # Cash in hand for today (platform_cash - qr_payments of type=deposit).
-        platform_sum = 0.0
-        async for r in db.platform_cash.find(
-            {"driver_id": d["id"], "business_date": day_key}, {"_id": 0, "cash_amount": 1}
-        ):
-            platform_sum += float(r.get("cash_amount", 0))
-        deposit_sum = 0.0
-        async for r in db.qr_payments.find(
-            {"driver_id": d["id"], "business_date": day_key, "type": "deposit"},
-            {"_id": 0, "amount": 1},
-        ):
-            deposit_sum += float(r.get("amount", 0))
-        cash_in_hand = max(0.0, platform_sum - deposit_sum)
-        # Last GPS ping (for the driver's own vehicle).
-        last_ping = None
-        if vid:
-            last_ping = await db.vehicle_pings.find_one(
-                {"vehicle_id": vid}, {"_id": 0}, sort=[("recorded_at", -1)]
-            )
+        # All three come from the fleet-wide lookups above — no per-driver
+        # round trips. One source of truth for what a driver owes: the same
+        # running balance the driver's own app and the payment endpoints use.
+        last_state = latest_state.get(d["id"])
+        on_duty_row = d["id"] in started_today
+        bal = balances.get(d["id"]) or _zero_balance(day_key)
+        last_ping = last_pings.get(vid) if vid else None
         out.append(
             {
                 "id": d["id"],
@@ -1566,8 +1490,10 @@ async def admin_drivers(admin: Dict = Depends(get_admin)):
                 "vehicle_range_km": v.get("current_range_km"),
                 "on_duty": bool(on_duty_row and (not last_state or last_state["state"] != "end_duty")),
                 "current_state": last_state["state"] if last_state else None,
-                "cash_in_hand": round(cash_in_hand, 2),
-                "cash_over_limit": cash_in_hand > CASH_LIMIT,
+                "cash_in_hand": bal["you_owe"],
+                "cash_over_limit": bal["over_limit"],
+                "collected_to_yesterday": bal["collected_to_yesterday"],
+                "paid_in_today": bal["paid_in_today"],
                 "last_ping_at": last_ping["recorded_at"] if last_ping else None,
                 "last_lat": last_ping["lat"] if last_ping else None,
                 "last_lng": last_ping["lng"] if last_ping else None,
@@ -1619,6 +1545,100 @@ async def admin_vehicles_live(admin: Dict = Depends(get_admin)):
             }
         )
     return {"items": out, "count": len(out), "server_ts": iso(now)}
+
+
+# ---------------------------------------------------------------------------
+# DASHBOARD — Ride91 metrics + chart series
+#
+# Built for an employer-operator, not a commission marketplace: the numbers
+# that matter are duty, cash owed vs collected vs deposited, over-limit
+# drivers, and settled trips/earnings from the platform reports — plus the
+# booking tallies. No admin-commission / wallet / franchise concepts.
+# ---------------------------------------------------------------------------
+@api.get("/admin/dashboard")
+async def admin_dashboard(days: int = 30, admin: Dict = Depends(get_admin)):
+    days = max(7, min(int(days), 90))
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    from_bd = (today_d - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    day_start, day_end = business_day_bounds(today_bd)
+
+    total_drivers = await db.drivers.count_documents({})
+    approved = await db.drivers.count_documents({"status": "approved"})
+    waiting = await db.drivers.count_documents({"status": "pending"})
+    total_vehicles = await db.vehicles.count_documents({})
+
+    on_duty = 0
+    async for _r in db.duty_states.aggregate([
+        {"$match": {"started_at": {"$gte": iso(day_start), "$lt": iso(day_end)},
+                    "state": {"$in": ["start_duty", "end_duty"]}}},
+        {"$sort": {"started_at": 1}},
+        {"$group": {"_id": "$driver_id", "last": {"$last": "$state"}}},
+        {"$match": {"last": "start_duty"}},
+        {"$count": "n"},
+    ]):
+        on_duty = _r["n"]
+
+    # Fleet cash position, from the same running-balance rule as everywhere.
+    balances = await _driver_balances()
+    total_owed = round(sum(b["you_owe"] for b in balances.values()), 2)
+    over_limit = sum(1 for b in balances.values() if b["over_limit"])
+    collected_all = round(sum(b["collected_to_yesterday"] for b in balances.values()), 2)
+    paid_all = round(sum(b["paid_in_total"] for b in balances.values()), 2)
+    paid_today = round(sum(b["paid_in_today"] for b in balances.values()), 2)
+
+    # Settled trips + earnings per business day, for the charts.
+    per_day: Dict[str, Dict[str, float]] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"status": "settled", "business_date": {"$gte": from_bd}}},
+        {"$group": {"_id": "$business_date",
+                    "cash": {"$sum": "$cash_amount"},
+                    "gross": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}},
+                    "rows": {"$sum": 1}}},
+    ]):
+        per_day[r["_id"]] = {"cash": r["cash"], "gross": r["gross"], "rows": r["rows"]}
+
+    # Deposits per business day (trusted sources only).
+    dep_day: Dict[str, float] = {}
+    async for r in db.qr_payments.aggregate([
+        {"$match": {"type": "deposit",
+                    "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+                    "business_date": {"$gte": from_bd}}},
+        {"$group": {"_id": "$business_date", "amt": {"$sum": "$amount"}}},
+    ]):
+        dep_day[r["_id"]] = r["amt"]
+
+    series = []
+    for i in range(days):
+        bd = (today_d - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        pd = per_day.get(bd, {})
+        series.append({
+            "date": bd,
+            "gross": round(pd.get("gross", 0.0), 2),
+            "cash": round(pd.get("cash", 0.0), 2),
+            "deposited": round(dep_day.get(bd, 0.0), 2),
+        })
+
+    bookings = await _booking_counts()
+
+    return {
+        "business_date": today_bd,
+        "cards": {
+            "total_drivers": total_drivers,
+            "approved_drivers": approved,
+            "drivers_waiting": waiting,
+            "total_vehicles": total_vehicles,
+            "on_duty_now": on_duty,
+            "cash_owed": total_owed,
+            "over_limit": over_limit,
+            "collected_all": collected_all,
+            "paid_all": paid_all,
+            "paid_today": paid_today,
+        },
+        "bookings": bookings,
+        "series": series,
+        "server_ts": iso(now_utc()),
+    }
 
 
 # ---- Capture review queue --------------------------------------------------
@@ -1826,32 +1846,388 @@ async def add_platform_cash(body: PlatformCashIn, driver: Dict = Depends(get_dri
 
 
 # ---------------------------------------------------------------------------
-# QR PAYMENTS (Razorpay side effect). Deposits tagged apart from fares.
+# UBER PAYMENTS REPORT IMPORT (admin) -> settled platform_cash
+#
+# Fleet Hub > Reports > "Payments Driver", generated for a SINGLE business day,
+# then uploaded here. Settled rows supersede the driver's own OCR row for the
+# same (driver_id, platform, business_date): the screenshot is a same-day
+# estimate, this is the truth.
+#
+# Quirks of the real file, all load-bearing:
+#   * UTF-8 BOM on the header, so "Driver UUID" only matches under utf-8-sig.
+#   * "Payouts : Cash collected" is a payout, i.e. NEGATIVE. We store abs().
+#   * One row is the organisation, not a driver: zero earnings and the only
+#     non-zero bank transfer. Identified by uuid, skipped.
+#   * Colon spacing in headers is inconsistent ("Payouts : Cash collected" vs
+#     "Total earnings:Tip"). Never normalise; match the exact strings.
+#   * There is NO date column, which is why business_date is a parameter. The
+#     filename carries the window (20260907-20260914-payments_driver-...), so
+#     we parse it and refuse anything wider than one day.
 # ---------------------------------------------------------------------------
-@api.post("/qr-payment")
-async def add_qr_payment(body: QrPaymentIn, driver: Dict = Depends(get_driver)):
+UBER_COL_UUID = "Driver UUID"
+UBER_COL_FIRST = "Driver first name"
+UBER_COL_LAST = "Driver surname"
+UBER_COL_GROSS = "Total earnings"
+UBER_COL_CASH = "Payouts : Cash collected"
+UBER_COL_BANK = "Payouts : Transferred To Bank Account"
+
+_UBER_FNAME_WINDOW = re.compile(r"(\d{8})-(\d{8})-payments_driver", re.I)
+
+
+def _uber_num(raw: Optional[str]) -> float:
+    """'-5,994.30' -> -5994.30; blank/'-'/None -> 0.0."""
+    if raw is None:
+        return 0.0
+    s = raw.strip().replace(",", "").replace("₹", "")
+    if s in ("", "-", "NA", "N/A"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _uber_window_from_filename(name: str) -> Optional[tuple[str, str]]:
+    m = _UBER_FNAME_WINDOW.search(name or "")
+    if not m:
+        return None
+    fmt = lambda s: f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+    return fmt(m.group(1)), fmt(m.group(2))
+
+
+@api.post("/admin/platform-cash/import")
+async def admin_import_uber_payments(
+    file: UploadFile = File(...),
+    business_date: Optional[str] = Form(default=None),
+    platform: str = Form(default="uber"),
+    dry_run: bool = Form(default=False),
+    admin: Dict = Depends(get_admin),
+):
+    if platform not in PLATFORMS:
+        raise HTTPException(400, "unknown_platform")
+
+    window = _uber_window_from_filename(file.filename or "")
+    if business_date is None:
+        if not window:
+            raise HTTPException(
+                400, "business_date_required: filename carries no window"
+            )
+        start_d = datetime.strptime(window[0], "%Y-%m-%d")
+        end_d = datetime.strptime(window[1], "%Y-%m-%d")
+        if (end_d - start_d).days != 1:
+            raise HTTPException(
+                400,
+                f"window_too_wide: file covers {window[0]}..{window[1]}. "
+                "Generate the report for a single day, or pass business_date "
+                "explicitly to override.",
+            )
+        business_date = window[0]
+
+    try:
+        datetime.strptime(business_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "business_date_must_be_YYYY_MM_DD")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")       # BOM
+    except UnicodeDecodeError:
+        raise HTTPException(400, "file_not_utf8")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames or UBER_COL_UUID not in reader.fieldnames:
+        raise HTTPException(
+            400, f"unexpected_columns: '{UBER_COL_UUID}' not found"
+        )
+    for col in (UBER_COL_GROSS, UBER_COL_CASH):
+        if col not in reader.fieldnames:
+            raise HTTPException(400, f"unexpected_columns: missing '{col}'")
+
+    start, end = business_day_bounds(business_date)
+    imported: List[Dict] = []
+    unmatched: List[Dict] = []
+    skipped_org: List[str] = []
+    now_iso = iso(now_utc())
+
+    for rec in reader:
+        uuid_ = (rec.get(UBER_COL_UUID) or "").strip()
+        if not uuid_:
+            continue
+        name = " ".join(
+            p for p in [
+                (rec.get(UBER_COL_FIRST) or "").strip(),
+                (rec.get(UBER_COL_LAST) or "").strip(),
+            ] if p
+        )
+        gross = _uber_num(rec.get(UBER_COL_GROSS))
+        cash = abs(_uber_num(rec.get(UBER_COL_CASH)))       # payout -> positive
+        bank = _uber_num(rec.get(UBER_COL_BANK))
+
+        # The organisation's own settlement row: no earnings, no cash, and the
+        # only row with a bank transfer. Never a driver.
+        if gross == 0.0 and cash == 0.0 and bank != 0.0:
+            skipped_org.append(uuid_)
+            continue
+
+        driver = await db.drivers.find_one(
+            {"uber_driver_uuid": uuid_}, {"_id": 0, "id": 1}
+        )
+        if not driver:
+            unmatched.append({"uber_driver_uuid": uuid_, "name": name,
+                              "cash_collected": round(cash, 2)})
+            continue
+
+        row = {
+            "driver_id": driver["id"],
+            "platform": platform,
+            "cash_amount": round(cash, 2),
+            "gross_amount": round(gross, 2),
+            "business_date": business_date,
+            "window_start": iso(start),
+            "window_end": iso(end),
+            "source": "uber_report",
+            "status": "settled",
+            "uber_driver_uuid": uuid_,
+            "report_filename": file.filename,
+            "imported_by": admin["username"],
+            "updated_at": now_iso,
+        }
+        if not dry_run:
+            # Settled supersedes whatever the driver reported for this day.
+            await db.platform_cash.update_one(
+                {"driver_id": driver["id"], "platform": platform,
+                 "business_date": business_date},
+                {"$set": row,
+                 "$setOnInsert": {"id": str(uuid.uuid4()),
+                                  "created_at": now_iso}},
+                upsert=True,
+            )
+        imported.append({"driver_id": driver["id"], "name": name,
+                         "cash_amount": row["cash_amount"],
+                         "gross_amount": row["gross_amount"]})
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "business_date": business_date,
+        "platform": platform,
+        "file_window": {"from": window[0], "to": window[1]} if window else None,
+        "imported_count": len(imported),
+        "imported": imported,
+        "unmatched_count": len(unmatched),
+        "unmatched": unmatched,
+        "skipped_org_rows": skipped_org,
+        "total_cash": round(sum(r["cash_amount"] for r in imported), 2),
+    }
+
+
+@api.post("/admin/drivers/{driver_id}/link-uber-uuid")
+async def admin_link_uber_uuid(
+    driver_id: str, body: LinkUberUuidIn, admin: Dict = Depends(get_admin)
+):
+    """One-time wiring so imports can resolve a driver by Uber's stable id."""
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    clash = await db.drivers.find_one(
+        {"uber_driver_uuid": body.uber_driver_uuid, "id": {"$ne": driver_id}},
+        {"_id": 0, "id": 1},
+    )
+    if clash:
+        raise HTTPException(409, f"uuid_already_linked_to:{clash['id']}")
+    await db.drivers.update_one(
+        {"id": driver_id},
+        {"$set": {"uber_driver_uuid": body.uber_driver_uuid,
+                  "uber_uuid_linked_by": admin["username"],
+                  "uber_uuid_linked_at": iso(now_utc())}},
+    )
+    return {"ok": True, "driver_id": driver_id,
+            "uber_driver_uuid": body.uber_driver_uuid}
+
+
+# ---------------------------------------------------------------------------
+# CASH CLEARANCE
+#
+# The driver-facing POST /api/qr-payment was removed. It accepted a
+# client-supplied type ('fare' or 'deposit') under driver auth, and because
+# _cash_snapshot subtracts BOTH from cash_in_hand, either value let a driver
+# clear their own dues by asserting it. No client ever called it — only the
+# backend tests did.
+#
+# A driver's cash is now cleared by exactly two paths:
+#   1. Paying in the app  -> POST /api/payments/razorpay/orders, amount set
+#      server-side from _driver_dues_paise, row written by the webhook.
+#   2. Handing cash to ops -> the admin endpoint below, which is audited.
+# ---------------------------------------------------------------------------
+@api.post("/admin/drivers/{driver_id}/cash-deposit")
+async def admin_record_cash_deposit(
+    driver_id: str, body: ManualDepositIn, admin: Dict = Depends(get_admin)
+):
+    """Record cash a driver handed over off-app (hub, ops, bank slip).
+
+    Kept deliberately narrow: ops auth, a mandatory reason for the audit
+    trail, and idempotent on (driver_id, reference) so a double-submit from
+    the admin panel cannot credit the same hand-in twice.
+    """
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    if body.amount <= 0:
+        raise HTTPException(400, "amount_must_be_positive")
+
     existing = await db.qr_payments.find_one(
-        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"driver_id": driver_id, "reference": body.reference,
+         "source": "admin_manual"},
         {"_id": 0},
     )
     if existing:
-        return existing
+        return {"ok": True, "duplicate": True, "row": existing}
+
     occurred_at = body.occurred_at or iso(now_utc())
     row = {
         "id": str(uuid.uuid4()),
-        "driver_id": driver["id"],
+        "driver_id": driver_id,
         "amount": round(body.amount, 2),
-        "type": body.type,          # 'fare' or 'deposit'
+        "type": "deposit",
         "reference": body.reference,
-        "platform": body.platform,
+        "platform": None,
         "occurred_at": occurred_at,
         "business_date": business_date_from_dt(_parse_iso(occurred_at)),
-        "client_action_id": body.client_action_id,
+        "source": "admin_manual",
+        "reason": body.reason,
+        "recorded_by": admin["username"],
+        # qr_payments has a UNIQUE index on (driver_id, client_action_id), so
+        # deriving the key from the reference makes the database itself reject
+        # a duplicate hand-in — and stops two rows colliding on a null key.
+        "client_action_id": f"admin-deposit:{body.reference}",
         "created_at": iso(now_utc()),
     }
     await db.qr_payments.insert_one(row.copy())
     row.pop("_id", None)
+    return {"ok": True, "duplicate": False, "row": row}
+
+
+# ---------------------------------------------------------------------------
+# BOOKINGS (admin) — map-free scheduled rides
+# ---------------------------------------------------------------------------
+def _booking_ref() -> str:
+    return f"RB-{business_date_now().replace('-', '')}-{uuid.uuid4().hex[:5].upper()}"
+
+
+@api.post("/admin/bookings")
+async def admin_create_booking(
+    body: BookingCreateIn, admin: Dict = Depends(get_admin)
+):
+    now = iso(now_utc())
+    row = {
+        "id": str(uuid.uuid4()),
+        "ref": _booking_ref(),
+        "rider_name": body.rider_name.strip(),
+        "rider_phone": body.rider_phone.strip(),
+        "pickup_text": body.pickup_text.strip(),
+        "drop_text": body.drop_text.strip(),
+        "scheduled_at": body.scheduled_at,          # None = ASAP
+        "vehicle_type": body.vehicle_type,
+        "fare_estimate": body.fare_estimate,
+        "notes": body.notes,
+        "status": "requested",
+        "driver_id": None,
+        "vehicle_id": None,
+        "source": "ops",
+        "business_date": business_date_now(),
+        # Append-only, like duty_states: the current status is always the last
+        # entry, never edited in place.
+        "status_history": [
+            {"status": "requested", "at": now, "by": admin["username"], "note": None},
+        ],
+        "created_by": admin["username"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.bookings.insert_one(row.copy())
+    row.pop("_id", None)
     return row
+
+
+@api.get("/admin/bookings")
+async def admin_list_bookings(
+    status: Optional[str] = None,
+    scope: str = "all",          # all | open | closed
+    limit: int = 50,
+    skip: int = 0,
+    admin: Dict = Depends(get_admin),
+):
+    limit = max(1, min(int(limit), 200))
+    q: Dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    elif scope == "open":
+        q["status"] = {"$in": sorted(BOOKING_OPEN_STATES)}
+    elif scope == "closed":
+        q["status"] = {"$in": sorted(BOOKING_CLOSED_STATES)}
+    total = await db.bookings.count_documents(q)
+    cursor = (
+        db.bookings.find(q, {"_id": 0})
+        .sort("created_at", -1)
+        .skip(int(skip))
+        .limit(limit)
+    )
+    items = [r async for r in cursor]
+    return {"items": items, "total": total, "limit": limit, "skip": skip}
+
+
+@api.get("/admin/bookings/{booking_id}")
+async def admin_get_booking(booking_id: str, admin: Dict = Depends(get_admin)):
+    row = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "booking_not_found")
+    return row
+
+
+@api.post("/admin/bookings/{booking_id}/status")
+async def admin_update_booking_status(
+    booking_id: str, body: BookingStatusIn, admin: Dict = Depends(get_admin)
+):
+    row = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "booking_not_found")
+    now = iso(now_utc())
+    entry = {"status": body.status, "at": now, "by": admin["username"],
+             "note": body.note}
+    updates: Dict[str, Any] = {"status": body.status, "updated_at": now}
+    # Assignment is recorded but not dispatched — no fleet validation yet.
+    if body.driver_id is not None:
+        updates["driver_id"] = body.driver_id
+    if body.vehicle_id is not None:
+        updates["vehicle_id"] = body.vehicle_id
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": updates, "$push": {"status_history": entry}},
+    )
+    return {"ok": True, "id": booking_id, "status": body.status}
+
+
+async def _booking_counts() -> Dict:
+    """Booking tallies for the dashboard, in one aggregation."""
+    today_bd = business_date_now()
+    by_status: Dict[str, int] = {}
+    async for r in db.bookings.aggregate([
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+    ]):
+        by_status[r["_id"]] = r["n"]
+    open_count = sum(by_status.get(s, 0) for s in BOOKING_OPEN_STATES)
+    today_count = await db.bookings.count_documents({"business_date": today_bd})
+    scheduled_ahead = await db.bookings.count_documents({
+        "scheduled_at": {"$gt": iso(now_utc())},
+        "status": {"$in": sorted(BOOKING_OPEN_STATES)},
+    })
+    return {
+        "by_status": by_status,
+        "open": open_count,
+        "today": today_count,
+        "scheduled_ahead": scheduled_ahead,
+        "total": sum(by_status.values()),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1891,17 +2267,93 @@ async def money_today(driver: Dict = Depends(get_driver)):
         datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)
     ).strftime("%Y-%m-%d")
     snap = await _cash_snapshot(driver["id"], today_bd, tomorrow_bd)
-    cash = snap["cash_in_hand"]
+    bal = await _driver_balance(driver["id"])
     return {
         "business_date": today_bd,
+        # Today's activity, for the driver's own view of the shift. These are
+        # provisional until the report lands and do NOT drive what is owed.
         "per_platform": snap["per_platform"],       # includes 'status' per platform
         "total_cash_fares": snap["total_cash_fares"],
         "qr_fares": snap["qr_fares"],
         "deposits": snap["deposits"],
-        "cash_in_hand": cash,
+        # The settled account. Earnings come from reports up to yesterday;
+        # payments count the moment Razorpay confirms them, today included.
+        "collected_to_yesterday": bal["collected_to_yesterday"],
+        "paid_in_today": bal["paid_in_today"],
+        "paid_in_total": bal["paid_in_total"],
+        "balance": bal["balance"],
+        "you_owe": bal["you_owe"],
+        "in_credit": bal["in_credit"],
         "cash_limit": CASH_LIMIT,
-        "cash_over_limit": cash > CASH_LIMIT,
-        "you_owe": max(0.0, -cash),
+        "cash_over_limit": bal["over_limit"],
+        # Kept so existing screens keep rendering; it is today's provisional
+        # figure, not the amount owed. Use `you_owe` for anything payable.
+        "cash_in_hand": snap["cash_in_hand"],
+    }
+
+
+@api.get("/money/ledger")
+async def money_ledger(days: int = 14, driver: Dict = Depends(get_driver)):
+    """Running cash tally: what was collected, what was paid in, what is left.
+
+    money/today answers "where do I stand now"; this answers "how did I get
+    here" — one chronological line per event with the balance after it, which
+    is what makes a disputed figure checkable by the driver themselves.
+    Deposits come only from trusted sources (see _fetch_qr_payments).
+    """
+    days = max(1, min(int(days), 90))
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    from_bd = (today_d - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    to_bd = (today_d + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    pc = await _fetch_platform_cash(driver["id"], from_bd, to_bd)
+    qr = await _fetch_qr_payments(driver["id"], from_bd, to_bd)
+
+    events: List[Dict] = []
+    for r in pc:
+        events.append({
+            "business_date": r["business_date"],
+            "at": r.get("window_end") or r.get("created_at"),
+            "kind": "collected",
+            "direction": "+",                      # increases cash in hand
+            "amount": round(float(r.get("cash_amount", 0)), 2),
+            "platform": r.get("platform"),
+            "status": r.get("status"),
+            "source": r.get("source"),
+            "reference": None,
+        })
+    for r in qr:
+        events.append({
+            "business_date": r["business_date"],
+            "at": r.get("occurred_at") or r.get("created_at"),
+            "kind": "deposit" if r["type"] == "deposit" else "digital_fare",
+            "direction": "-",                      # reduces cash in hand
+            "amount": round(float(r.get("amount", 0)), 2),
+            "platform": r.get("platform"),
+            "status": "settled",
+            "source": r.get("source"),
+            "reference": r.get("reference"),
+        })
+
+    events.sort(key=lambda e: (e["business_date"], e["at"] or ""))
+    balance = 0.0
+    for e in events:
+        balance += e["amount"] if e["direction"] == "+" else -e["amount"]
+        e["balance_after"] = round(balance, 2)
+
+    collected = sum(e["amount"] for e in events if e["direction"] == "+")
+    paid_in = sum(e["amount"] for e in events if e["direction"] == "-")
+    return {
+        "from_business_date": from_bd,
+        "to_business_date": today_bd,
+        "days": days,
+        "collected": round(collected, 2),
+        "paid_in": round(paid_in, 2),
+        "cash_in_hand": round(balance, 2),
+        "cash_limit": CASH_LIMIT,
+        "cash_over_limit": balance > CASH_LIMIT,
+        "entries": list(reversed(events)),          # newest first for display
     }
 
 
@@ -2022,16 +2474,116 @@ def _razorpay_configured() -> bool:
     return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
 
 
-async def _driver_dues_paise(driver_id: str) -> int:
-    """Server-authoritative dues (paise). Uses cash_in_hand — same source
-    as the Money tab. Never trust a client-supplied amount."""
+def _zero_balance(today_bd: str) -> Dict:
+    return {
+        "as_of_business_date": today_bd,
+        "collected_to_yesterday": 0.0,
+        "paid_in_total": 0.0,
+        "paid_in_today": 0.0,
+        "balance": 0.0,
+        "you_owe": 0.0,
+        "in_credit": 0.0,
+        "over_limit": False,
+        "cash_limit": CASH_LIMIT,
+    }
+
+
+async def _driver_balances(driver_ids: Optional[List[str]] = None) -> Dict[str, Dict]:
+    """Running cash balance per driver: what the reports say was collected,
+    minus what Razorpay says was paid in.
+
+    Two deliberate asymmetries, both because the sides arrive on different
+    clocks:
+
+    * Earnings come only from SETTLED rows — the platform report — and only
+      up to and including yesterday. Today's report does not exist yet, and
+      an OCR'd screenshot is the driver's own claim, so neither may move
+      what a driver owes.
+    * Deposits count from every date, today included, because a Razorpay
+      payment is confirmed the moment its webhook lands.
+
+    Running totals, not per-day: unpaid cash carries forward and a payment
+    today settles a debt from any earlier day.
+
+    Two aggregations for the whole fleet regardless of driver count. The
+    per-driver version delegates here so there is only ever one
+    implementation of this rule — a second copy is how the admin panel and
+    the driver's own screen previously came to disagree.
+    """
     today_bd = business_date_now()
-    tomorrow_bd = (
-        datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-    snap = await _cash_snapshot(driver_id, today_bd, tomorrow_bd)
-    cash = max(0.0, float(snap["cash_in_hand"]))
-    return int(round(cash * 100))
+
+    cash_match: Dict[str, Any] = {
+        "status": "settled",
+        "business_date": {"$lt": today_bd},
+    }
+    pay_match: Dict[str, Any] = {
+        "type": "deposit",
+        "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+    }
+    if driver_ids is not None:
+        if not driver_ids:
+            return {}
+        cash_match["driver_id"] = {"$in": driver_ids}
+        pay_match["driver_id"] = {"$in": driver_ids}
+
+    owed: Dict[str, float] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": cash_match},
+        {"$group": {"_id": "$driver_id", "total": {"$sum": "$cash_amount"}}},
+    ]):
+        owed[r["_id"]] = float(r.get("total") or 0)
+
+    paid: Dict[str, Dict[str, float]] = {}
+    async for r in db.qr_payments.aggregate([
+        {"$match": pay_match},
+        {"$group": {
+            "_id": "$driver_id",
+            "total": {"$sum": "$amount"},
+            "today": {"$sum": {"$cond": [
+                {"$eq": ["$business_date", today_bd]}, "$amount", 0,
+            ]}},
+        }},
+    ]):
+        paid[r["_id"]] = {
+            "total": float(r.get("total") or 0),
+            "today": float(r.get("today") or 0),
+        }
+
+    out: Dict[str, Dict] = {}
+    for did in set(owed) | set(paid):
+        o = owed.get(did, 0.0)
+        p = paid.get(did, {"total": 0.0, "today": 0.0})
+        balance = round(o - p["total"], 2)
+        out[did] = {
+            "as_of_business_date": today_bd,
+            "collected_to_yesterday": round(o, 2),
+            "paid_in_total": round(p["total"], 2),
+            "paid_in_today": round(p["today"], 2),
+            "balance": balance,
+            "you_owe": round(max(0.0, balance), 2),
+            "in_credit": round(max(0.0, -balance), 2),
+            "over_limit": balance > CASH_LIMIT,
+            "cash_limit": CASH_LIMIT,
+        }
+    # Drivers with no rows on either side still need a balance.
+    if driver_ids:
+        for did in driver_ids:
+            out.setdefault(did, _zero_balance(today_bd))
+    return out
+
+
+async def _driver_balance(driver_id: str) -> Dict:
+    """Single-driver balance. Thin wrapper so the rule lives in one place."""
+    balances = await _driver_balances([driver_id])
+    return balances.get(driver_id) or _zero_balance(business_date_now())
+
+
+async def _driver_dues_paise(driver_id: str) -> int:
+    """Server-authoritative dues (paise). Never trust a client-supplied
+    amount. Based on the running balance, so a driver can clear arrears from
+    any previous day, not just today."""
+    bal = await _driver_balance(driver_id)
+    return int(round(float(bal["you_owe"]) * 100))
 
 
 async def _rzp_request(method: str, path: str, **kw) -> Dict[str, Any]:
@@ -2221,6 +2773,159 @@ async def razorpay_order_status(
     }
 
 
+# ---------------------------------------------------------------------------
+# DYNAMIC UPI QR (cash deposit)
+#
+# Not the static QRs this fleet used before. Those were created in the
+# dashboard as fixed_amount=false / usage=multiple_use / notes={}, which is
+# why a payment on them could not be tied to a driver or a purpose: anyone
+# could pay any amount and rider fares landed in the same stream as deposits.
+#
+# A dynamic QR inverts all three. The server mints it per request with
+# fixed_amount=true, usage=single_use, the amount taken from
+# _driver_dues_paise, and driver_id in notes — so it is payable exactly once,
+# for exactly the dues, by exactly one attributable driver. It expires via
+# close_by. The driver can then pay from any UPI app instead of the hosted
+# checkout, which is the point: no card rails, no WebBrowser flow.
+# ---------------------------------------------------------------------------
+QR_TTL_MINUTES = 30      # Razorpay requires close_by >= now + 2 minutes
+
+
+async def _reconcile_qr_once(
+    driver_id: str,
+    qr_code_id: str,
+    razorpay_payment_id: str,
+    amount_paise: int,
+) -> None:
+    """QR twin of _reconcile_razorpay_once. Keyed on qr_code_id because a QR
+    payment carries no order_id, so the order-based path cannot serve it."""
+    r = await db.razorpay_qrs.find_one_and_update(
+        {"qr_code_id": qr_code_id, "status": {"$ne": "reconciled"}},
+        {"$set": {
+            "status": "reconciled",
+            "razorpay_payment_id": razorpay_payment_id,
+            "amount_received_paise": int(amount_paise),
+            "reconciled_at": iso(now_utc()),
+        }},
+        return_document=False,
+    )
+    if not r:
+        return  # unknown or already reconciled — safe no-op
+    await db.qr_payments.update_one(
+        {"driver_id": driver_id, "client_action_id": r["client_action_id"]},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "type": "deposit",
+            "amount": round(amount_paise / 100, 2),
+            "reference": qr_code_id,
+            "platform": None,
+            "occurred_at": iso(now_utc()),
+            "business_date": business_date_now(),
+            "source": "razorpay",
+            "razorpay_qr_code_id": qr_code_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "client_action_id": r["client_action_id"],
+            "created_at": iso(now_utc()),
+        }},
+        upsert=True,
+    )
+
+
+@api.post("/payments/razorpay/qr")
+async def create_razorpay_qr(
+    body: QrDepositIn, driver: Dict = Depends(get_driver)
+):
+    if not _razorpay_configured():
+        raise HTTPException(503, "razorpay_not_configured")
+    existing = await db.razorpay_qrs.find_one(
+        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
+        {"_id": 0},
+    )
+    if existing:
+        return {
+            "qr_code_id": existing["qr_code_id"],
+            "image_url": existing["image_url"],
+            "amount_paise": existing["amount_paise"],
+            "status": existing["status"],
+            "close_by": existing["close_by"],
+        }
+
+    dues_paise = await _driver_dues_paise(driver["id"])
+    amount_paise = dues_paise
+    if body.amount_rupees is not None:
+        req = int(round(float(body.amount_rupees) * 100))
+        if req < 100:
+            raise HTTPException(400, "amount_below_minimum")
+        amount_paise = min(req, dues_paise) if dues_paise > 0 else req
+    if amount_paise < 100:
+        raise HTTPException(400, "no_dues")
+
+    close_by = int((now_utc() + timedelta(minutes=QR_TTL_MINUTES)).timestamp())
+    qr = await _rzp_request(
+        "POST", "/payments/qr_codes",
+        json={
+            "type": "upi_qr",
+            "name": "Ride91 cash deposit",
+            "usage": "single_use",
+            "fixed_amount": True,
+            "payment_amount": amount_paise,
+            "description": f"Cash deposit - {driver.get('name') or driver['id']}",
+            "close_by": close_by,
+            "notes": {
+                "driver_id": driver["id"],
+                "client_action_id": body.client_action_id,
+                "purpose": "cash_deposit",
+            },
+        },
+    )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "client_action_id": body.client_action_id,
+        "qr_code_id": qr["id"],
+        "image_url": qr.get("image_url"),
+        "amount_paise": amount_paise,
+        "close_by": close_by,
+        "status": "active",
+        "created_at": iso(now_utc()),
+    }
+    await db.razorpay_qrs.insert_one(row.copy())
+    row.pop("_id", None)
+    return {
+        "qr_code_id": row["qr_code_id"],
+        "image_url": row["image_url"],
+        "amount_paise": amount_paise,
+        "status": "active",
+        "close_by": close_by,
+        "expires_in_seconds": QR_TTL_MINUTES * 60,
+    }
+
+
+@api.get("/payments/razorpay/qr/{client_action_id}")
+async def razorpay_qr_status(
+    client_action_id: str, driver: Dict = Depends(get_driver)
+):
+    rec = await db.razorpay_qrs.find_one(
+        {"driver_id": driver["id"], "client_action_id": client_action_id},
+        {"_id": 0},
+    )
+    if not rec:
+        raise HTTPException(404, "qr_not_found")
+    return {
+        "status": rec["status"],
+        "qr_code_id": rec["qr_code_id"],
+        "image_url": rec.get("image_url"),
+        "amount_paise": rec["amount_paise"],
+        "amount_received_paise": rec.get("amount_received_paise"),
+        "payment_id": rec.get("razorpay_payment_id"),
+        "close_by": rec["close_by"],
+        "expired": rec["status"] == "active"
+                   and int(now_utc().timestamp()) > rec["close_by"],
+        "reconciled_at": rec.get("reconciled_at"),
+    }
+
+
 @api.get("/payments/razorpay/checkout", response_class=Response)
 async def razorpay_checkout_page(
     order_id: str,
@@ -2284,6 +2989,35 @@ async def razorpay_webhook(req: Request):
                 razorpay_order_id=order_id,
                 razorpay_payment_id=payment_id,
                 amount_paise=int(amount_paise),
+            )
+    elif kind == "qr_code.credited":
+        # A dynamic QR was paid. No order_id exists on this path, so it is
+        # reconciled against qr_code_id instead.
+        payload = event.get("payload") or {}
+        qr_entity = (payload.get("qr_code") or {}).get("entity") or {}
+        payment = (payload.get("payment") or {}).get("entity") or {}
+        notes = qr_entity.get("notes") or payment.get("notes") or {}
+        qr_code_id = qr_entity.get("id")
+        payment_id = payment.get("id")
+        driver_id = notes.get("driver_id")
+        amount_paise = payment.get("amount") or 0
+        if qr_code_id and payment_id and driver_id:
+            await _reconcile_qr_once(
+                driver_id=driver_id,
+                qr_code_id=qr_code_id,
+                razorpay_payment_id=payment_id,
+                amount_paise=int(amount_paise),
+            )
+    elif kind == "qr_code.closed":
+        qr_entity = ((event.get("payload") or {}).get("qr_code") or {}).get("entity") or {}
+        qr_code_id = qr_entity.get("id")
+        if qr_code_id:
+            # Only an unpaid QR goes to 'closed'; a reconciled one stays put.
+            await db.razorpay_qrs.update_one(
+                {"qr_code_id": qr_code_id, "status": "active"},
+                {"$set": {"status": "closed",
+                          "close_reason": qr_entity.get("close_reason"),
+                          "closed_at": iso(now_utc())}},
             )
     elif kind == "payment.failed":
         payload = event.get("payload") or {}
@@ -2768,118 +3502,6 @@ async def vehicle_ping_ingest(body: VehiclePingIn):
     return {"ok": True, "id": row["id"]}
 
 
-# ---------------------------------------------------------------------------
-# EARNINGS SCREENSHOT EXTRACTION (Gemini 3 Flash via emergentintegrations)
-# ---------------------------------------------------------------------------
-class EarningsExtractIn(BaseModel):
-    platform: Literal["uber", "rapido"]
-    image_base64: str          # raw base64 (no data URL prefix required)
-    mime: str = "image/jpeg"
-    client_action_id: str
-
-
-@api.post("/earnings/extract")
-async def earnings_extract(body: EarningsExtractIn, driver: Dict = Depends(get_driver)):
-    """Read an Uber/Rapido earnings screenshot and return parsed numbers.
-
-    Nothing is written to the ledger here — the client shows the driver a
-    confirmation sheet with the extracted values, and on Save it POSTs to
-    /api/close-out. This keeps the driver in control of what enters the books.
-    """
-    from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
-    import json as _json
-    import re as _re
-
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        raise HTTPException(500, "llm_key_missing")
-
-    # Strip data-URL prefix if the client sent one.
-    b64 = body.image_base64
-    if b64.startswith("data:"):
-        b64 = b64.split(",", 1)[-1]
-
-    system = (
-        "You extract earnings numbers from Indian ride-hailing driver-app "
-        "screenshots (Uber Driver, Rapido Captain). Reply with STRICT JSON "
-        "only — no prose, no code fences. Numeric fields must be numbers, "
-        "not strings. If a field is not visible, use null.\n\n"
-        "Schema:\n"
-        "{\n"
-        '  "gross_amount": number|null,   // total earnings shown on the screen, in INR\n'
-        '  "trips": number|null,          // total trips/rides count if visible\n'
-        '  "cash_collected": number|null, // cash-collected total if visible (else null)\n'
-        '  "period_hint": string|null,    // e.g. "Today", "Week", "24 Aug"\n'
-        '  "platform_detected": string|null,  // "uber" | "rapido" | null\n'
-        '  "confidence": number           // 0.0–1.0\n'
-        "}"
-    )
-    prompt = (
-        f"This is a {body.platform.upper()} driver-app screenshot. "
-        "Extract today's or the visible period's earnings and reply as JSON."
-    )
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"earnings-{body.client_action_id}",
-        system_message=system,
-    ).with_model("gemini", "gemini-3-flash-preview")
-
-    try:
-        resp = await chat.send_message(
-            UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)])
-        )
-    except Exception as e:
-        logger.exception("earnings_extract llm call failed")
-        raise HTTPException(502, f"llm_error: {type(e).__name__}")
-
-    raw = resp if isinstance(resp, str) else str(resp)
-
-    # Best-effort JSON extraction — strip fences if the model added them.
-    text = raw.strip()
-    m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
-    if m:
-        text = m.group(1)
-    else:
-        m2 = _re.search(r"\{.*\}", text, _re.S)
-        if m2:
-            text = m2.group(0)
-    try:
-        parsed = _json.loads(text)
-    except Exception:
-        parsed = {}
-
-    def _num(k: str):
-        v = parsed.get(k)
-        if v is None:
-            return None
-        try:
-            return float(v)
-        except Exception:
-            return None
-
-    result = {
-        "platform": body.platform,
-        "gross_amount": _num("gross_amount"),
-        "trips": int(_num("trips")) if _num("trips") is not None else None,
-        "cash_collected": _num("cash_collected"),
-        "period_hint": parsed.get("period_hint"),
-        "platform_detected": parsed.get("platform_detected"),
-        "confidence": _num("confidence") or 0.0,
-        "raw": raw,
-    }
-    # Persist the extraction attempt for audit (small doc, no blobs).
-    await db.earnings_extractions.insert_one(
-        {
-            "id": str(uuid.uuid4()),
-            "driver_id": driver["id"],
-            "client_action_id": body.client_action_id,
-            "platform": body.platform,
-            "result": {k: v for k, v in result.items() if k != "raw"},
-            "created_at": iso(now_utc()),
-        }
-    )
-    return result
-
 
 # ---------------------------------------------------------------------------
 # VEHICLE PING helpers
@@ -3187,6 +3809,11 @@ async def _seed_if_empty() -> None:
             "platform": "uber",
             "occurred_at": iso(now - timedelta(hours=3)),
             "business_date": today_bd,
+            # Rider paid into Ride91's Razorpay rather than handing over cash,
+            # so it is a trusted source and still counts. Without this the
+            # trust filter would drop the row and the demo's cash-in-hand
+            # would jump by 120.
+            "source": "razorpay",
             "client_action_id": str(uuid.uuid4()),
             "created_at": iso(now),
         }
@@ -3242,9 +3869,17 @@ app.add_middleware(
 async def _on_startup() -> None:
     await db.duty_states.create_index([("driver_id", 1), ("started_at", 1)])
     await db.duty_states.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
+    # The ops driver list windows both duty_states aggregations on
+    # started_at, and filters one of them by state first.
+    await db.duty_states.create_index([("started_at", 1)])
+    await db.duty_states.create_index([("state", 1), ("started_at", 1)])
     await db.close_outs.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     await db.requests.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     await db.vehicle_pings.create_index([("vehicle_id", 1), ("recorded_at", 1)])
+    # Latest-ping-per-vehicle windows on recorded_at across all vehicles, so
+    # it needs the timestamp leading. At ~200 vehicles pinging every 4
+    # minutes this collection is the fastest-growing one in the system.
+    await db.vehicle_pings.create_index([("recorded_at", 1)])
     await db.sessions.create_index([("token", 1)], unique=True)
     await db.inspections.create_index([("driver_id", 1), ("day_key", 1)], unique=True)
     await db.inspections.create_index(
@@ -3262,6 +3897,25 @@ async def _on_startup() -> None:
     await db.qr_payments.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
+    # Trust filter in _fetch_qr_payments queries by source; the ops hand-in
+    # path looks a row up by reference before inserting.
+    await db.qr_payments.create_index(
+        [("driver_id", 1), ("business_date", 1), ("source", 1)]
+    )
+    await db.qr_payments.create_index(
+        [("driver_id", 1), ("reference", 1), ("source", 1)]
+    )
+    # Dynamic deposit QRs: looked up by client_action_id (driver polling) and
+    # by qr_code_id (webhook reconcile).
+    await db.razorpay_qrs.create_index(
+        [("driver_id", 1), ("client_action_id", 1)], unique=True
+    )
+    await db.razorpay_qrs.create_index([("qr_code_id", 1)], unique=True)
+    # Bookings: listed newest-first, filtered by status, tallied by day.
+    await db.bookings.create_index([("created_at", -1)])
+    await db.bookings.create_index([("status", 1), ("created_at", -1)])
+    await db.bookings.create_index([("business_date", 1)])
+    await db.bookings.create_index([("id", 1)], unique=True)
     await db.shift_schedules.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
@@ -3271,15 +3925,6 @@ async def _on_startup() -> None:
     await db.alarm_responses.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
-    # Google auth — pending link tokens auto-expire after LINK_TOKEN_TTL_MIN,
-    # consumed session ids kept for a day so a replay attempt gets a clean 401.
-    await db.pending_google_links.create_index(
-        [("link_token", 1)], unique=True
-    )
-    await db.consumed_google_sessions.create_index(
-        [("session_id", 1)], unique=True
-    )
-    await db.drivers.create_index([("google_email", 1)], sparse=True)
     # Razorpay dedup — order per driver+action; unique order id from Razorpay.
     await db.razorpay_orders.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
@@ -3291,6 +3936,15 @@ async def _on_startup() -> None:
     await db.payouts.create_index([("client_action_id", 1)], unique=True)
     await db.payouts.create_index([("razorpayx_payout_id", 1)], unique=True)
     await db.payouts.create_index([("driver_id", 1), ("created_at", -1)])
+    # Uber report import: resolve driver by Uber's id, and keep one settled
+    # cash row per driver/platform/business-day so the upsert stays a no-op
+    # when the same report is uploaded twice.
+    await db.drivers.create_index(
+        [("uber_driver_uuid", 1)], unique=True, sparse=True
+    )
+    await db.platform_cash.create_index(
+        [("driver_id", 1), ("platform", 1), ("business_date", 1)]
+    )
     await _seed_if_empty()
 
 

@@ -28,6 +28,8 @@ export interface DutyToday {
   on_duty: boolean;
   on_duty_seconds: number;
   working_seconds: number;
+  /** to_charger + charging: on duty, but not earning on any platform. */
+  charging_seconds: number;
   current_state: string | null;
   current_platform: string | null;
   distance_km: number;

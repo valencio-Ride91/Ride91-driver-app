@@ -5,24 +5,31 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { DepositSheet } from "@/src/components/DepositSheet";
-import { EarningsUploader } from "@/src/components/EarningsUploader";
 import { PayDuesButton } from "@/src/components/PayDuesButton";
 import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
 import { api } from "@/src/api";
-import { useAuth } from "@/src/auth";
 import { useI18n, formatINR } from "@/src/i18n";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 
 interface MoneyToday {
   business_date: string;
+  // Today's shift, provisional until the platform report lands. Shown for the
+  // driver's own view; does not decide what they owe.
   per_platform: Record<string, { cash_collected: number; status: "pending" | "provisional" | "settled" }>;
   total_cash_fares: number;
   qr_fares: number;
   deposits: number;
   cash_in_hand: number;
+  // The settled account: earnings from reports up to yesterday, less every
+  // Razorpay payment including today's. `you_owe` is the payable amount.
+  collected_to_yesterday: number;
+  paid_in_today: number;
+  paid_in_total: number;
+  balance: number;
+  you_owe: number;
+  in_credit: number;
   cash_limit: number;
   cash_over_limit: boolean;
-  you_owe: number;
 }
 
 interface MoneyWeek {
@@ -47,7 +54,6 @@ const PLATFORMS = ["uber", "rapido", "ola"] as const;
 
 export default function Money() {
   const { t } = useI18n();
-  const { driver } = useAuth();
   const [today, setToday] = useState<MoneyToday | null>(null);
   const [week, setWeek] = useState<MoneyWeek | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -145,12 +151,35 @@ export default function Money() {
             value={`− ${formatINR(today?.deposits ?? 0)}`}
           />
           <View style={styles.hr} />
+          {/* The settled account. Earnings are taken from the platform report
+              up to yesterday; today's takings are still provisional above.
+              Payments land the moment Razorpay confirms them. */}
+          <MoneyLine
+            testID="cash-collected-yesterday"
+            label="Collected (to yesterday)"
+            value={formatINR(today?.collected_to_yesterday ?? 0)}
+          />
+          <MoneyLine
+            testID="cash-paid-today"
+            label="Paid in today"
+            value={`− ${formatINR(today?.paid_in_today ?? 0)}`}
+            color={(today?.paid_in_today ?? 0) > 0 ? colors.live : colors.ink}
+          />
+          <View style={styles.hr} />
           <MoneyLine
             testID="cash-in-hand"
-            label="Cash with you"
-            value={formatINR(Math.max(0, today?.cash_in_hand ?? 0))}
+            label={(today?.in_credit ?? 0) > 0 ? "In credit" : "You owe"}
+            value={formatINR(
+              (today?.in_credit ?? 0) > 0 ? today!.in_credit : Math.max(0, today?.you_owe ?? 0),
+            )}
             bold
-            color={today?.cash_over_limit ? colors.alert : colors.ink}
+            color={
+              today?.cash_over_limit
+                ? colors.alert
+                : (today?.in_credit ?? 0) > 0
+                  ? colors.live
+                  : colors.ink
+            }
           />
           {today?.cash_over_limit ? (
             <View style={styles.overLimitBanner} testID="over-limit-banner">
@@ -159,11 +188,6 @@ export default function Money() {
               </Text>
             </View>
           ) : null}
-          <View style={styles.cardActions}>
-            <View style={{ flex: 1 }}>
-              <EarningsUploader onImported={load} />
-            </View>
-          </View>
           <TouchableOpacity
             testID="deposit-now-btn"
             style={styles.depositCta}
@@ -172,7 +196,7 @@ export default function Money() {
             <Text style={styles.depositCtaText}>Deposit now</Text>
           </TouchableOpacity>
           <PayDuesButton
-            duesPaise={Math.round(Math.max(0, today?.cash_in_hand ?? 0) * 100)}
+            duesPaise={Math.round(Math.max(0, today?.you_owe ?? 0) * 100)}
             onPaid={load}
           />
         </Card>
@@ -295,8 +319,8 @@ export default function Money() {
       <DepositSheet
         visible={qrOpen}
         onClose={() => setQrOpen(false)}
-        driverId={driver?.id ?? ""}
-        qrCode={driver?.qr_code ?? ""}
+        duesPaise={Math.round(Math.max(0, today?.you_owe ?? 0) * 100)}
+        onPaid={load}
       />
     </SafeAreaView>
   );

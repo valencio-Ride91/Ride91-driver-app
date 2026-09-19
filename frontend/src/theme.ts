@@ -19,6 +19,7 @@ export const platformColors: Record<string, string> = {
   ola: "#3B6FD4",
   offline: "#67756D",
   shift_end: "#10231C",
+  to_charger: "#7FC4E4",
   charging: "#4FA8D8",
 };
 
@@ -29,6 +30,7 @@ export const platformLabels: Record<string, string> = {
   ola: "Ola",
   offline: "Offline",
   shift_end: "Shift ended",
+  to_charger: "To charger",
   charging: "Charging",
 };
 

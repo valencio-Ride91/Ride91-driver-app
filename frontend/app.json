@@ -3,13 +3,16 @@
     "name": "Ride91 Driver",
     "slug": "ride91-driver",
     "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "ride91",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.emergent.fleetmobile.uefjzz",
+      "bundleIdentifier": "com.ride91.driver",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Track your duty location for the fleet.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Track duty location in background.",
@@ -22,7 +25,8 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#10231C"
       },
-      "package": "com.emergent.fleetmobile.uefjzz",
+      "package": "com.ride91.driver",
+      "versionCode": 1,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",

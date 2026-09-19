@@ -23,31 +23,42 @@ import { api } from "@/src/api";
 // Ride91 is NOT in the platform list — Ride91 is the employment layer.
 const PLATFORMS = ["uber", "rapido", "ola"] as const;
 
+// States a driver may enter without today's walk-around capture on file.
+const CAPTURE_EXEMPT_STATES = new Set(["not_online", "to_charger", "charging"]);
+
+// The charging control is one button that walks the cycle, so the driver only
+// ever sees the action that is actually valid next.
+const CHARGE_NEXT: Record<string, { next: string; key: "go_to_charger" | "charging_start" | "charging_stop" }> = {
+  to_charger: { next: "charging", key: "charging_start" },
+  charging: { next: "not_online", key: "charging_stop" },
+};
+
 export default function Home() {
   const { t } = useI18n();
   const { today, switchState, refresh } = useDuty();
   const { lat, lng } = useTracking();
-  const { driver, vehicle } = useAuth();
+  const { vehicle } = useAuth();
   const router = useRouter();
 
-  // Deposit banner state (unchanged behaviour).
-  const [cashHeld, setCashHeld] = useState(0);
-  const [cashLimit, setCashLimit] = useState(1500);
+  // Deposit banner. Driven by you_owe — the settled balance from reports up
+  // to yesterday less every confirmed Razorpay payment — not by today's
+  // provisional takings, which the driver has not been billed for yet.
   const [youOwe, setYouOwe] = useState(0);
+  const [overLimit, setOverLimit] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
+        // The server compares against CASH_LIMIT, so the limit itself never
+        // needs to come down the wire.
         const r = await api.get<{
-          cash_in_hand: number;
-          cash_limit: number;
           you_owe: number;
+          cash_over_limit: boolean;
         }>("/money/today");
         if (!alive) return;
-        setCashHeld(r.cash_in_hand);
-        setCashLimit(r.cash_limit);
         setYouOwe(r.you_owe);
+        setOverLimit(r.cash_over_limit);
       } catch {
         // keep previous
       }
@@ -59,7 +70,6 @@ export default function Home() {
       clearInterval(id);
     };
   }, []);
-  const overLimit = cashHeld > cashLimit;
 
   // Inspection status. Auto-redirect on first-of-day if not complete.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
@@ -89,6 +99,9 @@ export default function Home() {
 
   const onDuty = !!today?.on_duty;
   const currentPlatform = today?.current_platform ?? null;
+  // current_state is the raw latest row, which is what the charging cycle
+  // keys off — current_platform only ever holds a platform-layer value.
+  const currentState = today?.current_state ?? null;
 
   // Duty toggle: Start duty → routes through inspection first. End duty
   // simply appends end_duty. Both push a row into duty_states.
@@ -113,8 +126,10 @@ export default function Home() {
       // Gate: once per business day the driver must complete the guided
       // walk-around + selfie capture BEFORE going online on any platform.
       // Skips for "not_online" so drivers can toggle offline without
-      // being forced through capture again.
-      if (state !== "not_online" && captureOk === false) {
+      // being forced through capture again, and for the charging states —
+      // taking the car to a charger is not going online to earn, so
+      // blocking it behind a walk-around would strand a flat car.
+      if (!CAPTURE_EXEMPT_STATES.has(state) && captureOk === false) {
         router.push("/go-online-capture");
         return;
       }
@@ -135,7 +150,7 @@ export default function Home() {
           onPress={() => setQrOpen(true)}
         >
           <Text style={styles.depositTitle} testID="deposit-banner-title">
-            Cash with you {formatINR(cashHeld)} · OVER LIMIT
+            You owe {formatINR(youOwe)} · OVER LIMIT
           </Text>
           <Text style={styles.depositSub}>Deposit now →</Text>
         </TouchableOpacity>
@@ -259,6 +274,41 @@ export default function Home() {
               Not online on any app
             </Text>
           </TouchableOpacity>
+
+          {/* Charging. One button, three steps: to charger -> started ->
+              stopped. Stopping returns the driver to "not online" rather
+              than guessing which app they went back to. */}
+          {(() => {
+            const step = CHARGE_NEXT[currentState ?? ""] ?? {
+              next: "to_charger",
+              key: "go_to_charger" as const,
+            };
+            const charging = currentState === "charging";
+            const heading = currentState === "to_charger" || charging;
+            return (
+              <TouchableOpacity
+                testID={`charge-btn-${step.next}`}
+                disabled={!onDuty}
+                onPress={() => pickPlatform(step.next)}
+                style={[
+                  styles.chargeBtn,
+                  heading
+                    ? {
+                        backgroundColor: platformColors[currentState ?? "charging"],
+                        borderColor: platformColors[currentState ?? "charging"],
+                      }
+                    : null,
+                  !onDuty ? { opacity: 0.4 } : null,
+                ]}
+              >
+                <Text
+                  style={[styles.chargeBtnText, heading ? { color: colors.white } : null]}
+                >
+                  {t[step.key]}
+                </Text>
+              </TouchableOpacity>
+            );
+          })()}
         </View>
 
         {/* Stats: distance from vehicle GPS; battery/range hidden when SoC unknown */}
@@ -304,11 +354,12 @@ export default function Home() {
         />
       </View>
 
+      {/* onPaid is omitted: the /money/today poll above already refreshes
+          youOwe every 15s, so the banner settles on its own. */}
       <DepositSheet
         visible={qrOpen}
         onClose={() => setQrOpen(false)}
-        driverId={driver?.id ?? ""}
-        qrCode={driver?.qr_code ?? ""}
+        duesPaise={Math.round(Math.max(0, youOwe) * 100)}
       />
     </SafeAreaView>
   );
@@ -427,6 +478,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   notOnlineText: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink },
+  chargeBtn: {
+    marginTop: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: platformColors.charging,
+    paddingVertical: spacing.sm,
+    alignItems: "center",
+  },
+  chargeBtnText: {
+    fontFamily: fonts.uiMed,
+    fontSize: 13,
+    color: platformColors.charging,
+  },
   statsRow: { flexDirection: "row", justifyContent: "space-between", gap: spacing.md },
   statCol: { flex: 1 },
   statLabel: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginBottom: 2 },
