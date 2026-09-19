@@ -10,7 +10,7 @@
 //      "Refresh" per-row action).
 
 import { useEffect, useMemo, useState } from "react";
-import { api, DriverRow, PayoutRow } from "../api";
+import { api, DriverRow, PayoutRow, downloadCsv } from "../api";
 
 function fmtINR(n: number) {
   return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -201,12 +201,26 @@ export default function Payouts() {
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div className="sub">{rows.length} payout{rows.length === 1 ? "" : "s"}</div>
-        <input
-          placeholder="Filter by driver / UTR / status"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          style={{ ...styles.input, maxWidth: 320, marginBottom: 0 }}
-        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            placeholder="Filter by driver / UTR / status"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            style={{ ...styles.input, maxWidth: 320, marginBottom: 0 }}
+          />
+          <button
+            className="ghost"
+            disabled={filteredRows.length === 0}
+            onClick={() => downloadCsv(
+              `ride91-payouts-${new Date().toISOString().slice(0, 10)}.csv`,
+              ["When", "Driver", "Phone", "Amount", "Mode", "Status", "UTR", "Ref"],
+              filteredRows.map((r) => {
+                const d = driverMap[r.driver_id];
+                return [fmtWhen(r.created_at), d?.name ?? r.driver_id, d?.phone ?? "", r.amount_rupees, r.mode, r.status, r.utr ?? "", r.reference_id ?? ""];
+              }),
+            )}
+          >Export</button>
+        </div>
       </div>
 
       <div className="card" style={{ padding: 0 }}>

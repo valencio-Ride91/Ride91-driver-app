@@ -18,6 +18,9 @@ import Inspections from "./pages/Inspections";
 import ShiftAlarms from "./pages/ShiftAlarms";
 import DriverDetail from "./pages/DriverDetail";
 import Vehicles from "./pages/Vehicles";
+import Settings from "./pages/Settings";
+import Users from "./pages/Users";
+import Audit from "./pages/Audit";
 
 import { AdminIdentity, me } from "./auth";
 
@@ -57,6 +60,9 @@ export default function App() {
             <Route path="/review/inspections" element={<Inspections />} />
             <Route path="/shift-alarms" element={<ShiftAlarms />} />
             <Route path="/payouts" element={<Payouts />} />
+            <Route path="/audit" element={<Audit />} />
+            <Route path="/settings" element={<Settings admin={admin} />} />
+            {admin.role === "owner" ? <Route path="/users" element={<Users admin={admin} />} /> : null}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         ) : (

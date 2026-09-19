@@ -46,6 +46,7 @@ export const api = {
   get: <T>(p: string) => request<T>("GET", p),
   post: <T>(p: string, b?: unknown) => request<T>("POST", p, b),
   patch: <T>(p: string, b?: unknown) => request<T>("PATCH", p, b),
+  put: <T>(p: string, b?: unknown) => request<T>("PUT", p, b),
   del: <T>(p: string) => request<T>("DELETE", p),
 };
 
@@ -297,6 +298,68 @@ export interface InspectionRow {
   created_at: string;
   exterior_video_mime: string | null;
   has_photo: boolean;
+}
+
+export interface AdminUserRow {
+  id: string;
+  username: string;
+  role: "owner" | "manager" | "viewer";
+  active: boolean;
+  created_at: string | null;
+  created_by: string | null;
+  last_login_at: string | null;
+}
+
+export interface SettingsData {
+  cash_limit: number;
+  driver_share: number;
+  hubs: Array<{ name: string; lat?: number; lng?: number }>;
+  business_day_cutoff_ist?: string;
+}
+
+export interface AuditRow {
+  id: string;
+  at: string;
+  actor: string | null;
+  actor_role: string | null;
+  action: string;
+  target: string;
+  meta: Record<string, unknown>;
+}
+
+// Client-side CSV download — turns rows into a file the browser saves. Values
+// are quoted and embedded quotes doubled, per RFC 4180.
+export function downloadCsv(filename: string, headers: string[], rows: Array<Array<string | number | null | undefined>>): void {
+  const esc = (v: string | number | null | undefined) => {
+    const s = v == null ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const body = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\r\n");
+  const blob = new Blob([body], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Multipart upload (the JSON `api` helper can't send files). Used by the
+// platform-cash import. Returns parsed JSON or throws with the error body.
+export async function uploadForm<T>(path: string, form: FormData): Promise<T> {
+  const t = getToken();
+  const headers: Record<string, string> = {};
+  if (t) headers.Authorization = `Bearer ${t}`;
+  const res = await fetch(`${API_BASE}/api${path}`, { method: "POST", headers, body: form });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) {
+    const err = new Error(`api ${res.status}`) as Error & { status: number; body: unknown };
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  return data as T;
 }
 
 export interface AlarmRow {

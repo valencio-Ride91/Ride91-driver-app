@@ -2,17 +2,20 @@
 
 import { api, getToken, setToken } from "./api";
 
+export type AdminRole = "owner" | "manager" | "viewer";
+
 export interface AdminIdentity {
   username: string;
+  role: AdminRole;
 }
 
 export async function login(username: string, password: string): Promise<AdminIdentity> {
-  const r = await api.post<{ token: string; username: string }>(
+  const r = await api.post<{ token: string; username: string; role: AdminRole }>(
     "/admin/login",
     { username, password },
   );
   setToken(r.token);
-  return { username: r.username };
+  return { username: r.username, role: r.role };
 }
 
 export async function me(): Promise<AdminIdentity | null> {

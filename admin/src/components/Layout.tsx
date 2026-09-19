@@ -3,7 +3,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { AdminIdentity, logout } from "../auth";
 
-const NAV = [
+const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean }[] = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/bookings", label: "Bookings" },
   { to: "/drivers", label: "Drivers" },
@@ -16,6 +16,9 @@ const NAV = [
   { to: "/review/inspections", label: "Inspections" },
   { to: "/shift-alarms", label: "Shift alarms" },
   { to: "/payouts", label: "Payouts" },
+  { to: "/audit", label: "Audit log" },
+  { to: "/users", label: "Admin accounts", ownerOnly: true },
+  { to: "/settings", label: "Settings" },
 ];
 
 interface Props {
@@ -37,7 +40,7 @@ export default function Layout({ admin, onLogout }: Props) {
           <span className="dot" />
           Ride91 · Ops
         </div>
-        {NAV.map((n) => (
+        {NAV.filter((n) => !n.ownerOnly || admin.role === "owner").map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => (isActive ? "active" : "")}>
             {n.label}
           </NavLink>
@@ -45,6 +48,7 @@ export default function Layout({ admin, onLogout }: Props) {
         <div className="footer">
           <div>Signed in as</div>
           <div style={{ color: "#fff", fontWeight: 600, marginTop: 4 }}>{admin.username}</div>
+          <div className="muted-sm" style={{ color: "rgba(255,255,255,.5)" }}>{admin.role}</div>
           <button onClick={doLogout}>Sign out</button>
         </div>
       </aside>

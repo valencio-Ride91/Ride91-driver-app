@@ -3,7 +3,7 @@
 // and open a per-driver detail page. Archived drivers are hidden by default.
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, DriverRow, VehicleRow } from "../api";
+import { api, DriverRow, VehicleRow, downloadCsv } from "../api";
 
 function pingAge(iso: string | null): string {
   if (!iso) return "never";
@@ -29,6 +29,7 @@ export default function Drivers() {
   const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
+  const [q, setQ] = useState("");
   const [panel, setPanel] = useState<"none" | "driver" | "vehicle">("none");
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -167,6 +168,22 @@ export default function Drivers() {
   const editVehicleOptions = (currentId: string) =>
     vehicles.filter((v) => !v.assigned || v.id === currentId);
 
+  const shown = rows.filter((r) => {
+    if (!q) return true;
+    const s = q.toLowerCase();
+    return [r.name, r.phone, r.hub_name, r.vehicle_number].some((f) => (f ?? "").toLowerCase().includes(s));
+  });
+
+  const exportCsv = () => downloadCsv(
+    `ride91-drivers-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["Name", "Phone", "Hub", "Shift", "Vehicle", "State", "Cash owed", "Active", "Archived"],
+    shown.map((r) => [
+      r.name, r.phone, r.hub_name ?? "", r.shift_type ?? "", r.vehicle_number ?? "",
+      r.archived ? "archived" : r.on_duty ? "on_duty" : (r.active ? "off" : "inactive"),
+      r.cash_in_hand, r.active ? "yes" : "no", r.archived ? "yes" : "no",
+    ]),
+  );
+
   return (
     <div>
       <div className="page-head">
@@ -177,10 +194,12 @@ export default function Drivers() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input placeholder="Search drivers" value={q} onChange={(e) => setQ(e.target.value)} style={{ maxWidth: 200 }} />
           <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, marginRight: 6 }}>
             <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} style={{ width: "auto" }} />
             Show archived
           </label>
+          <button className="ghost" onClick={exportCsv} disabled={shown.length === 0}>Export</button>
           <Link to="/vehicles"><button className="ghost">Vehicles</button></Link>
           <button onClick={() => { setPanel(panel === "vehicle" ? "none" : "vehicle"); setErr(null); }}>
             {panel === "vehicle" ? "Close" : "New vehicle"}
@@ -260,9 +279,9 @@ export default function Drivers() {
           <tbody>
             {loading ? (
               <tr><td colSpan={9} className="empty">Loading…</td></tr>
-            ) : rows.length === 0 ? (
-              <tr><td colSpan={9} className="empty">No drivers yet — use “New driver” to onboard one.</td></tr>
-            ) : rows.map((r) => (
+            ) : shown.length === 0 ? (
+              <tr><td colSpan={9} className="empty">{q ? "No drivers match." : "No drivers yet — use “New driver” to onboard one."}</td></tr>
+            ) : shown.map((r) => (
               <tr key={r.id} style={{ opacity: r.archived ? 0.55 : 1 }}>
                 <td style={{ fontWeight: 600 }}>
                   <Link to={`/drivers/${r.id}`} style={{ color: "var(--ink)" }}>{r.name}</Link>

@@ -3,7 +3,7 @@
 // an off-app hand-in per driver, which posts to the same idempotent endpoint
 // the driver's own screen relies on.
 import { useCallback, useEffect, useState } from "react";
-import { api, CashResponse, CashRow } from "../api";
+import { api, CashResponse, CashRow, downloadCsv, uploadForm } from "../api";
 
 function fmtINR(n: number) {
   return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -20,6 +20,14 @@ export default function Cash() {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Uber report import
+  const [showImport, setShowImport] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [bizDate, setBizDate] = useState("");
+  const [dryRun, setDryRun] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<any | null>(null);
+  const [importErr, setImportErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -68,12 +76,39 @@ export default function Cash() {
     }
   };
 
+  const runImport = async () => {
+    setImportErr(null);
+    setImportResult(null);
+    if (!file) return setImportErr("Choose an Uber report CSV first.");
+    const form = new FormData();
+    form.append("file", file);
+    form.append("platform", "uber");
+    form.append("dry_run", String(dryRun));
+    if (bizDate) form.append("business_date", bizDate);
+    setImporting(true);
+    try {
+      const res = await uploadForm<any>("/admin/platform-cash/import", form);
+      setImportResult(res);
+      if (!dryRun) await load();
+    } catch (e: any) {
+      setImportErr(String(e?.body?.detail ?? "Import failed — check the file is a single-day Uber report."));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const rows = (data?.items ?? []).filter((r) => {
     if (!q) return true;
     const s = q.toLowerCase();
     return (r.name ?? "").toLowerCase().includes(s) || (r.phone ?? "").toLowerCase().includes(s);
   });
   const t = data?.totals;
+
+  const exportCsv = () => downloadCsv(
+    `ride91-cash-${data?.as_of_business_date ?? new Date().toISOString().slice(0, 10)}.csv`,
+    ["Driver", "Phone", "Hub", "Collected to yest.", "Paid in total", "Paid in today", "Balance", "Owes", "Over limit"],
+    rows.map((r) => [r.name ?? "", r.phone ?? "", r.hub_name ?? "", r.collected_to_yesterday, r.paid_in_total, r.paid_in_today, r.balance, r.you_owe, r.over_limit ? "yes" : "no"]),
+  );
 
   return (
     <div>
@@ -85,13 +120,52 @@ export default function Cash() {
             {data ? fmtINR(data.cash_limit) : "—"}
           </div>
         </div>
-        <input
-          placeholder="Filter by driver / phone"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          style={{ maxWidth: 260 }}
-        />
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            placeholder="Filter by driver / phone"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            style={{ maxWidth: 220 }}
+          />
+          <button className="ghost" onClick={exportCsv} disabled={rows.length === 0}>Export</button>
+          <button className="ghost" onClick={() => setShowImport(!showImport)}>{showImport ? "Close import" : "Import Uber report"}</button>
+        </div>
       </div>
+
+      {showImport ? (
+        <div className="card onboard" style={{ marginBottom: 16 }}>
+          <h2>Import Uber cash report (CSV)</h2>
+          <div className="muted-sm" style={{ marginBottom: 12 }}>
+            Upload a single-day Uber payments report. Drivers are matched by their linked Uber id.
+            Run a dry run first to preview matches before writing.
+          </div>
+          <div className="form-grid">
+            <label>Report file (.csv)
+              <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            </label>
+            <label>Business date (optional — else read from filename)
+              <input type="date" value={bizDate} onChange={(e) => setBizDate(e.target.value)} />
+            </label>
+            <label className="col-2" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} style={{ width: "auto" }} />
+              Dry run (preview only, don't write)
+            </label>
+          </div>
+          {importErr ? <div className="err">{importErr}</div> : null}
+          {importResult ? (
+            <div className="tag ok" style={{ display: "inline-block", marginTop: 8 }}>
+              {importResult.dry_run ? "Preview: " : "Imported: "}
+              {(importResult.imported?.length ?? importResult.imported ?? 0)} matched
+              {importResult.unmatched?.length ? ` · ${importResult.unmatched.length} unmatched` : ""}
+            </div>
+          ) : null}
+          <div className="form-actions">
+            <button className="primary" onClick={runImport} disabled={importing}>
+              {importing ? "Working…" : dryRun ? "Preview" : "Import"}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {t ? (
         <div className="stat-row" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>

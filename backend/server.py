@@ -11,12 +11,15 @@ are new rows with source='admin_correction'.
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 import logging
 import math
 import os
 import random
 import re
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,8 +72,38 @@ NON_PLATFORM_STATES = {"offline", "shift_end", "to_charger", "charging"}
 DUTY_LAYER = {"start_duty", "end_duty"}
 PLATFORM_LAYER = {"uber", "rapido", "ola", "not_online"}
 ALL_STATES = PLATFORMS | NON_PLATFORM_STATES | DUTY_LAYER | PLATFORM_LAYER
-CASH_LIMIT = 1500  # ₹
-DRIVER_SHARE = 0.30
+CASH_LIMIT = 1500  # ₹ — default; overridable via the settings doc
+DRIVER_SHARE = 0.30  # default; overridable via the settings doc
+
+# ---------------------------------------------------------------------------
+# Runtime settings — a single `settings` doc (id="global") overlays these
+# defaults. Cached in memory and refreshed on startup and after every save, so
+# the money math reads a live value without a DB hit per request.
+# ---------------------------------------------------------------------------
+SETTINGS_DEFAULTS: Dict[str, Any] = {
+    "cash_limit": CASH_LIMIT,
+    "driver_share": DRIVER_SHARE,
+    "hubs": [],                       # list of {name, lat, lng}
+}
+_SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    return _SETTINGS_CACHE.get(key, SETTINGS_DEFAULTS.get(key, default))
+
+
+async def load_settings() -> Dict[str, Any]:
+    """Refresh the in-memory settings cache from the DB, keeping defaults for
+    anything not stored."""
+    doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
+    merged = dict(SETTINGS_DEFAULTS)
+    if doc:
+        for k in SETTINGS_DEFAULTS:
+            if doc.get(k) is not None:
+                merged[k] = doc[k]
+    _SETTINGS_CACHE.clear()
+    _SETTINGS_CACHE.update(merged)
+    return merged
 # Sources whose qr_payments rows may reduce a driver's cash_in_hand. The
 # driver's own app is deliberately not on this list: cash is cleared either by
 # paying through Razorpay (webhook-confirmed) or by ops recording a hand-in.
@@ -509,10 +542,72 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ride91-admin-2026")
 ADMIN_SESSION_HOURS = 12
 
+# Role hierarchy. A viewer may only read; a manager may perform ops actions; an
+# owner additionally manages admin accounts and settings.
+ROLE_RANK = {"viewer": 0, "manager": 1, "owner": 2}
+ROLES = set(ROLE_RANK)
+
+
+def hash_password(pw: str) -> str:
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 200_000)
+    return f"pbkdf2_sha256$200000${salt}${dk.hex()}"
+
+
+def verify_password(pw: str, stored: Optional[str]) -> bool:
+    if not stored:
+        return False
+    try:
+        _algo, iters, salt, want = stored.split("$")
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), int(iters))
+        return hmac.compare_digest(dk.hex(), want)
+    except (ValueError, TypeError):
+        return False
+
+
+async def _audit(admin: Dict, action: str, target: str = "", meta: Optional[Dict] = None) -> None:
+    """Append an admin action to the audit log. Best-effort — never blocks the
+    action it records."""
+    try:
+        await db.admin_audit.insert_one({
+            "id": str(uuid.uuid4()),
+            "at": iso(now_utc()),
+            "actor": admin.get("username") if admin else None,
+            "actor_role": admin.get("role") if admin else None,
+            "action": action,
+            "target": target,
+            "meta": meta or {},
+        })
+    except Exception:  # pragma: no cover - logging must not break the request
+        logger.exception("audit write failed for %s", action)
+
 
 class AdminLoginIn(BaseModel):
     username: str
     password: str
+
+
+class AdminUserCreateIn(BaseModel):
+    username: str = Field(min_length=3)
+    password: str = Field(min_length=6)
+    role: Literal["viewer", "manager", "owner"] = "manager"
+
+
+class AdminUserUpdateIn(BaseModel):
+    role: Optional[Literal["viewer", "manager", "owner"]] = None
+    active: Optional[bool] = None
+    password: Optional[str] = Field(default=None, min_length=6)
+
+
+class ChangePasswordIn(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=6)
+
+
+class SettingsIn(BaseModel):
+    cash_limit: Optional[int] = Field(default=None, ge=0)
+    driver_share: Optional[float] = Field(default=None, ge=0, le=1)
+    hubs: Optional[List[Dict[str, Any]]] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -525,12 +620,38 @@ async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict
     if _parse_iso(sess["expires_at"]) <= now_utc():
         await db.admin_sessions.delete_one({"token": token})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin_token_expired")
+    # Resolve the live user so a role change or deactivation takes effect at
+    # once, without waiting for the session to expire.
+    user = await db.admin_users.find_one({"username": sess["username"]}, {"_id": 0})
+    if user and not user.get("active", True):
+        await db.admin_sessions.delete_one({"token": token})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "account_disabled")
+    role = user.get("role", "owner") if user else "owner"
     # Slide the expiry so an active admin doesn't get logged out mid-review.
     new_exp = iso(now_utc() + timedelta(hours=ADMIN_SESSION_HOURS))
     await db.admin_sessions.update_one(
         {"token": token}, {"$set": {"expires_at": new_exp, "last_seen_at": iso(now_utc())}}
     )
-    return {"username": sess["username"], "token": token}
+    return {
+        "username": sess["username"],
+        "role": role,
+        "user_id": user.get("id") if user else None,
+        "token": token,
+    }
+
+
+async def require_write(admin: Dict = Depends(get_admin)) -> Dict:
+    """Any role above viewer. Use for mutating ops endpoints."""
+    if ROLE_RANK.get(admin.get("role", "viewer"), 0) < ROLE_RANK["manager"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "read_only_role")
+    return admin
+
+
+async def require_owner(admin: Dict = Depends(get_admin)) -> Dict:
+    """Owner only. Use for admin-account and settings management."""
+    if admin.get("role") != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "owner_only")
+    return admin
 
 
 # ---------------------------------------------------------------------------
@@ -1429,7 +1550,11 @@ class ReviewIn(BaseModel):
 
 @api.post("/admin/login")
 async def admin_login(body: AdminLoginIn):
-    if body.username != ADMIN_USERNAME or body.password != ADMIN_PASSWORD:
+    # Authenticate against the admin_users collection. `_seed_admin_owner`
+    # guarantees at least the env-configured owner exists.
+    user = await db.admin_users.find_one({"username": body.username}, {"_id": 0})
+    ok = bool(user) and user.get("active", True) and verify_password(body.password, user.get("password_hash"))
+    if not ok:
         # Constant-ish message on purpose — no user enumeration.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_credentials")
     token = str(uuid.uuid4())
@@ -1442,7 +1567,11 @@ async def admin_login(body: AdminLoginIn):
             "expires_at": iso(now_utc() + timedelta(hours=ADMIN_SESSION_HOURS)),
         }
     )
-    return {"token": token, "username": body.username, "hours_valid": ADMIN_SESSION_HOURS}
+    await _audit({"username": body.username, "role": user.get("role")}, "login")
+    return {
+        "token": token, "username": body.username,
+        "role": user.get("role", "owner"), "hours_valid": ADMIN_SESSION_HOURS,
+    }
 
 
 @api.post("/admin/logout")
@@ -1453,7 +1582,151 @@ async def admin_logout(admin: Dict = Depends(get_admin)):
 
 @api.get("/admin/me")
 async def admin_me(admin: Dict = Depends(get_admin)):
-    return {"username": admin["username"]}
+    return {"username": admin["username"], "role": admin["role"]}
+
+
+@api.post("/admin/change-password")
+async def admin_change_password(body: ChangePasswordIn, admin: Dict = Depends(get_admin)):
+    user = await db.admin_users.find_one({"username": admin["username"]}, {"_id": 0})
+    if not user or not verify_password(body.old_password, user.get("password_hash")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "wrong_current_password")
+    await db.admin_users.update_one(
+        {"username": admin["username"]},
+        {"$set": {"password_hash": hash_password(body.new_password),
+                  "password_changed_at": iso(now_utc())}},
+    )
+    await _audit(admin, "change_password")
+    return {"ok": True}
+
+
+# ---- Admin accounts (owner only) ------------------------------------------
+def _user_out(u: Dict) -> Dict:
+    return {
+        "id": u.get("id"),
+        "username": u.get("username"),
+        "role": u.get("role"),
+        "active": u.get("active", True),
+        "created_at": u.get("created_at"),
+        "created_by": u.get("created_by"),
+        "last_login_at": u.get("last_login_at"),
+    }
+
+
+@api.get("/admin/users")
+async def admin_list_users(admin: Dict = Depends(require_owner)):
+    users = [_user_out(u) async for u in db.admin_users.find({}, {"_id": 0}).sort("username", 1)]
+    return {"items": users, "count": len(users)}
+
+
+@api.post("/admin/users")
+async def admin_create_user(body: AdminUserCreateIn, admin: Dict = Depends(require_owner)):
+    username = body.username.strip()
+    if await db.admin_users.find_one({"username": username}, {"_id": 0, "id": 1}):
+        raise HTTPException(409, "username_taken")
+    row = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "password_hash": hash_password(body.password),
+        "role": body.role,
+        "active": True,
+        "created_at": iso(now_utc()),
+        "created_by": admin["username"],
+    }
+    await db.admin_users.insert_one(row.copy())
+    await _audit(admin, "create_user", username, {"role": body.role})
+    return _user_out(row)
+
+
+@api.patch("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, body: AdminUserUpdateIn, admin: Dict = Depends(require_owner)):
+    user = await db.admin_users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(404, "user_not_found")
+    updates: Dict[str, Any] = {}
+    # Guard against locking everyone out: the last active owner can't be
+    # demoted or disabled.
+    demoting = (body.role is not None and body.role != "owner") or (body.active is False)
+    if user.get("role") == "owner" and demoting:
+        owners = await db.admin_users.count_documents({"role": "owner", "active": True})
+        if owners <= 1:
+            raise HTTPException(409, "cannot_remove_last_owner")
+    if body.role is not None:
+        updates["role"] = body.role
+    if body.active is not None:
+        updates["active"] = body.active
+    if body.password is not None:
+        updates["password_hash"] = hash_password(body.password)
+    if not updates:
+        return {"ok": True, "unchanged": True}
+    updates["updated_at"] = iso(now_utc())
+    updates["updated_by"] = admin["username"]
+    await db.admin_users.update_one({"id": user_id}, {"$set": updates})
+    await _audit(admin, "update_user", user.get("username"), {k: v for k, v in updates.items() if k != "password_hash"})
+    return {"ok": True, "id": user_id, "updated": [k for k in updates if k != "password_hash"]}
+
+
+@api.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, admin: Dict = Depends(require_owner)):
+    user = await db.admin_users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(404, "user_not_found")
+    if user.get("username") == admin["username"]:
+        raise HTTPException(409, "cannot_delete_self")
+    if user.get("role") == "owner":
+        owners = await db.admin_users.count_documents({"role": "owner", "active": True})
+        if owners <= 1:
+            raise HTTPException(409, "cannot_remove_last_owner")
+    await db.admin_users.delete_one({"id": user_id})
+    await db.admin_sessions.delete_many({"username": user.get("username")})
+    await _audit(admin, "delete_user", user.get("username"))
+    return {"ok": True, "id": user_id, "deleted": True}
+
+
+# ---- Settings (owner only) -------------------------------------------------
+@api.get("/admin/settings")
+async def admin_get_settings(admin: Dict = Depends(get_admin)):
+    return {
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
+        "driver_share": get_setting("driver_share", DRIVER_SHARE),
+        "hubs": get_setting("hubs", []),
+        "business_day_cutoff_ist": "04:00",   # read-only: embedded in day math
+    }
+
+
+@api.put("/admin/settings")
+async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_owner)):
+    updates: Dict[str, Any] = {}
+    if body.cash_limit is not None:
+        updates["cash_limit"] = body.cash_limit
+    if body.driver_share is not None:
+        updates["driver_share"] = body.driver_share
+    if body.hubs is not None:
+        updates["hubs"] = body.hubs
+    if updates:
+        updates["updated_at"] = iso(now_utc())
+        updates["updated_by"] = admin["username"]
+        await db.settings.update_one({"id": "global"}, {"$set": updates}, upsert=True)
+        await load_settings()
+        await _audit(admin, "update_settings", "", {k: v for k, v in updates.items() if k in ("cash_limit", "driver_share")})
+    return {
+        "ok": True,
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
+        "driver_share": get_setting("driver_share", DRIVER_SHARE),
+        "hubs": get_setting("hubs", []),
+    }
+
+
+# ---- Audit log (manager+) --------------------------------------------------
+@api.get("/admin/audit")
+async def admin_audit_log(
+    limit: int = 200, action: Optional[str] = None, admin: Dict = Depends(require_write)
+):
+    query: Dict[str, Any] = {}
+    if action:
+        query["action"] = action
+    limit = max(1, min(limit, 1000))
+    rows = [r async for r in db.admin_audit.find(query, {"_id": 0}).sort("at", -1).limit(limit)]
+    return {"items": rows, "count": len(rows)}
 
 
 # ---- Drivers ---------------------------------------------------------------
@@ -1576,7 +1849,7 @@ async def admin_list_vehicles(
 
 
 @api.post("/admin/vehicles")
-async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(get_admin)):
+async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(require_write)):
     number = body.number.strip().upper()
     if await db.vehicles.find_one({"number": number}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "vehicle_number_exists")
@@ -1591,12 +1864,13 @@ async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(get_
     }
     await db.vehicles.insert_one(row.copy())
     row.pop("_id", None)
+    await _audit(admin, "create_vehicle", row["id"], {"number": number})
     return row
 
 
 @api.patch("/admin/vehicles/{vehicle_id}")
 async def admin_update_vehicle(
-    vehicle_id: str, body: VehicleUpdateIn, admin: Dict = Depends(get_admin)
+    vehicle_id: str, body: VehicleUpdateIn, admin: Dict = Depends(require_write)
 ):
     veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
     if not veh:
@@ -1623,7 +1897,7 @@ async def admin_update_vehicle(
 
 
 @api.delete("/admin/vehicles/{vehicle_id}")
-async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin)):
+async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(require_write)):
     """Retire a vehicle (reversible). Refuses while a driver still holds it —
     unassign the driver first so a plate is never orphaned on a live driver."""
     veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
@@ -1640,11 +1914,12 @@ async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin)
         {"$set": {"retired": True, "retired_at": iso(now_utc()),
                   "retired_by": admin["username"]}},
     )
+    await _audit(admin, "retire_vehicle", vehicle_id)
     return {"ok": True, "id": vehicle_id, "retired": True}
 
 
 @api.post("/admin/vehicles/{vehicle_id}/restore")
-async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin)):
+async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_write)):
     veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
@@ -1656,7 +1931,7 @@ async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(get_admin
 
 
 @api.post("/admin/drivers")
-async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(get_admin)):
+async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(require_write)):
     phone = body.phone.strip()
     if await db.drivers.find_one({"phone": phone}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "phone_already_registered")
@@ -1682,12 +1957,13 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(get_ad
     }
     await db.drivers.insert_one(row.copy())
     row.pop("_id", None)
+    await _audit(admin, "create_driver", driver_id, {"name": row["name"], "phone": phone})
     return row
 
 
 @api.patch("/admin/drivers/{driver_id}")
 async def admin_update_driver(
-    driver_id: str, body: DriverUpdateIn, admin: Dict = Depends(get_admin)
+    driver_id: str, body: DriverUpdateIn, admin: Dict = Depends(require_write)
 ):
     driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
     if not driver:
@@ -1781,7 +2057,7 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
 
 @api.delete("/admin/drivers/{driver_id}")
 async def admin_delete_driver(
-    driver_id: str, hard: bool = False, admin: Dict = Depends(get_admin)
+    driver_id: str, hard: bool = False, admin: Dict = Depends(require_write)
 ):
     """Remove a driver. Default is a reversible archive: the driver is
     deactivated, hidden from the roster, and their vehicle freed — cash and
@@ -1801,6 +2077,7 @@ async def admin_delete_driver(
         if has_money:
             raise HTTPException(409, "has_financial_history")
         await db.drivers.delete_one({"id": driver_id})
+        await _audit(admin, "delete_driver", driver_id)
         return {"ok": True, "id": driver_id, "deleted": True}
 
     await db.drivers.update_one(
@@ -1813,11 +2090,12 @@ async def admin_delete_driver(
             "archived_by": admin["username"],
         }},
     )
+    await _audit(admin, "archive_driver", driver_id)
     return {"ok": True, "id": driver_id, "archived": True}
 
 
 @api.post("/admin/drivers/{driver_id}/restore")
-async def admin_restore_driver(driver_id: str, admin: Dict = Depends(get_admin)):
+async def admin_restore_driver(driver_id: str, admin: Dict = Depends(require_write)):
     d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
     if not d:
         raise HTTPException(404, "driver_not_found")
@@ -2018,7 +2296,7 @@ async def admin_capture_media(capture_id: str, admin: Dict = Depends(get_admin))
 
 @api.post("/admin/captures/{capture_id}/review")
 async def admin_capture_review(
-    capture_id: str, body: ReviewIn, admin: Dict = Depends(get_admin)
+    capture_id: str, body: ReviewIn, admin: Dict = Depends(require_write)
 ):
     row = await db.go_online_captures.find_one({"id": capture_id}, {"_id": 0})
     if not row:
@@ -2080,7 +2358,7 @@ async def admin_document_media(document_id: str, admin: Dict = Depends(get_admin
 
 @api.post("/admin/documents/{document_id}/review")
 async def admin_document_review(
-    document_id: str, body: ReviewIn, admin: Dict = Depends(get_admin)
+    document_id: str, body: ReviewIn, admin: Dict = Depends(require_write)
 ):
     row = await db.documents.find_one({"id": document_id}, {"_id": 0})
     if not row:
@@ -2227,7 +2505,7 @@ async def admin_import_uber_payments(
     business_date: Optional[str] = Form(default=None),
     platform: str = Form(default="uber"),
     dry_run: bool = Form(default=False),
-    admin: Dict = Depends(get_admin),
+    admin: Dict = Depends(require_write),
 ):
     if platform not in PLATFORMS:
         raise HTTPException(400, "unknown_platform")
@@ -2349,7 +2627,7 @@ async def admin_import_uber_payments(
 
 @api.post("/admin/drivers/{driver_id}/link-uber-uuid")
 async def admin_link_uber_uuid(
-    driver_id: str, body: LinkUberUuidIn, admin: Dict = Depends(get_admin)
+    driver_id: str, body: LinkUberUuidIn, admin: Dict = Depends(require_write)
 ):
     """One-time wiring so imports can resolve a driver by Uber's stable id."""
     driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
@@ -2387,7 +2665,7 @@ async def admin_link_uber_uuid(
 # ---------------------------------------------------------------------------
 @api.post("/admin/drivers/{driver_id}/cash-deposit")
 async def admin_record_cash_deposit(
-    driver_id: str, body: ManualDepositIn, admin: Dict = Depends(get_admin)
+    driver_id: str, body: ManualDepositIn, admin: Dict = Depends(require_write)
 ):
     """Record cash a driver handed over off-app (hub, ops, bank slip).
 
@@ -2430,6 +2708,8 @@ async def admin_record_cash_deposit(
     }
     await db.qr_payments.insert_one(row.copy())
     row.pop("_id", None)
+    await _audit(admin, "cash_deposit", driver_id,
+                 {"amount": row["amount"], "reference": body.reference})
     return {"ok": True, "duplicate": False, "row": row}
 
 
@@ -2495,7 +2775,7 @@ async def admin_cash(admin: Dict = Depends(get_admin)):
     }
     return {
         "items": rows, "totals": totals, "count": len(rows),
-        "cash_limit": CASH_LIMIT, "as_of_business_date": business_date_now(),
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT), "as_of_business_date": business_date_now(),
     }
 
 
@@ -2518,7 +2798,7 @@ async def admin_requests(state: Optional[str] = None, admin: Dict = Depends(get_
 
 @api.post("/admin/requests/{request_id}/decide")
 async def admin_decide_request(
-    request_id: str, body: RequestDecisionIn, admin: Dict = Depends(get_admin)
+    request_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_write)
 ):
     """Approve or reject a driver request. Records who decided and when. An
     approved `advance` does NOT itself touch the advances ledger — that stays a
@@ -2538,6 +2818,8 @@ async def admin_decide_request(
             "decision_note": body.note,
         }},
     )
+    await _audit(admin, "decide_request", request_id,
+                 {"decision": body.decision, "type": row.get("type")})
     return {"ok": True, "id": request_id, "state": state}
 
 
@@ -2603,7 +2885,7 @@ def _booking_ref() -> str:
 
 @api.post("/admin/bookings")
 async def admin_create_booking(
-    body: BookingCreateIn, admin: Dict = Depends(get_admin)
+    body: BookingCreateIn, admin: Dict = Depends(require_write)
 ):
     now = iso(now_utc())
     row = {
@@ -2673,7 +2955,7 @@ async def admin_get_booking(booking_id: str, admin: Dict = Depends(get_admin)):
 
 @api.post("/admin/bookings/{booking_id}/status")
 async def admin_update_booking_status(
-    booking_id: str, body: BookingStatusIn, admin: Dict = Depends(get_admin)
+    booking_id: str, body: BookingStatusIn, admin: Dict = Depends(require_write)
 ):
     row = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not row:
@@ -2771,7 +3053,7 @@ async def money_today(driver: Dict = Depends(get_driver)):
         "balance": bal["balance"],
         "you_owe": bal["you_owe"],
         "in_credit": bal["in_credit"],
-        "cash_limit": CASH_LIMIT,
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
         "cash_over_limit": bal["over_limit"],
         # Kept so existing screens keep rendering; it is today's provisional
         # figure, not the amount owed. Use `you_owe` for anything payable.
@@ -2838,8 +3120,8 @@ async def money_ledger(days: int = 14, driver: Dict = Depends(get_driver)):
         "collected": round(collected, 2),
         "paid_in": round(paid_in, 2),
         "cash_in_hand": round(balance, 2),
-        "cash_limit": CASH_LIMIT,
-        "cash_over_limit": balance > CASH_LIMIT,
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
+        "cash_over_limit": balance > get_setting("cash_limit", CASH_LIMIT),
         "entries": list(reversed(events)),          # newest first for display
     }
 
@@ -2872,7 +3154,7 @@ async def money_week(driver: Dict = Depends(get_driver)):
     total_settled = sum(v["settled_gross"] for v in per_platform.values())
     total_prov = sum(v["provisional_gross"] for v in per_platform.values())
     est_gross = total_settled + total_prov
-    driver_share = round(est_gross * DRIVER_SHARE, 2)
+    driver_share = round(est_gross * get_setting("driver_share", DRIVER_SHARE), 2)
 
     # Cash held right now (not window-scoped — deposits carry across days)
     today_snap = await _cash_snapshot(driver["id"], today_bd, next_mon_bd)
@@ -2894,7 +3176,7 @@ async def money_week(driver: Dict = Depends(get_driver)):
         "total_provisional": round(total_prov, 2),
         "estimated_gross": round(est_gross, 2),
         "driver_share": driver_share,
-        "share_rate": DRIVER_SHARE,
+        "share_rate": get_setting("driver_share", DRIVER_SHARE),
         "cash_held": round(cash_held, 2),
         "advance": advance,
         "advance_recovery_week": round(weekly_advance_recovery, 2),
@@ -2920,7 +3202,7 @@ async def money_weekly(driver: Dict = Depends(get_driver)):
         d = today_d - timedelta(days=i)
         key = d.strftime("%Y-%m-%d")
         gross = round(by_day.get(key, 0.0), 2)
-        days.append({"business_date": key, "gross": gross, "share": round(gross * DRIVER_SHARE, 2)})
+        days.append({"business_date": key, "gross": gross, "share": round(gross * get_setting("driver_share", DRIVER_SHARE), 2)})
     return {"days": days}
 
 
@@ -2971,7 +3253,7 @@ def _zero_balance(today_bd: str) -> Dict:
         "you_owe": 0.0,
         "in_credit": 0.0,
         "over_limit": False,
-        "cash_limit": CASH_LIMIT,
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
     }
 
 
@@ -3049,8 +3331,8 @@ async def _driver_balances(driver_ids: Optional[List[str]] = None) -> Dict[str, 
             "balance": balance,
             "you_owe": round(max(0.0, balance), 2),
             "in_credit": round(max(0.0, -balance), 2),
-            "over_limit": balance > CASH_LIMIT,
-            "cash_limit": CASH_LIMIT,
+            "over_limit": balance > get_setting("cash_limit", CASH_LIMIT),
+            "cash_limit": get_setting("cash_limit", CASH_LIMIT),
         }
     # Drivers with no rows on either side still need a balance.
     if driver_ids:
@@ -3748,7 +4030,7 @@ class AdminPayoutIn(BaseModel):
 
 @api.post("/admin/payouts/create")
 async def admin_create_payout(
-    body: AdminPayoutIn, admin: Dict = Depends(get_admin)
+    body: AdminPayoutIn, admin: Dict = Depends(require_write)
 ):
     """Ops-triggered payout. Enforces:
       - min ₹1 (100 paise) per Razorpay rules.
@@ -3819,6 +4101,8 @@ async def admin_create_payout(
         "updated_at": iso(now_utc()),
     }
     await db.payouts.insert_one(row.copy())
+    await _audit(admin, "create_payout", row.get("driver_id", ""),
+                 {"amount_rupees": row.get("amount_rupees"), "mode": row.get("mode")})
     return {"payout_id": row["id"], "status": row["status"], "razorpayx_id": resp["id"]}
 
 
@@ -4435,7 +4719,31 @@ async def _on_startup() -> None:
     await db.platform_cash.create_index(
         [("driver_id", 1), ("platform", 1), ("business_date", 1)]
     )
+    await db.admin_users.create_index([("username", 1)], unique=True)
+    await db.admin_sessions.create_index([("username", 1)])
+    await db.admin_audit.create_index([("at", -1)])
+    await db.admin_audit.create_index([("action", 1), ("at", -1)])
+    await _seed_admin_owner()
+    await load_settings()
     await _seed_if_empty()
+
+
+async def _seed_admin_owner() -> None:
+    """Ensure an owner account exists. On first boot this promotes the
+    env-configured ADMIN_USERNAME/ADMIN_PASSWORD into a real, hashed user row so
+    the existing login keeps working while the panel gains per-user accounts."""
+    if await db.admin_users.count_documents({}) > 0:
+        return
+    await db.admin_users.insert_one({
+        "id": str(uuid.uuid4()),
+        "username": ADMIN_USERNAME,
+        "password_hash": hash_password(ADMIN_PASSWORD),
+        "role": "owner",
+        "active": True,
+        "created_at": iso(now_utc()),
+        "created_by": "system_bootstrap",
+    })
+    logger.info("seeded bootstrap admin owner '%s'", ADMIN_USERNAME)
 
 
 @app.on_event("shutdown")
