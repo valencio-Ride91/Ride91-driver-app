@@ -24,7 +24,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  // A gateway/timeout error can return an HTML body; don't let JSON.parse throw
+  // and mask the real status.
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: text.slice(0, 200) };
+    }
+  }
   if (!res.ok) {
     const err = new Error(`api ${res.status}`) as ApiError;
     err.status = res.status;

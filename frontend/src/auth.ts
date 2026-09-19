@@ -66,6 +66,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [refresh]);
 
   const signOut = useCallback(async () => {
+    // Revoke the session server-side so the token can't be reused. Best-effort:
+    // a driver who is offline must still be able to sign out locally.
+    try {
+      await api.post("/auth/logout");
+    } catch {
+      // ignore — token may already be dead, or the device is offline
+    }
     await storage.secureRemove(AUTH_TOKEN_KEY);
     setDriver(null);
     setVehicle(null);
