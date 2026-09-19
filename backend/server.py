@@ -277,6 +277,40 @@ class ManualDepositIn(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# FLEET ONBOARDING (admin) — create/edit vehicles and drivers
+# ---------------------------------------------------------------------------
+class VehicleCreateIn(BaseModel):
+    number: str = Field(min_length=3)          # number plate
+    model: str = "Citroën ëC3"
+    current_soc: Optional[int] = None
+    current_range_km: Optional[int] = None
+
+
+class DriverCreateIn(BaseModel):
+    name: str = Field(min_length=1)
+    phone: str = Field(min_length=5)           # login identity; must be unique
+    vehicle_id: Optional[str] = None
+    hub_name: Optional[str] = None
+    hub_lat: Optional[float] = None
+    hub_lng: Optional[float] = None
+    shift_type: str = "day"                    # day | night
+    status: Literal["approved", "pending"] = "approved"
+
+
+class DriverUpdateIn(BaseModel):
+    # All optional — only the provided fields change.
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    vehicle_id: Optional[str] = None
+    hub_name: Optional[str] = None
+    hub_lat: Optional[float] = None
+    hub_lng: Optional[float] = None
+    shift_type: Optional[str] = None
+    status: Optional[Literal["approved", "pending"]] = None
+    active: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
 # BOOKINGS
 #
 # Scheduled Ride91 rides, entered by ops. Deliberately map-free for now:
@@ -1501,6 +1535,98 @@ async def admin_drivers(admin: Dict = Depends(get_admin)):
         )
     out.sort(key=lambda x: (not x["on_duty"], x["name"] or ""))
     return {"items": out, "business_date": day_key, "count": len(out)}
+
+
+# ---- Fleet onboarding: vehicles + drivers ---------------------------------
+@api.get("/admin/vehicles")
+async def admin_list_vehicles(admin: Dict = Depends(get_admin)):
+    vehicles = [v async for v in db.vehicles.find({}, {"_id": 0}).sort("number", 1)]
+    # Which vehicles already have a driver, so the UI can flag free ones.
+    assigned = set()
+    async for d in db.drivers.find({"vehicle_id": {"$ne": None}}, {"_id": 0, "vehicle_id": 1}):
+        assigned.add(d.get("vehicle_id"))
+    for v in vehicles:
+        v["assigned"] = v["id"] in assigned
+    return {"items": vehicles, "count": len(vehicles)}
+
+
+@api.post("/admin/vehicles")
+async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(get_admin)):
+    number = body.number.strip().upper()
+    if await db.vehicles.find_one({"number": number}, {"_id": 0, "id": 1}):
+        raise HTTPException(409, "vehicle_number_exists")
+    row = {
+        "id": str(uuid.uuid4()),
+        "number": number,
+        "model": body.model,
+        "current_soc": body.current_soc,
+        "current_range_km": body.current_range_km,
+        "created_by": admin["username"],
+        "created_at": iso(now_utc()),
+    }
+    await db.vehicles.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+@api.post("/admin/drivers")
+async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(get_admin)):
+    phone = body.phone.strip()
+    if await db.drivers.find_one({"phone": phone}, {"_id": 0, "id": 1}):
+        raise HTTPException(409, "phone_already_registered")
+    if body.vehicle_id:
+        veh = await db.vehicles.find_one({"id": body.vehicle_id}, {"_id": 0, "id": 1})
+        if not veh:
+            raise HTTPException(404, "vehicle_not_found")
+    driver_id = str(uuid.uuid4())
+    row = {
+        "id": driver_id,
+        "name": body.name.strip(),
+        "phone": phone,
+        "vehicle_id": body.vehicle_id,
+        "qr_code": f"RIDE91-DEPOSIT-{driver_id[:8].upper()}",
+        "active": True,
+        "status": body.status,
+        "shift_type": body.shift_type,
+        "hub_name": body.hub_name,
+        "hub_lat": body.hub_lat,
+        "hub_lng": body.hub_lng,
+        "created_by": admin["username"],
+        "created_at": iso(now_utc()),
+    }
+    await db.drivers.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+@api.patch("/admin/drivers/{driver_id}")
+async def admin_update_driver(
+    driver_id: str, body: DriverUpdateIn, admin: Dict = Depends(get_admin)
+):
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    updates: Dict[str, Any] = {}
+    for field in ("name", "phone", "vehicle_id", "hub_name", "hub_lat",
+                  "hub_lng", "shift_type", "status", "active"):
+        val = getattr(body, field)
+        if val is not None:
+            updates[field] = val.strip() if isinstance(val, str) else val
+    if "phone" in updates:
+        clash = await db.drivers.find_one(
+            {"phone": updates["phone"], "id": {"$ne": driver_id}}, {"_id": 0, "id": 1}
+        )
+        if clash:
+            raise HTTPException(409, "phone_already_registered")
+    if updates.get("vehicle_id"):
+        if not await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "id": 1}):
+            raise HTTPException(404, "vehicle_not_found")
+    if not updates:
+        return {"ok": True, "unchanged": True}
+    updates["updated_at"] = iso(now_utc())
+    updates["updated_by"] = admin["username"]
+    await db.drivers.update_one({"id": driver_id}, {"$set": updates})
+    return {"ok": True, "id": driver_id, "updated": list(updates.keys())}
 
 
 # ---- Live map --------------------------------------------------------------
@@ -3916,6 +4042,9 @@ async def _on_startup() -> None:
     await db.bookings.create_index([("status", 1), ("created_at", -1)])
     await db.bookings.create_index([("business_date", 1)])
     await db.bookings.create_index([("id", 1)], unique=True)
+    # Onboarding: phone is the driver login identity, vehicle number the plate.
+    await db.drivers.create_index([("phone", 1)], unique=True)
+    await db.vehicles.create_index([("number", 1)], unique=True)
     await db.shift_schedules.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )

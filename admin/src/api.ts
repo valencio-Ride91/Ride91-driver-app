@@ -45,7 +45,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   get: <T>(p: string) => request<T>("GET", p),
   post: <T>(p: string, b?: unknown) => request<T>("POST", p, b),
+  patch: <T>(p: string, b?: unknown) => request<T>("PATCH", p, b),
 };
+
+export interface VehicleRow {
+  id: string;
+  number: string;
+  model: string;
+  current_soc: number | null;
+  current_range_km: number | null;
+  assigned: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Types shared across screens.
