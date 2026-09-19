@@ -11,7 +11,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://fleet-mobile-16.emergent.host"
+        "EXPO_PUBLIC_BACKEND_URL": "https://ride91-api-561130004577.asia-south1.run.app"
       }
     },
     "preview": {
@@ -21,7 +21,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://fleet-mobile-16.emergent.host"
+        "EXPO_PUBLIC_BACKEND_URL": "https://ride91-api-561130004577.asia-south1.run.app"
       }
     },
     "production": {
@@ -31,7 +31,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://fleet-mobile-16.emergent.host"
+        "EXPO_PUBLIC_BACKEND_URL": "https://ride91-api-561130004577.asia-south1.run.app"
       }
     }
   },
