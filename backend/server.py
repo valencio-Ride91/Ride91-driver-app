@@ -184,6 +184,11 @@ class DriverLoginIn(BaseModel):
     client_action_id: str
 
 
+class DriverChangePasswordIn(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=6)
+
+
 class DriverOut(BaseModel):
     id: str
     name: str
@@ -495,8 +500,9 @@ async def get_driver(authorization: Optional[str] = Header(default=None)) -> Dic
     session = await db.sessions.find_one({"token": token}, {"_id": 0})
     if not session:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
-    # Google sessions carry a rolling 7-day TTL; OTP sessions leave the field
-    # absent and never expire (drivers use this in remote areas without data).
+    # Sessions carry a sliding TTL: a driver active within DRIVER_SESSION_DAYS
+    # stays signed in, while a dormant (e.g. stolen) token expires. Legacy
+    # sessions with no expires_at are treated as non-expiring for continuity.
     exp_iso = session.get("expires_at")
     if exp_iso:
         try:
@@ -507,10 +513,20 @@ async def get_driver(authorization: Optional[str] = Header(default=None)) -> Dic
         except HTTPException:
             raise
         except Exception:
-            pass  # bad expires_at → treat as non-expiring
+            exp_iso = None  # bad expires_at → treat as non-expiring
     driver = await db.drivers.find_one({"id": session["driver_id"]}, {"_id": 0})
     if not driver:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "driver missing")
+    # A deactivated or archived driver can no longer use an existing token.
+    if not driver.get("active", True) or driver.get("archived"):
+        await db.sessions.delete_one({"token": token})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "account_disabled")
+    # Slide the window on activity so active drivers are never logged out.
+    if exp_iso:
+        await db.sessions.update_one(
+            {"token": token},
+            {"$set": {"expires_at": iso(now_utc() + timedelta(days=DRIVER_SESSION_DAYS))}},
+        )
     return driver
 
 
@@ -540,11 +556,48 @@ def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ride91-admin-2026")
 ADMIN_SESSION_HOURS = 12
+# Driver sessions get a long sliding TTL: a driver active within this many days
+# stays signed in, but a truly dormant (e.g. stolen) token dies.
+DRIVER_SESSION_DAYS = 30
+
+# Login brute-force guard (DB-backed so it holds across Cloud Run instances).
+LOGIN_MAX_ATTEMPTS = 6      # failures allowed within the window
+LOGIN_WINDOW_MIN = 15       # rolling window for counting failures
+LOGIN_LOCK_MIN = 15         # lockout duration once the limit is hit
 
 # Role hierarchy. A viewer may only read; a manager may perform ops actions; an
 # owner additionally manages admin accounts and settings.
 ROLE_RANK = {"viewer": 0, "manager": 1, "owner": 2}
 ROLES = set(ROLE_RANK)
+
+
+async def login_guard(key: str) -> None:
+    """Raise 429 if `key` (phone or admin username) is currently locked out."""
+    row = await db.login_attempts.find_one({"key": key}, {"_id": 0})
+    if row and row.get("locked_until") and _parse_iso(row["locked_until"]) > now_utc():
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too_many_attempts")
+
+
+async def login_record_failure(key: str) -> None:
+    """Count a failed attempt; lock the key once the limit is hit in-window."""
+    now = now_utc()
+    row = await db.login_attempts.find_one({"key": key}, {"_id": 0})
+    window_ok = (
+        row and row.get("first_at") and
+        _parse_iso(row["first_at"]) > now - timedelta(minutes=LOGIN_WINDOW_MIN)
+    )
+    count = (row["count"] + 1) if window_ok else 1
+    update: Dict[str, Any] = {"count": count, "last_at": iso(now)}
+    if not window_ok:
+        update["first_at"] = iso(now)
+    if count >= LOGIN_MAX_ATTEMPTS:
+        update["locked_until"] = iso(now + timedelta(minutes=LOGIN_LOCK_MIN))
+    await db.login_attempts.update_one({"key": key}, {"$set": update}, upsert=True)
+
+
+async def login_clear(key: str) -> None:
+    """Wipe the failure counter after a successful login."""
+    await db.login_attempts.delete_one({"key": key})
 
 
 def hash_password(pw: str) -> str:
@@ -664,7 +717,9 @@ async def require_owner(admin: Dict = Depends(get_admin)) -> Dict:
 async def driver_login(body: DriverLoginIn):
     """Driver login with phone (username) + admin-set password. The generic
     error message avoids revealing whether a phone is registered."""
-    driver = await db.drivers.find_one({"phone": body.phone.strip()}, {"_id": 0})
+    phone = body.phone.strip()
+    await login_guard(f"driver:{phone}")
+    driver = await db.drivers.find_one({"phone": phone}, {"_id": 0})
     ok = (
         bool(driver)
         and driver.get("active", True)
@@ -672,7 +727,9 @@ async def driver_login(body: DriverLoginIn):
         and verify_password(body.password, driver.get("password_hash"))
     )
     if not ok:
+        await login_record_failure(f"driver:{phone}")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_credentials")
+    await login_clear(f"driver:{phone}")
     vehicle = await db.vehicles.find_one({"id": driver.get("vehicle_id")}, {"_id": 0})
     # Reuse token per client_action_id to keep login idempotent under retry.
     existing = await db.sessions.find_one({"client_action_id": body.client_action_id}, {"_id": 0})
@@ -684,6 +741,7 @@ async def driver_login(body: DriverLoginIn):
                 "driver_id": driver["id"],
                 "client_action_id": body.client_action_id,
                 "created_at": iso(now_utc()),
+                "expires_at": iso(now_utc() + timedelta(days=DRIVER_SESSION_DAYS)),
             }
         )
     return {
@@ -706,6 +764,22 @@ async def me(driver: Dict = Depends(get_driver)):
         "driver": _driver_out(driver, vehicle),
         "vehicle": {k: v for k, v in (vehicle or {}).items()},
     }
+
+
+@api.post("/auth/change-password")
+async def driver_change_password(
+    body: DriverChangePasswordIn, driver: Dict = Depends(get_driver)
+):
+    """A driver changes the password ops issued them. Requires the current
+    password; the current session stays valid."""
+    if not verify_password(body.old_password, driver.get("password_hash")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "wrong_current_password")
+    await db.drivers.update_one(
+        {"id": driver["id"]},
+        {"$set": {"password_hash": hash_password(body.new_password),
+                  "password_changed_at": iso(now_utc())}},
+    )
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1545,11 +1619,14 @@ class ReviewIn(BaseModel):
 async def admin_login(body: AdminLoginIn):
     # Authenticate against the admin_users collection. `_seed_admin_owner`
     # guarantees at least the env-configured owner exists.
+    await login_guard(f"admin:{body.username}")
     user = await db.admin_users.find_one({"username": body.username}, {"_id": 0})
     ok = bool(user) and user.get("active", True) and verify_password(body.password, user.get("password_hash"))
     if not ok:
+        await login_record_failure(f"admin:{body.username}")
         # Constant-ish message on purpose — no user enumeration.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_credentials")
+    await login_clear(f"admin:{body.username}")
     token = str(uuid.uuid4())
     await db.admin_sessions.insert_one(
         {
@@ -4726,6 +4803,7 @@ async def _on_startup() -> None:
     )
     await db.admin_users.create_index([("username", 1)], unique=True)
     await db.admin_sessions.create_index([("username", 1)])
+    await db.login_attempts.create_index([("key", 1)], unique=True)
     await db.admin_audit.create_index([("at", -1)])
     await db.admin_audit.create_index([("action", 1), ("at", -1)])
     await _seed_admin_owner()

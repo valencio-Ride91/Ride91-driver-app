@@ -8,6 +8,7 @@ import { Card } from "@/src/components/ui";
 import { DocumentsCard } from "@/src/components/DocumentsCard";
 import { ConsentsCard } from "@/src/components/ConsentsCard";
 import { BankAccountCard } from "@/src/components/BankAccountCard";
+import { ChangePasswordCard } from "@/src/components/ChangePasswordCard";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatIST } from "@/src/i18n";
 import { useShiftAlarm } from "@/src/shift-alarms";
@@ -303,6 +304,10 @@ export default function Profile() {
 
         <Card testID="profile-consents-card" style={{ marginTop: spacing.md }}>
           <ConsentsCard />
+        </Card>
+
+        <Card testID="profile-password-card" style={{ marginTop: spacing.md }}>
+          <ChangePasswordCard />
         </Card>
 
         <TouchableOpacity onPress={signOut} style={styles.logout} testID="logout-btn">
