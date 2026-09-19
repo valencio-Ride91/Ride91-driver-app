@@ -12,8 +12,7 @@ database seeds itself on first boot (`_seed_if_empty`).
 | Piece | Moves to |
 |---|---|
 | Database | MongoDB Atlas |
-| Backend API | Render (Docker, from `backend/Dockerfile` via `render.yaml`) |
-| Scheduled jobs | Render cron services (`backend/jobs.py`) |
+| Backend API + jobs | Google Cloud Run (Docker, from `backend/Dockerfile`) — see `CLOUDRUN.md` |
 | Admin panel | Netlify or Vercel (static, config already present) |
 | Driver app | Google Play internal track (see `DEPLOYMENT.md`) |
 
@@ -21,34 +20,25 @@ database seeds itself on first boot (`_seed_if_empty`).
 
 ## 1. MongoDB Atlas
 
-1. Create a free/shared cluster (region near India, e.g. Mumbai `ap-south-1`).
+1. Create a free M0 cluster, region Mumbai `ap-south-1`.
 2. Database access → add a user (username + strong password).
-3. Network access → allow Render's egress (or `0.0.0.0/0` to start, then
-   tighten to Render's static IPs).
+3. Network access → `0.0.0.0/0` to start (Cloud Run has no fixed egress IPs on
+   the base tier; lock down later with VPC egress if needed).
 4. Copy the SRV connection string:
    `mongodb+srv://<user>:<pass>@<cluster>/?retryWrites=true&w=majority`
-   Append the DB name or set it via `DB_NAME` (the app uses `DB_NAME`, default
-   `ride91`).
+   The app reads `DB_NAME` separately (default `ride91`).
 
-## 2. Backend on Render
+## 2. Backend on Cloud Run
 
-1. Push this repo to GitHub (the branch Render will track).
-2. Render → **New → Blueprint** → select the repo. It reads `render.yaml` and
-   creates the web service **plus the two cron services**.
-3. On the `ride91-api` service, set the secret env vars (all marked
-   `sync: false`):
-   - `MONGO_URL` — the Atlas SRV string
-   - `ADMIN_USERNAME`, `ADMIN_PASSWORD`
-   - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`
-   - `RAZORPAYX_ACCOUNT_NUMBER`, `RAZORPAYX_KEY_ID`, `RAZORPAYX_KEY_SECRET`, `RAZORPAYX_WEBHOOK_SECRET`
-   - `MONGO_URL` + `DB_NAME` on the two cron services too
-4. Deploy. Render builds `backend/Dockerfile`, runs uvicorn, and health-checks
-   `/api/health`.
+Full commands in **`CLOUDRUN.md`**. In short: put the secrets in Secret
+Manager, then `gcloud run deploy ride91-api --source backend --region
+asia-south1 --allow-unauthenticated`. The two housekeeping jobs run as Cloud
+Run Jobs + Cloud Scheduler (also in `CLOUDRUN.md`).
 
 ## 3. Verify
 
 ```bash
-curl https://<your-render-url>/api/health
+curl https://<cloud-run-url>/api/health
 # -> {"ok": true, "db": true}
 ```
 
@@ -71,7 +61,7 @@ Point subdomains once the services are up:
 
 | Subdomain | Points at |
 |---|---|
-| `api.ride91.com` | Render web service (custom domain + CNAME) |
+| `api.ride91.com` | Cloud Run (`gcloud run domain-mappings create` prints the records) |
 | `ops.ride91.com` | Netlify/Vercel admin deploy |
 | `ride91.com` | Landing + `/privacy` (Play requires a privacy policy URL) |
 
