@@ -4809,6 +4809,23 @@ async def _on_startup() -> None:
     await _seed_admin_owner()
     await load_settings()
     await _seed_if_empty()
+    await _ensure_demo_login()
+
+
+async def _ensure_demo_login() -> None:
+    """Guarantee a working demo driver login. The demo driver was seeded before
+    passwords existed, so its row can lack a password_hash; backfill it (and
+    create the driver if the DB was seeded but the row is missing) so
+    DEMO_DRIVER_PHONE / DEMO_DRIVER_PASSWORD always signs in for testing."""
+    d = await db.drivers.find_one(
+        {"phone": DEMO_DRIVER_PHONE}, {"_id": 0, "id": 1, "password_hash": 1}
+    )
+    if d and not d.get("password_hash"):
+        await db.drivers.update_one(
+            {"id": d["id"]},
+            {"$set": {"password_hash": hash_password(DEMO_DRIVER_PASSWORD)}},
+        )
+        logger.info("backfilled demo driver password for %s", DEMO_DRIVER_PHONE)
 
 
 async def _seed_admin_owner() -> None:
