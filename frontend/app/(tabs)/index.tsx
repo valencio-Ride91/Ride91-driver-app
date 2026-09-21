@@ -123,14 +123,15 @@ export default function Home() {
     setTimeout(refresh, 800);
   }, [switchState, refresh]);
 
+  // Platform buttons are on/off toggles that only record which platform the
+  // driver is online on (for the backend timeline). Tapping the platform that
+  // is already ON turns it OFF (back to not_online). No gating here — the
+  // walk-around capture is done once at Start duty.
   const pickPlatform = useCallback(
     async (state: string) => {
       if (!onDuty) return;
-      if (currentPlatform === state) return;
-      // The walk-around + selfie capture is done once at Start duty (see
-      // startDuty), so platform selection is no longer gated here — going
-      // online is instant once on duty.
-      await switchState(state, () => {});
+      const next = currentPlatform === state ? "not_online" : state;
+      await switchState(next, () => {});
       setTimeout(refresh, 400);
     },
     [onDuty, currentPlatform, switchState, refresh],
@@ -244,6 +245,23 @@ export default function Home() {
                   >
                     {platformLabels[p]}
                   </Text>
+                  <View
+                    style={[
+                      styles.onOffBadge,
+                      active
+                        ? { backgroundColor: "rgba(255,255,255,0.25)" }
+                        : { backgroundColor: colors.paper, borderWidth: 1, borderColor: colors.line },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.onOffText,
+                        { color: active ? colors.white : colors.muted },
+                      ]}
+                    >
+                      {active ? "ON" : "OFF"}
+                    </Text>
+                  </View>
                 </TouchableOpacity>
               );
             })}
@@ -467,6 +485,13 @@ const styles = StyleSheet.create({
   },
   platformDot: { width: 8, height: 8, borderRadius: 4 },
   platformBtnText: { fontFamily: fonts.uiBold, fontSize: 13 },
+  onOffBadge: {
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  onOffText: { fontFamily: fonts.uiBold, fontSize: 10, letterSpacing: 0.5 },
   notOnlineBtn: {
     borderRadius: radius.md,
     borderWidth: 1,
