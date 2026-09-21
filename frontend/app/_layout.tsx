@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { useAppFonts } from "@/src/hooks/use-app-fonts";
 import { AuthProvider, useAuth } from "@/src/auth";
+import { RootErrorBoundary } from "@/src/components/ErrorBoundary";
 import { SyncProvider } from "@/src/sync";
 import { TrackingProvider } from "@/src/tracking";
 import { DutyProvider } from "@/src/duty";
@@ -68,13 +69,15 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <I18nProvider>
-        <SyncProvider>
-          <AuthProvider>
-            <Router />
-          </AuthProvider>
-        </SyncProvider>
-      </I18nProvider>
+      <RootErrorBoundary>
+        <I18nProvider>
+          <SyncProvider>
+            <AuthProvider>
+              <Router />
+            </AuthProvider>
+          </SyncProvider>
+        </I18nProvider>
+      </RootErrorBoundary>
     </SafeAreaProvider>
   );
 }
