@@ -23,9 +23,6 @@ import { api } from "@/src/api";
 // Ride91 is NOT in the platform list — Ride91 is the employment layer.
 const PLATFORMS = ["uber", "rapido", "ola"] as const;
 
-// States a driver may enter without today's walk-around capture on file.
-const CAPTURE_EXEMPT_STATES = new Set(["not_online", "to_charger", "charging"]);
-
 // The charging control is one button that walks the cycle, so the driver only
 // ever sees the action that is actually valid next.
 const CHARGE_NEXT: Record<string, { next: string; key: "go_to_charger" | "charging_start" | "charging_stop" }> = {
@@ -103,16 +100,23 @@ export default function Home() {
   // keys off — current_platform only ever holds a platform-layer value.
   const currentState = today?.current_state ?? null;
 
-  // Duty toggle: Start duty → routes through inspection first. End duty
-  // simply appends end_duty. Both push a row into duty_states.
+  // Duty toggle: Start duty is the ONE place the daily car checks happen —
+  // first the inspection (dashboard photo + video), then the go-online
+  // walk-around + selfie capture. Once both are on file for the day, going on
+  // duty (and picking a platform later) is friction-free. End duty simply
+  // appends end_duty. Both push a row into duty_states.
   const startDuty = useCallback(async () => {
     if (inspectionOk !== true) {
       router.push("/inspection");
       return;
     }
+    if (captureOk === false) {
+      router.push("/go-online-capture");
+      return;
+    }
     await switchState("start_duty", () => {});
     setTimeout(refresh, 800);
-  }, [inspectionOk, switchState, refresh, router]);
+  }, [inspectionOk, captureOk, switchState, refresh, router]);
 
   const endDuty = useCallback(async () => {
     await switchState("end_duty", () => {});
@@ -123,20 +127,13 @@ export default function Home() {
     async (state: string) => {
       if (!onDuty) return;
       if (currentPlatform === state) return;
-      // Gate: once per business day the driver must complete the guided
-      // walk-around + selfie capture BEFORE going online on any platform.
-      // Skips for "not_online" so drivers can toggle offline without
-      // being forced through capture again, and for the charging states —
-      // taking the car to a charger is not going online to earn, so
-      // blocking it behind a walk-around would strand a flat car.
-      if (!CAPTURE_EXEMPT_STATES.has(state) && captureOk === false) {
-        router.push("/go-online-capture");
-        return;
-      }
+      // The walk-around + selfie capture is done once at Start duty (see
+      // startDuty), so platform selection is no longer gated here — going
+      // online is instant once on duty.
       await switchState(state, () => {});
       setTimeout(refresh, 400);
     },
-    [onDuty, currentPlatform, captureOk, switchState, refresh, router],
+    [onDuty, currentPlatform, switchState, refresh],
   );
 
   return (
