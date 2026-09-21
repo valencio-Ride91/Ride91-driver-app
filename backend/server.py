@@ -4457,7 +4457,7 @@ async def phone_ping(
         "source": "phone",
     })
     if vehicle_id and lat is not None and lng is not None:
-        await db.vehicle_pings.insert_one({
+        vp: Dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "vehicle_id": vehicle_id,
             "driver_id": driver["id"],
@@ -4465,11 +4465,15 @@ async def phone_ping(
             "received_at": now,
             "lat": lat,
             "lng": lng,
-            "accuracy_m": body.get("accuracy_m"),
-            "speed_kmph": body.get("speed_kmph"),
-            "soc_pct": None,
             "source": "phone",
-        })
+        }
+        # Only store accuracy/speed when the phone actually reported them —
+        # never as None, which the distance filter can't compare against.
+        if body.get("accuracy_m") is not None:
+            vp["accuracy_m"] = body.get("accuracy_m")
+        if body.get("speed_kmph") is not None:
+            vp["speed_kmph"] = body.get("speed_kmph")
+        await db.vehicle_pings.insert_one(vp)
     return {"ok": True}
 
 
@@ -4553,11 +4557,15 @@ async def _compute_distance(
         if ts < start or ts >= end:
             continue
         stats["points_total"] += 1
-        if p.get("accuracy_m", 0) > 30:
+        # `or 0` — a stored value may be present but None (e.g. a phone-bridged
+        # ping with no accuracy/speed); None > 30 would raise.
+        if (p.get("accuracy_m") or 0) > 30:
             stats["points_rejected_accuracy"] += 1
             continue
-        if p.get("speed_kmph", 0) > 120:
+        if (p.get("speed_kmph") or 0) > 120:
             stats["points_rejected_speed"] += 1
+            continue
+        if p.get("lat") is None or p.get("lng") is None:
             continue
         stats["points_kept"] += 1
         if anchor is not None and anchor_ts is not None:
