@@ -3062,6 +3062,90 @@ async def admin_mark_notification_read(
     return {"ok": True}
 
 
+# ---- Earnings & rewards leaderboard (admin) --------------------------------
+@api.get("/admin/rewards")
+async def admin_rewards(admin: Dict = Depends(get_admin)):
+    """Fleet earnings + weekly reward progress. One row per active driver:
+    yesterday's gross, this week's gross and 30% driver earnings, days operated,
+    and which reward thresholds each qualifies for — so ops can pick the top
+    car / top driver of the week."""
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
+    mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
+    rate = get_setting("driver_share", DRIVER_SHARE)
+
+    # Week gross + operated days per driver, in one aggregation.
+    week: Dict[str, Dict[str, Any]] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"business_date": {"$gte": mon_bd, "$lt": next_mon_bd}}},
+        {"$group": {
+            "_id": {"d": "$driver_id", "bd": "$business_date"},
+            "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}},
+        }},
+    ]):
+        did = r["_id"]["d"]
+        w = week.setdefault(did, {"gross": 0.0, "days": 0})
+        w["gross"] += float(r.get("g") or 0)
+        if (r.get("g") or 0) > 0:
+            w["days"] += 1
+    # Yesterday gross per driver.
+    yday: Dict[str, float] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"business_date": y_bd}},
+        {"$group": {"_id": "$driver_id", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        yday[r["_id"]] = float(r.get("g") or 0)
+
+    drivers = [d async for d in db.drivers.find(
+        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "hub_name": 1})]
+    rows: List[Dict[str, Any]] = []
+    for d in drivers:
+        w = week.get(d["id"], {"gross": 0.0, "days": 0})
+        week_gross = round(w["gross"], 2)
+        driver_earnings = round(week_gross * rate, 2)
+        y_gross = round(yday.get(d["id"], 0.0), 2)
+        rows.append({
+            "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+            "hub_name": d.get("hub_name"),
+            "yesterday_gross": y_gross,
+            "week_gross": week_gross,
+            "driver_earnings": driver_earnings,
+            "days_operated": w["days"],
+            "q_daily": y_gross >= REWARD_DAILY_TARGET,
+            "q_car_week": week_gross >= REWARD_WEEK_CAR_TARGET and w["days"] >= REWARD_DAYS_REQUIRED,
+            "q_driver_week": driver_earnings >= REWARD_WEEK_DRIVER_TARGET,
+        })
+    rows.sort(key=lambda r: r["week_gross"], reverse=True)
+    # Current leaders (highest, among those meeting the qualifying minimums).
+    car_leaders = [r for r in rows if r["q_car_week"]]
+    drv_sorted = sorted(rows, key=lambda r: r["driver_earnings"], reverse=True)
+    drv_leaders = [r for r in drv_sorted if r["q_driver_week"]]
+    return {
+        "items": rows,
+        "count": len(rows),
+        "week_start": mon_bd,
+        "days_remaining": days_remaining,
+        "share_rate": rate,
+        "totals": {
+            "yesterday_gross": round(sum(r["yesterday_gross"] for r in rows), 2),
+            "week_gross": round(sum(r["week_gross"] for r in rows), 2),
+        },
+        "thresholds": {
+            "daily_target": REWARD_DAILY_TARGET, "top_car_day": REWARD_TOP_CAR_DAY,
+            "week_car_target": REWARD_WEEK_CAR_TARGET, "top_car_week": REWARD_TOP_CAR_WEEK,
+            "week_driver_target": REWARD_WEEK_DRIVER_TARGET, "top_driver_week": REWARD_TOP_DRIVER_WEEK,
+            "days_required": REWARD_DAYS_REQUIRED,
+        },
+        "leaders": {
+            "top_car_week": car_leaders[0]["driver_id"] if car_leaders else None,
+            "top_driver_week": drv_leaders[0]["driver_id"] if drv_leaders else None,
+            "top_car_day": max(rows, key=lambda r: r["yesterday_gross"])["driver_id"]
+                if rows and max(r["yesterday_gross"] for r in rows) >= REWARD_DAILY_TARGET else None,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # BOOKINGS (admin) — map-free scheduled rides
 # ---------------------------------------------------------------------------

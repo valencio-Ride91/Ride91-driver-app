@@ -9,6 +9,7 @@ const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean }[] =
   { to: "/drivers", label: "Drivers" },
   { to: "/vehicles", label: "Vehicles" },
   { to: "/cash", label: "Cash" },
+  { to: "/rewards", label: "Earnings & rewards" },
   { to: "/requests", label: "Requests" },
   { to: "/live-map", label: "Live map" },
   { to: "/review/captures", label: "Capture reviews" },

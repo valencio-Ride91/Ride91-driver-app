@@ -313,6 +313,36 @@ export interface InspectionRow {
   has_photo: boolean;
 }
 
+export interface RewardsRow {
+  driver_id: string;
+  name: string | null;
+  phone: string | null;
+  hub_name: string | null;
+  yesterday_gross: number;
+  week_gross: number;
+  driver_earnings: number;
+  days_operated: number;
+  q_daily: boolean;
+  q_car_week: boolean;
+  q_driver_week: boolean;
+}
+
+export interface RewardsResponse {
+  items: RewardsRow[];
+  count: number;
+  week_start: string;
+  days_remaining: number;
+  share_rate: number;
+  totals: { yesterday_gross: number; week_gross: number };
+  thresholds: {
+    daily_target: number; top_car_day: number;
+    week_car_target: number; top_car_week: number;
+    week_driver_target: number; top_driver_week: number;
+    days_required: number;
+  };
+  leaders: { top_car_week: string | null; top_driver_week: string | null; top_car_day: string | null };
+}
+
 export interface AdminUserRow {
   id: string;
   username: string;

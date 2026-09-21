@@ -18,6 +18,7 @@ import Inspections from "./pages/Inspections";
 import ShiftAlarms from "./pages/ShiftAlarms";
 import DriverDetail from "./pages/DriverDetail";
 import Vehicles from "./pages/Vehicles";
+import Rewards from "./pages/Rewards";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
 import Audit from "./pages/Audit";
@@ -53,6 +54,7 @@ export default function App() {
             <Route path="/drivers/:id" element={<DriverDetail />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/cash" element={<Cash />} />
+            <Route path="/rewards" element={<Rewards />} />
             <Route path="/requests" element={<Requests />} />
             <Route path="/live-map" element={<LiveMap />} />
             <Route path="/review/captures" element={<Captures />} />
