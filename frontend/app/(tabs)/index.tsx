@@ -137,6 +137,26 @@ export default function Home() {
     [onDuty, currentPlatform, switchState, refresh],
   );
 
+  // Charging cycle: Going to charger → Charging started → Charging finished.
+  // Each press pings the driver's exact location + time to the backend (so ops
+  // can see where/when the car went to charge) and records the duty state.
+  const chargeAction = useCallback(
+    async (next: string) => {
+      if (!onDuty) return;
+      api
+        .post("/tracking/ping", {
+          lat: lat ?? undefined,
+          lng: lng ?? undefined,
+          recorded_at: new Date().toISOString(),
+          event: `charge:${next}`,
+        })
+        .catch(() => {});
+      await switchState(next, () => {});
+      setTimeout(refresh, 400);
+    },
+    [onDuty, lat, lng, switchState, refresh],
+  );
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <AppHeader title="Ride91" />
@@ -304,7 +324,7 @@ export default function Home() {
               <TouchableOpacity
                 testID={`charge-btn-${step.next}`}
                 disabled={!onDuty}
-                onPress={() => pickPlatform(step.next)}
+                onPress={() => chargeAction(step.next)}
                 style={[
                   styles.chargeBtn,
                   heading

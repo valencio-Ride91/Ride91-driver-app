@@ -4314,6 +4314,9 @@ async def phone_ping(
     recorded_at = body.get("recorded_at") or now
     lat, lng = body.get("lat"), body.get("lng")
     vehicle_id = driver.get("vehicle_id")
+    # Optional context tag, e.g. "charge:to_charger" — lets ops see WHERE and
+    # WHEN a charging action was taken, not just a bare location point.
+    event = body.get("event")
     await db.phone_pings.insert_one({
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
@@ -4322,6 +4325,7 @@ async def phone_ping(
         "received_at": now,
         "lat": lat,
         "lng": lng,
+        "event": event,
         "source": "phone",
     })
     if vehicle_id and lat is not None and lng is not None:
