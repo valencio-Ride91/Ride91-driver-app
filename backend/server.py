@@ -3449,6 +3449,81 @@ async def money_yesterday(driver: Dict = Depends(get_driver)):
 
 
 # ---------------------------------------------------------------------------
+# DRIVER WEEKLY REWARD SYSTEM — motivation. Rewards are ON TOP of the 30%
+# share. Thresholds are on gross earnings (the fleet statement number).
+# ---------------------------------------------------------------------------
+REWARD_DAILY_TARGET = 4000            # min daily gross to qualify (top car of day)
+REWARD_TOP_CAR_DAY = 300
+REWARD_WEEK_CAR_TARGET = 28000        # min weekly gross (top car of week)
+REWARD_TOP_CAR_WEEK = 1000
+REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver of week)
+REWARD_TOP_DRIVER_WEEK = 1000
+REWARD_DAYS_REQUIRED = 7
+
+
+@api.get("/money/rewards")
+async def money_rewards(driver: Dict = Depends(get_driver)):
+    """Progress toward the weekly reward system. Rewards are additional to the
+    driver's 30% share; this only reports how close the driver is to each
+    qualifying threshold — the actual top-car / top-driver winner is decided by
+    ops across the hub."""
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
+    mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
+    rate = get_setting("driver_share", DRIVER_SHARE)
+
+    def _gross(r):
+        return float(r.get("gross_amount", r.get("cash_amount", 0)) or 0)
+
+    y_rows = await _fetch_platform_cash(driver["id"], y_bd, today_bd)
+    y_gross = round(sum(_gross(r) for r in y_rows), 2)
+
+    wk_rows = await _fetch_platform_cash(driver["id"], mon_bd, next_mon_bd)
+    by_day: Dict[str, float] = {}
+    for r in wk_rows:
+        by_day[r["business_date"]] = by_day.get(r["business_date"], 0.0) + _gross(r)
+    week_gross = round(sum(by_day.values()), 2)
+    days_operated = sum(1 for v in by_day.values() if v > 0)
+    driver_earnings_week = round(week_gross * rate, 2)
+
+    def pct(x: float, target: float) -> float:
+        return round(min(1.0, x / target), 4) if target else 0.0
+
+    return {
+        "week_start": mon_bd,
+        "days_operated": days_operated,
+        "days_required": REWARD_DAYS_REQUIRED,
+        "share_rate": rate,
+        "daily": {
+            "label": "Top car of the day",
+            "target": REWARD_DAILY_TARGET,
+            "value": y_gross,
+            "qualified": y_gross >= REWARD_DAILY_TARGET,
+            "progress": pct(y_gross, REWARD_DAILY_TARGET),
+            "reward": REWARD_TOP_CAR_DAY,
+        },
+        "top_car_week": {
+            "label": "Top car of the week",
+            "target": REWARD_WEEK_CAR_TARGET,
+            "value": week_gross,
+            "all_days": days_operated >= REWARD_DAYS_REQUIRED,
+            "qualified": week_gross >= REWARD_WEEK_CAR_TARGET and days_operated >= REWARD_DAYS_REQUIRED,
+            "progress": pct(week_gross, REWARD_WEEK_CAR_TARGET),
+            "reward": REWARD_TOP_CAR_WEEK,
+        },
+        "top_driver_week": {
+            "label": "Top driver of the week",
+            "target": REWARD_WEEK_DRIVER_TARGET,
+            "value": driver_earnings_week,
+            "qualified": driver_earnings_week >= REWARD_WEEK_DRIVER_TARGET,
+            "progress": pct(driver_earnings_week, REWARD_WEEK_DRIVER_TARGET),
+            "reward": REWARD_TOP_DRIVER_WEEK,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # RAZORPAY STANDARD CHECKOUT — driver pays cash-in-hand dues via UPI/card.
 # ---------------------------------------------------------------------------
 # The client never sees the secret. Server creates the order, hosts a small
