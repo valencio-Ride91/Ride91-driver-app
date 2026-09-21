@@ -23,6 +23,8 @@ export default function DriverDetail() {
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+  const [sending, setSending] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -36,6 +38,20 @@ export default function DriverDetail() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  const sendNotification = async () => {
+    if (!msg.trim()) return;
+    setSending(true);
+    try {
+      await api.post(`/admin/drivers/${id}/notifications`, { body: msg.trim() });
+      setMsg("");
+      await load();
+    } catch {
+      setErr("Could not send the message.");
+    } finally {
+      setSending(false);
+    }
+  };
 
   const hardDelete = async () => {
     if (!window.confirm("Permanently delete this driver? This cannot be undone, and is only allowed when there is no financial history.")) return;
@@ -93,6 +109,46 @@ export default function DriverDetail() {
           <div className="empty">No vehicle assigned.</div>
         )}
         {driver.qr_code ? <div className="muted-sm" style={{ marginTop: 8 }}>Deposit QR: {driver.qr_code}</div> : null}
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <h2 style={{ marginTop: 0 }}>
+          Notifications <span className="muted-sm">({data.notifications.length})</span>
+        </h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+          {data.notifications.length === 0 ? (
+            <div className="empty" style={{ padding: 16 }}>No messages yet.</div>
+          ) : [...data.notifications].reverse().map((n) => {
+            const fromDriver = n.direction === "from_driver";
+            return (
+              <div key={n.id} style={{ display: "flex", justifyContent: fromDriver ? "flex-start" : "flex-end" }}>
+                <div style={{
+                  maxWidth: "75%", padding: "8px 12px", borderRadius: 12,
+                  background: fromDriver ? "var(--line)" : "var(--live, #16a34a)",
+                  color: fromDriver ? "var(--ink)" : "#fff",
+                }}>
+                  <div style={{ fontSize: 14, whiteSpace: "pre-wrap" }}>{n.body}</div>
+                  <div style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>
+                    {fromDriver ? (n.driver_name ?? "driver") : `you · ${n.created_by ?? "ops"}`} · {fmtWhen(n.created_at)}
+                    {fromDriver && !n.read ? " · new" : ""}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            placeholder="Message this driver…"
+            value={msg}
+            onChange={(e) => setMsg(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") sendNotification(); }}
+            style={{ flex: 1 }}
+          />
+          <button className="primary" onClick={sendNotification} disabled={sending || !msg.trim()}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
       </div>
 
       <Section title="Documents" rows={data.documents} cols={[

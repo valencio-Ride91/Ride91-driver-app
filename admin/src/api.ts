@@ -165,6 +165,19 @@ export interface DriverDetail {
   requests: Array<Record<string, any>>;
   payouts: Array<Record<string, any>>;
   deposits: Array<Record<string, any>>;
+  notifications: NotificationRow[];
+}
+
+export interface NotificationRow {
+  id: string;
+  driver_id: string;
+  direction: "from_driver" | "to_driver";
+  body: string;
+  created_at: string;
+  created_by: string | null;
+  read: boolean;
+  driver_name?: string | null;
+  driver_phone?: string | null;
 }
 
 export interface VehicleLiveRow {

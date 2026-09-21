@@ -1,12 +1,15 @@
 // Sticky header used on every tab. Shows language selector, unsynced pill,
 // and health pill. Language selector is here, not buried in settings.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { useRouter } from "expo-router";
 
 import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useI18n, Lang } from "@/src/i18n";
 import { useSync } from "@/src/sync";
 import { useTracking } from "@/src/tracking";
+import { useAuth } from "@/src/auth";
+import { api } from "@/src/api";
 import { BottomSheet } from "@/src/components/ui";
 
 const LANG_LABEL: Record<Lang, string> = { en: "EN", hi: "हिं", kn: "ಕನ್" };
@@ -37,8 +40,30 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
   const { lang, setLang, t } = useI18n();
   const { unsynced, online } = useSync();
   const { permissionOk, requestPermission } = useTracking();
+  const { driver } = useAuth();
+  const router = useRouter();
   const [langOpen, setLangOpen] = useState(false);
+  const [unread, setUnread] = useState(0);
   const status = singleStatus(online, permissionOk, unsynced, t);
+
+  useEffect(() => {
+    if (!driver) return;
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.get<{ unread: number }>("/notifications");
+        if (alive) setUnread(r.unread ?? 0);
+      } catch {
+        // keep previous
+      }
+    };
+    load();
+    const id = setInterval(load, 20000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [driver]);
 
   return (
     <View style={styles.wrap}>
@@ -47,6 +72,18 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
           {title}
         </Text>
         <View style={styles.rightRow}>
+          <TouchableOpacity
+            style={styles.bellBtn}
+            onPress={() => router.push("/notifications" as never)}
+            testID="notif-bell"
+          >
+            <Text style={styles.bellIcon}>🔔</Text>
+            {unread > 0 ? (
+              <View style={styles.bellBadge} testID="notif-badge">
+                <Text style={styles.bellBadgeText}>{unread > 9 ? "9+" : unread}</Text>
+              </View>
+            ) : null}
+          </TouchableOpacity>
           <TouchableOpacity
             style={[styles.healthPill, { backgroundColor: status.bg }]}
             onPress={() => {
@@ -104,6 +141,21 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   title: { fontFamily: fonts.display, fontSize: 24, color: colors.ink },
   rightRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  bellBtn: { padding: 4 },
+  bellIcon: { fontSize: 20 },
+  bellBadge: {
+    position: "absolute",
+    top: -2,
+    right: -2,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.alert,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 3,
+  },
+  bellBadgeText: { fontFamily: fonts.uiBold, fontSize: 9, color: colors.white },
   healthPill: {
     paddingHorizontal: spacing.md,
     paddingVertical: 6,

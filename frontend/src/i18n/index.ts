@@ -97,6 +97,12 @@ const dict = {
     charging_now: "Charging",
     shift_progress: "Shift progress",
     working_hours: "Working hours",
+    notif_title: "Notifications",
+    notif_empty: "No messages yet. Send one to the office below.",
+    notif_placeholder: "Message the office…",
+    notif_send: "Send",
+    notif_from_ops: "Office",
+    notif_from_you: "You",
   },
   hi: {
     login_title: "साइन इन",
@@ -185,6 +191,12 @@ const dict = {
     charging_now: "चार्जिंग",
     shift_progress: "शिफ़्ट प्रगति",
     working_hours: "कार्य घंटे",
+    notif_title: "सूचनाएँ",
+    notif_empty: "अभी कोई संदेश नहीं। नीचे ऑफ़िस को भेजें।",
+    notif_placeholder: "ऑफ़िस को संदेश…",
+    notif_send: "भेजें",
+    notif_from_ops: "ऑफ़िस",
+    notif_from_you: "आप",
   },
   kn: {
     login_title: "ಸೈನ್ ಇನ್",
@@ -273,6 +285,12 @@ const dict = {
     charging_now: "ಚಾರ್ಜಿಂಗ್",
     shift_progress: "ಶಿಫ್ಟ್ ಪ್ರಗತಿ",
     working_hours: "ಕೆಲಸದ ಗಂಟೆ",
+    notif_title: "ಅಧಿಸೂಚನೆಗಳು",
+    notif_empty: "ಇನ್ನೂ ಸಂದೇಶಗಳಿಲ್ಲ. ಕೆಳಗೆ ಕಚೇರಿಗೆ ಕಳುಹಿಸಿ.",
+    notif_placeholder: "ಕಚೇರಿಗೆ ಸಂದೇಶ…",
+    notif_send: "ಕಳುಹಿಸಿ",
+    notif_from_ops: "ಕಚೇರಿ",
+    notif_from_you: "ನೀವು",
   },
 };
 
