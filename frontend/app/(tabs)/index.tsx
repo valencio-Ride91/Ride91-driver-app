@@ -70,18 +70,13 @@ export default function Home() {
 
   // Inspection status. Auto-redirect on first-of-day if not complete.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
-  const [captureOk, setCaptureOk] = useState<boolean | null>(null);
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
-        const [insp, cap] = await Promise.all([
-          api.get<{ completed: boolean }>("/inspection/today"),
-          api.get<{ completed: boolean }>("/go-online-capture/today"),
-        ]);
+        const insp = await api.get<{ completed: boolean }>("/inspection/today");
         if (!alive) return;
         setInspectionOk(insp.completed);
-        setCaptureOk(cap.completed);
       } catch {
         // keep prev
       }
@@ -100,23 +95,18 @@ export default function Home() {
   // keys off — current_platform only ever holds a platform-layer value.
   const currentState = today?.current_state ?? null;
 
-  // Duty toggle: Start duty is the ONE place the daily car checks happen —
-  // first the inspection (dashboard photo + video), then the go-online
-  // walk-around + selfie capture. Once both are on file for the day, going on
-  // duty (and picking a platform later) is friction-free. End duty simply
-  // appends end_duty. Both push a row into duty_states.
+  // Duty toggle: Start duty routes through the daily inspection first (the one
+  // and only car check). Once today's inspection is on file, going on duty and
+  // picking a platform are friction-free — no separate walk-around capture.
+  // End duty simply appends end_duty. Both push a row into duty_states.
   const startDuty = useCallback(async () => {
     if (inspectionOk !== true) {
       router.push("/inspection");
       return;
     }
-    if (captureOk === false) {
-      router.push("/go-online-capture");
-      return;
-    }
     await switchState("start_duty", () => {});
     setTimeout(refresh, 800);
-  }, [inspectionOk, captureOk, switchState, refresh, router]);
+  }, [inspectionOk, switchState, refresh, router]);
 
   const endDuty = useCallback(async () => {
     await switchState("end_duty", () => {});
