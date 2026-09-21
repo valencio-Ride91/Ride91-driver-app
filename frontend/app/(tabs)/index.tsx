@@ -299,38 +299,48 @@ export default function Home() {
             </Text>
           </TouchableOpacity>
 
-          {/* Charging. One button, three steps: to charger -> started ->
-              stopped. Stopping returns the driver to "not online" rather
-              than guessing which app they went back to. */}
+          {/* Charging. Three timed steps: Go to charger → Start charging →
+              Stop charging. The gap between "go" and "start" is the time to
+              REACH the charger; between "start" and "stop" is charge time.
+              Each press pings location + time (see chargeAction). A status
+              line shows the current phase and how long it's been running. */}
           {(() => {
             const step = CHARGE_NEXT[currentState ?? ""] ?? {
               next: "to_charger",
               key: "go_to_charger" as const,
             };
             const charging = currentState === "charging";
-            const heading = currentState === "to_charger" || charging;
+            const toCharger = currentState === "to_charger";
+            const active = charging || toCharger;
+            const lastSeg = today?.segments?.[(today?.segments?.length ?? 0) - 1];
+            const phaseMins = active && lastSeg?.from_ts
+              ? Math.max(0, Math.round((Date.now() - new Date(lastSeg.from_ts).getTime()) / 60000))
+              : 0;
+            const tint = platformColors[currentState ?? "charging"];
             return (
-              <TouchableOpacity
-                testID={`charge-btn-${step.next}`}
-                disabled={!onDuty}
-                onPress={() => chargeAction(step.next)}
-                style={[
-                  styles.chargeBtn,
-                  heading
-                    ? {
-                        backgroundColor: platformColors[currentState ?? "charging"],
-                        borderColor: platformColors[currentState ?? "charging"],
-                      }
-                    : null,
-                  !onDuty ? { opacity: 0.4 } : null,
-                ]}
-              >
-                <Text
-                  style={[styles.chargeBtnText, heading ? { color: colors.white } : null]}
+              <View>
+                {active ? (
+                  <View style={[styles.chargeStatus, { borderColor: tint }]} testID="charge-status">
+                    <Text style={[styles.chargeStatusText, { color: tint }]}>
+                      {toCharger ? `🔌 ${t.charging_heading}` : `⚡ ${t.charging_now}`} · {phaseMins}m
+                    </Text>
+                  </View>
+                ) : null}
+                <TouchableOpacity
+                  testID={`charge-btn-${step.next}`}
+                  disabled={!onDuty}
+                  onPress={() => chargeAction(step.next)}
+                  style={[
+                    styles.chargeBtn,
+                    active ? { backgroundColor: tint, borderColor: tint } : null,
+                    !onDuty ? { opacity: 0.4 } : null,
+                  ]}
                 >
-                  {t[step.key]}
-                </Text>
-              </TouchableOpacity>
+                  <Text style={[styles.chargeBtnText, active ? { color: colors.white } : null]}>
+                    {t[step.key]}
+                  </Text>
+                </TouchableOpacity>
+              </View>
             );
           })()}
         </View>
@@ -509,6 +519,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   notOnlineText: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink },
+  chargeStatus: {
+    marginTop: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    paddingVertical: 6,
+    paddingHorizontal: spacing.md,
+    alignItems: "center",
+  },
+  chargeStatusText: { fontFamily: fonts.uiBold, fontSize: 12 },
   chargeBtn: {
     marginTop: spacing.sm,
     borderRadius: radius.md,
