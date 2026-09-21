@@ -32,7 +32,7 @@ const CHARGE_NEXT: Record<string, { next: string; key: "go_to_charger" | "chargi
 
 export default function Home() {
   const { t } = useI18n();
-  const { today, switchState, refresh } = useDuty();
+  const { today, switchState, setPlatforms, refresh } = useDuty();
   const { lat, lng } = useTracking();
   const { vehicle } = useAuth();
   const router = useRouter();
@@ -90,9 +90,9 @@ export default function Home() {
   }, []);
 
   const onDuty = !!today?.on_duty;
-  const currentPlatform = today?.current_platform ?? null;
-  // current_state is the raw latest row, which is what the charging cycle
-  // keys off — current_platform only ever holds a platform-layer value.
+  // The driver can be online on several platforms at once.
+  const activePlatforms = today?.current_platforms ?? [];
+  // current_state is the raw latest row, which is what the charging cycle keys off.
   const currentState = today?.current_state ?? null;
 
   // Duty toggle: Start duty routes through the daily inspection first (the one
@@ -113,18 +113,19 @@ export default function Home() {
     setTimeout(refresh, 800);
   }, [switchState, refresh]);
 
-  // Platform buttons are on/off toggles that only record which platform the
-  // driver is online on (for the backend timeline). Tapping the platform that
-  // is already ON turns it OFF (back to not_online). No gating here — the
-  // walk-around capture is done once at Start duty.
-  const pickPlatform = useCallback(
-    async (state: string) => {
+  // Platform buttons are independent on/off toggles — a driver can be online
+  // on Uber, Rapido and Ola at the same time. Each tap flips one platform and
+  // sends the full active set to the backend timeline.
+  const togglePlatform = useCallback(
+    async (p: string) => {
       if (!onDuty) return;
-      const next = currentPlatform === state ? "not_online" : state;
-      await switchState(next, () => {});
+      const set = new Set(activePlatforms);
+      if (set.has(p)) set.delete(p);
+      else set.add(p);
+      await setPlatforms([...set]);
       setTimeout(refresh, 400);
     },
-    [onDuty, currentPlatform, switchState, refresh],
+    [onDuty, activePlatforms, setPlatforms, refresh],
   );
 
   // Charging cycle: Going to charger → Charging started → Charging finished.
@@ -219,13 +220,13 @@ export default function Home() {
           </Text>
           <View style={styles.platformRow}>
             {PLATFORMS.map((p) => {
-              const active = currentPlatform === p;
+              const active = activePlatforms.includes(p);
               return (
                 <TouchableOpacity
                   key={p}
                   testID={`platform-btn-${p}`}
                   disabled={!onDuty}
-                  onPress={() => pickPlatform(p)}
+                  onPress={() => togglePlatform(p)}
                   style={[
                     styles.platformBtn,
                     {
@@ -279,10 +280,10 @@ export default function Home() {
           <TouchableOpacity
             testID="platform-btn-not_online"
             disabled={!onDuty}
-            onPress={() => pickPlatform("not_online")}
+            onPress={() => { if (onDuty) setPlatforms([]); }}
             style={[
               styles.notOnlineBtn,
-              currentPlatform === "not_online"
+              activePlatforms.length === 0
                 ? { backgroundColor: colors.ink, borderColor: colors.ink }
                 : null,
               !onDuty ? { opacity: 0.4 } : null,
@@ -291,9 +292,7 @@ export default function Home() {
             <Text
               style={[
                 styles.notOnlineText,
-                currentPlatform === "not_online"
-                  ? { color: colors.white }
-                  : null,
+                activePlatforms.length === 0 ? { color: colors.white } : null,
               ]}
             >
               Not online on any app

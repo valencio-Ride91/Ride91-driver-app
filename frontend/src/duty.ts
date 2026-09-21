@@ -32,6 +32,7 @@ export interface DutyToday {
   charging_seconds: number;
   current_state: string | null;
   current_platform: string | null;
+  current_platforms: string[];
   distance_km: number;
   business_date: string;
   day_start: string;
@@ -50,6 +51,8 @@ interface DutyCtx {
       to_ts: string;
     }) => void,
   ) => Promise<void>;
+  // Set the full set of platforms the driver is online on (multiple allowed).
+  setPlatforms: (platforms: string[]) => Promise<void>;
 }
 
 const Ctx = createContext<DutyCtx | null>(null);
@@ -136,9 +139,37 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
     [enqueue, lat, lng, today, refresh],
   );
 
+  const setPlatforms: DutyCtx["setPlatforms"] = useCallback(
+    async (platforms) => {
+      const startedAt = new Date().toISOString();
+      const uniq = Array.from(new Set(platforms)).sort();
+      const state = uniq.length ? "online" : "not_online";
+      // Optimistic local update so the toggles flip instantly.
+      setToday((prev) => {
+        if (!prev) return prev;
+        const segs = [...prev.segments];
+        if (segs.length) {
+          segs[segs.length - 1] = { ...segs[segs.length - 1], to_ts: startedAt };
+        }
+        segs.push({ state, from_ts: startedAt, to_ts: startedAt, seconds: 0 });
+        return { ...prev, segments: segs, current_state: state, current_platforms: uniq };
+      });
+      await enqueue("/duty/state", {
+        state,
+        platforms: uniq,
+        started_at: startedAt,
+        lat: lat ?? 0,
+        lng: lng ?? 0,
+        source: "driver",
+      });
+      setTimeout(refresh, 1200);
+    },
+    [enqueue, lat, lng, refresh],
+  );
+
   const value = useMemo<DutyCtx>(
-    () => ({ today, loading, refresh, switchState }),
-    [today, loading, refresh, switchState],
+    () => ({ today, loading, refresh, switchState, setPlatforms }),
+    [today, loading, refresh, switchState, setPlatforms],
   );
   return React.createElement(Ctx.Provider, { value }, children);
 };

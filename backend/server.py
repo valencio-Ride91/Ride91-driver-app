@@ -70,7 +70,7 @@ PLATFORMS = {"uber", "rapido", "ola"}
 # neither counts as working time, since no platform is live.
 NON_PLATFORM_STATES = {"offline", "shift_end", "to_charger", "charging"}
 DUTY_LAYER = {"start_duty", "end_duty"}
-PLATFORM_LAYER = {"uber", "rapido", "ola", "not_online"}
+PLATFORM_LAYER = {"uber", "rapido", "ola", "not_online", "online"}
 ALL_STATES = PLATFORMS | NON_PLATFORM_STATES | DUTY_LAYER | PLATFORM_LAYER
 CASH_LIMIT = 1500  # ₹ — default; overridable via the settings doc
 DRIVER_SHARE = 0.30  # default; overridable via the settings doc
@@ -204,17 +204,21 @@ class DriverOut(BaseModel):
 
 
 class DutyStateIn(BaseModel):
-    # Two separate rows land here:
+    # Rows that land here:
     #   Duty layer:     start_duty / end_duty
-    #   Platform layer: uber / rapido / ola / not_online
+    #   Platform layer: "online" (with `platforms`) or "not_online"; the legacy
+    #                   single values uber / rapido / ola are still accepted.
     #   Charging:       to_charger / charging
     #   Support:        offline / shift_end  (kept for backwards-compat)
     state: Literal[
         "start_duty", "end_duty",
-        "uber", "rapido", "ola", "not_online",
+        "online", "uber", "rapido", "ola", "not_online",
         "to_charger", "charging",
         "offline", "shift_end",
     ]
+    # The set of platforms the driver is online on right now (multiple allowed).
+    # Sent with state="online"; empty/None means not online on any app.
+    platforms: Optional[List[str]] = None
     started_at: str
     lat: float
     lng: float
@@ -964,11 +968,18 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
         )
         if not insp:
             raise HTTPException(status.HTTP_409_CONFLICT, "inspection_required")
+    # Normalise the active-platform set. Accept the legacy single-platform
+    # states (uber/rapido/ola) by folding them into `platforms` too.
+    platforms = [p for p in (body.platforms or []) if p in PLATFORMS]
+    if body.state in PLATFORMS:
+        platforms = [body.state]
+    platforms = sorted(set(platforms))
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
         "vehicle_id": driver["vehicle_id"],
         "state": body.state,
+        "platforms": platforms,
         "started_at": body.started_at,
         "business_date": business_date_from_dt(_parse_iso(body.started_at) if body.started_at else now_utc()),
         "lat": body.lat,
@@ -1017,9 +1028,15 @@ async def _segments_for_day(driver_id: str, day_start: datetime, day_end: dateti
         e = min(seg_end, day_end)
         if e <= s:
             continue
+        # Derive the active-platform set for the segment. New rows carry
+        # `platforms`; legacy rows encode a single platform in `state`.
+        plats = row.get("platforms")
+        if plats is None:
+            plats = [row["state"]] if row["state"] in PLATFORMS else []
         segments.append(
             {
                 "state": row["state"],
+                "platforms": plats,
                 "from_ts": iso(s),
                 "to_ts": iso(e),
                 "seconds": int((e - s).total_seconds()),
@@ -1037,11 +1054,15 @@ async def duty_today(driver: Dict = Depends(get_driver)):
     totals: Dict[str, int] = {}
     for s in segs:
         totals[s["state"]] = totals.get(s["state"], 0) + s["seconds"]
-    working_seconds = sum(totals.get(p, 0) for p in PLATFORMS)
-    # On-duty time = anything after start_duty and before end_duty. Simpler:
-    # the sum of platform + not_online + charging segments once start_duty
-    # has been seen for the day. Driving to a charger is paid on-duty time
-    # too, so to_charger counts here but never towards working_seconds.
+    # Working time = any segment with at least one platform online (multiple
+    # platforms at once still counts as one stretch of working time, not N×).
+    working_seconds = sum(s["seconds"] for s in segs if s.get("platforms"))
+    # Also tally time per platform (a driver on two apps accrues time on both).
+    per_platform_seconds: Dict[str, int] = {}
+    for s in segs:
+        for p in s.get("platforms") or []:
+            per_platform_seconds[p] = per_platform_seconds.get(p, 0) + s["seconds"]
+    # On-duty time = working + not_online + charging segments after start_duty.
     on_duty_seconds = (
         working_seconds
         + totals.get("not_online", 0)
@@ -1061,22 +1082,26 @@ async def duty_today(driver: Dict = Depends(get_driver)):
         if s["state"] == "start_duty":
             on_duty = True
             break
-    # Current platform (of the four) is the most recent platform row if it
-    # came after the last start_duty.
-    current_platform = None
+    # Current active-platform SET is the most recent platform-layer row after
+    # the last start_duty. `current_platform` (singular) is kept for older
+    # clients as the first of the set.
+    current_platforms: List[str] = []
     if on_duty:
         for s in reversed(segs):
             if s["state"] == "start_duty":
                 break
-            if s["state"] in PLATFORMS or s["state"] == "not_online":
-                current_platform = s["state"]
+            if s["state"] in ("online", "not_online") or s["state"] in PLATFORMS:
+                current_platforms = list(s.get("platforms") or [])
                 break
+    current_platform = current_platforms[0] if current_platforms else None
     distance_km = await _distance_today(driver["vehicle_id"], day_start, day_end)
     return {
         "segments": segs,
         "totals_seconds": totals,
         "on_duty": on_duty,
         "current_platform": current_platform,
+        "current_platforms": current_platforms,
+        "per_platform_seconds": per_platform_seconds,
         "on_duty_seconds": on_duty_seconds,
         "working_seconds": working_seconds,
         "charging_seconds": charging_seconds,
