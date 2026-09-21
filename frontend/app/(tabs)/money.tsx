@@ -30,25 +30,6 @@ interface MoneyYesterday {
   cash_over_limit: boolean;
 }
 
-interface RewardTier {
-  label: string;
-  target: number;
-  value: number;
-  qualified: boolean;
-  progress: number;
-  reward: number;
-  all_days?: boolean;
-}
-interface Rewards {
-  week_start: string;
-  days_operated: number;
-  days_required: number;
-  share_rate: number;
-  daily: RewardTier;
-  top_car_week: RewardTier;
-  top_driver_week: RewardTier;
-}
-
 const PLATFORMS = ["uber", "rapido", "ola"] as const;
 
 function fmtDay(iso: string): string {
@@ -62,18 +43,12 @@ function fmtDay(iso: string): string {
 export default function Money() {
   const { t } = useI18n();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
-  const [rewards, setRewards] = useState<Rewards | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [d, r] = await Promise.all([
-        api.get<MoneyYesterday>("/money/yesterday"),
-        api.get<Rewards>("/money/rewards"),
-      ]);
-      setDay(d);
-      setRewards(r);
+      setDay(await api.get<MoneyYesterday>("/money/yesterday"));
     } catch {
       // keep whatever we had
     }
@@ -114,29 +89,6 @@ export default function Money() {
           <Text style={styles.sub}>
             {day ? fmtDay(day.business_date) : "—"} · your {Math.round((day?.share_rate ?? 0.3) * 100)}% of {formatINR(day?.gross ?? 0)} gross
           </Text>
-        </Card>
-
-        {/* CARD 1b — Weekly rewards (motivation; on top of the 30% share) */}
-        <Card testID="rewards-card" style={{ marginTop: spacing.md }}>
-          <View style={styles.heroHead}>
-            <Text style={styles.cardTitle}>Weekly rewards 🏆</Text>
-            <Text style={styles.rewardsHint}>on top of your 30%</Text>
-          </View>
-          <View style={styles.daysRow} testID="reward-days">
-            <Text style={styles.daysLabel}>Days operated this week</Text>
-            <Text style={[styles.daysValue, (rewards?.days_operated ?? 0) >= (rewards?.days_required ?? 7) ? { color: colors.live } : null]}>
-              {rewards?.days_operated ?? 0} / {rewards?.days_required ?? 7}
-            </Text>
-          </View>
-          {rewards ? (
-            <>
-              <RewardRow tier={rewards.daily} testID="reward-daily" note="yesterday's earnings" />
-              <RewardRow tier={rewards.top_car_week} testID="reward-car-week" note={`this week · all ${rewards.days_required} days needed`} />
-              <RewardRow tier={rewards.top_driver_week} testID="reward-driver-week" note="your earnings this week" />
-            </>
-          ) : (
-            <Text style={styles.rewardsHint}>Loading…</Text>
-          )}
         </Card>
 
         {/* CARD 2 — Yesterday's cash (collected vs deposited) */}
@@ -234,44 +186,8 @@ const MoneyLine: React.FC<{
   </View>
 );
 
-const RewardRow: React.FC<{ tier: RewardTier; note: string; testID?: string }> = ({ tier, note, testID }) => {
-  const pctW = `${Math.round((tier.progress ?? 0) * 100)}%` as const;
-  return (
-    <View style={styles.reward} testID={testID}>
-      <View style={styles.rewardHead}>
-        <Text style={styles.rewardLabel}>
-          {tier.qualified ? "✅ " : ""}{tier.label}
-        </Text>
-        <Text style={styles.rewardAmount}>+{formatINR(tier.reward)}</Text>
-      </View>
-      <View style={styles.bar}>
-        <View style={[styles.barFill, { width: pctW, backgroundColor: tier.qualified ? colors.live : colors.amber }]} />
-      </View>
-      <View style={styles.rewardFoot}>
-        <Text style={styles.rewardProgress}>
-          {formatINR(tier.value)} / {formatINR(tier.target)}
-        </Text>
-        <Text style={styles.rewardNote}>{note}</Text>
-      </View>
-    </View>
-  );
-};
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
-  rewardsHint: { fontFamily: fonts.uiMed, fontSize: 11, color: colors.muted },
-  daysRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line, marginBottom: 4 },
-  daysLabel: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
-  daysValue: { fontFamily: fonts.dataMed, fontSize: 15, color: colors.ink },
-  reward: { paddingVertical: spacing.sm },
-  rewardHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  rewardLabel: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.ink, flexShrink: 1 },
-  rewardAmount: { fontFamily: fonts.dataMed, fontSize: 14, color: colors.live },
-  bar: { height: 8, borderRadius: 4, backgroundColor: colors.line, marginTop: 6, overflow: "hidden" },
-  barFill: { height: 8, borderRadius: 4 },
-  rewardFoot: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 4 },
-  rewardProgress: { fontFamily: fonts.data, fontSize: 12, color: colors.ink },
-  rewardNote: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted },
   scroll: { padding: spacing.md, paddingBottom: spacing.xxl * 3 },
   heroHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   cardKicker: { fontFamily: fonts.uiBold, fontSize: 11, color: colors.muted, letterSpacing: 1 },

@@ -11,8 +11,8 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
-import { AppHeader } from "@/src/components/AppHeader";
 import { BottomSheet, Card } from "@/src/components/ui";
 import { api } from "@/src/api";
 import { useI18n, formatINR, formatIST, formatISTDate } from "@/src/i18n";
@@ -38,6 +38,7 @@ const stateColor: Record<RequestRow["state"], string> = {
 
 export default function Requests() {
   const { t } = useI18n();
+  const router = useRouter();
   const { enqueue } = useSync();
   const [items, setItems] = useState<RequestRow[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -114,7 +115,13 @@ export default function Requests() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <AppHeader title={t.requests} />
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} testID="requests-back" style={styles.back}>
+          <Text style={styles.backText}>‹ {t.profile}</Text>
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>{t.requests}</Text>
+        <View style={{ width: 64 }} />
+      </View>
       <ScrollView
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -276,6 +283,18 @@ const FieldBlock: React.FC<{ label: string; children: React.ReactNode }> = ({ la
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  back: { width: 64 },
+  backText: { fontFamily: fonts.uiMed, fontSize: 15, color: colors.muted },
+  headerTitle: { fontFamily: fonts.display, fontSize: 18, color: colors.ink },
   scroll: { padding: spacing.md, paddingBottom: 180 },
   empty: {
     fontFamily: fonts.ui,

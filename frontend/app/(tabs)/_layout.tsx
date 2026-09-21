@@ -45,10 +45,10 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="requests"
+        name="rewards"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon label={t.requests} focused={focused} />,
-          tabBarButtonTestID: "tab-requests",
+          tabBarIcon: ({ focused }) => <TabIcon label={t.rewards} focused={focused} />,
+          tabBarButtonTestID: "tab-rewards",
         }}
       />
       <Tabs.Screen

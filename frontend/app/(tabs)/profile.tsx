@@ -146,6 +146,15 @@ export default function Profile() {
           <Text style={styles.mono}>{driver?.phone}</Text>
         </Card>
 
+        <TouchableOpacity testID="profile-requests-link" onPress={() => router.push("/requests" as never)} style={{ marginTop: spacing.md }}>
+          <Card>
+            <View style={styles.navRow}>
+              <Text style={styles.navRowText}>{t.requests}</Text>
+              <Text style={styles.navRowChevron}>›</Text>
+            </View>
+          </Card>
+        </TouchableOpacity>
+
         <Card testID="profile-vehicle-card" style={{ marginTop: spacing.md }}>
           <Text style={styles.h2}>Vehicle</Text>
           <View style={styles.kv}>
@@ -398,6 +407,9 @@ const styles = StyleSheet.create({
   scroll: { padding: spacing.md, paddingBottom: 120 },
   name: { fontFamily: fonts.display, fontSize: 24, color: colors.ink },
   mono: { fontFamily: fonts.dataMed, fontSize: 14, color: colors.muted, marginTop: 4 },
+  navRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  navRowText: { fontFamily: fonts.uiBold, fontSize: 16, color: colors.ink },
+  navRowChevron: { fontFamily: fonts.uiBold, fontSize: 22, color: colors.muted },
   h2: { fontFamily: fonts.display, fontSize: 18, color: colors.ink, marginBottom: spacing.sm },
   sub: { fontFamily: fonts.ui, fontSize: 13, color: colors.muted, marginBottom: spacing.sm },
   section: {
