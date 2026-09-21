@@ -3392,6 +3392,62 @@ async def money_weekly(driver: Dict = Depends(get_driver)):
     return {"days": days}
 
 
+@api.get("/money/yesterday")
+async def money_yesterday(driver: Dict = Depends(get_driver)):
+    """Previous-day settlement — the figure Ride91 settles on. Yesterday's
+    settled platform gross, the driver's share of it, the cash they collected
+    vs what they deposited, plus the running balance they owe overall."""
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = await _fetch_platform_cash(driver["id"], y_bd, today_bd)
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    per_platform = {p: {"gross": 0.0, "cash": 0.0, "status": "pending"} for p in PLATFORMS}
+    gross = cash = 0.0
+    settled = False
+    for r in rows:
+        g = float(r.get("gross_amount", r.get("cash_amount", 0)) or 0)
+        c = float(r.get("cash_amount", 0) or 0)
+        gross += g
+        cash += c
+        p = r.get("platform")
+        if p in per_platform:
+            per_platform[p]["gross"] += g
+            per_platform[p]["cash"] += c
+            per_platform[p]["status"] = r.get("status", "pending")
+        if r.get("status") == "settled":
+            settled = True
+    # Deposits attributed to yesterday's business day (trusted sources only).
+    deposited = 0.0
+    async for r in db.qr_payments.aggregate([
+        {"$match": {"driver_id": driver["id"], "type": "deposit",
+                    "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+                    "business_date": y_bd}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]):
+        deposited = float(r.get("total") or 0)
+    balance = await _driver_balance(driver["id"])
+    return {
+        "business_date": y_bd,
+        "settled": settled,
+        "gross": round(gross, 2),
+        "cash_collected": round(cash, 2),
+        "deposited": round(deposited, 2),
+        "net_cash_from_day": round(cash - deposited, 2),
+        "share_rate": rate,
+        "driver_share": round(gross * rate, 2),
+        "per_platform": {
+            p: {"gross": round(v["gross"], 2), "cash": round(v["cash"], 2), "status": v["status"]}
+            for p, v in per_platform.items()
+        },
+        "you_owe": balance.get("you_owe", 0.0),
+        "in_credit": balance.get("in_credit", 0.0),
+        "balance": balance.get("balance", 0.0),
+        "cash_limit": balance.get("cash_limit", get_setting("cash_limit", CASH_LIMIT)),
+        "cash_over_limit": balance.get("over_limit", False),
+    }
+
+
 # ---------------------------------------------------------------------------
 # RAZORPAY STANDARD CHECKOUT — driver pays cash-in-hand dues via UPI/card.
 # ---------------------------------------------------------------------------
