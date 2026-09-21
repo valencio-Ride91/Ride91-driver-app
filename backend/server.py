@@ -4306,18 +4306,38 @@ async def list_requests(driver: Dict = Depends(get_driver)):
 async def phone_ping(
     body: Dict[str, Any], driver: Dict = Depends(get_driver)
 ):
-    # Just record — this is the phone's own 4-min ping, not the tracker feed.
-    row = {
+    # The phone's own ~4-min ping. Recorded to phone_pings as the raw feed, and
+    # ALSO bridged into vehicle_pings so the driver shows on the admin live map
+    # and drives `last_ping_at` until real tracker hardware exists. Bridged rows
+    # carry source="phone" so a future hardware feed can be preferred/filtered.
+    now = iso(now_utc())
+    recorded_at = body.get("recorded_at") or now
+    lat, lng = body.get("lat"), body.get("lng")
+    vehicle_id = driver.get("vehicle_id")
+    await db.phone_pings.insert_one({
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
-        "vehicle_id": driver["vehicle_id"],
-        "recorded_at": body.get("recorded_at") or iso(now_utc()),
-        "received_at": iso(now_utc()),
-        "lat": body.get("lat"),
-        "lng": body.get("lng"),
+        "vehicle_id": vehicle_id,
+        "recorded_at": recorded_at,
+        "received_at": now,
+        "lat": lat,
+        "lng": lng,
         "source": "phone",
-    }
-    await db.phone_pings.insert_one(row)
+    })
+    if vehicle_id and lat is not None and lng is not None:
+        await db.vehicle_pings.insert_one({
+            "id": str(uuid.uuid4()),
+            "vehicle_id": vehicle_id,
+            "driver_id": driver["id"],
+            "recorded_at": recorded_at,
+            "received_at": now,
+            "lat": lat,
+            "lng": lng,
+            "accuracy_m": body.get("accuracy_m"),
+            "speed_kmph": body.get("speed_kmph"),
+            "soc_pct": None,
+            "source": "phone",
+        })
     return {"ok": True}
 
 
