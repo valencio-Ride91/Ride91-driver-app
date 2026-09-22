@@ -765,6 +765,15 @@ async def require_owner(admin: Dict = Depends(get_admin)) -> Dict:
     return admin
 
 
+async def fleet_admin(admin: Dict = Depends(get_admin)) -> Dict:
+    """Read endpoints that expose fleet-wide data (dashboard, cash, bookings,
+    payouts, reviews, audit, settings…). A scoped hub_manager is confined to
+    their hub's drivers/cars/rewards, so they're refused here."""
+    if admin.get("role") == "hub_manager":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    return admin
+
+
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
@@ -1857,7 +1866,7 @@ async def admin_delete_user(user_id: str, admin: Dict = Depends(require_owner)):
 
 # ---- Settings (owner only) -------------------------------------------------
 @api.get("/admin/settings")
-async def admin_get_settings(admin: Dict = Depends(get_admin)):
+async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
     return {
         "cash_limit": get_setting("cash_limit", CASH_LIMIT),
         "driver_share": get_setting("driver_share", DRIVER_SHARE),
@@ -2504,7 +2513,7 @@ async def admin_restore_driver(driver_id: str, admin: Dict = Depends(require_ops
 
 
 @api.get("/admin/vehicles/live")
-async def admin_vehicles_live(admin: Dict = Depends(get_admin)):
+async def admin_vehicles_live(admin: Dict = Depends(fleet_admin)):
     """Latest ping per vehicle joined with the assigned driver.
     Returns only the fields the map dot + tooltip needs."""
     vehicles = [v async for v in db.vehicles.find({}, {"_id": 0})]
@@ -2553,7 +2562,7 @@ async def admin_vehicles_live(admin: Dict = Depends(get_admin)):
 # booking tallies. No admin-commission / wallet / franchise concepts.
 # ---------------------------------------------------------------------------
 @api.get("/admin/dashboard")
-async def admin_dashboard(days: int = 30, admin: Dict = Depends(get_admin)):
+async def admin_dashboard(days: int = 30, admin: Dict = Depends(fleet_admin)):
     days = max(7, min(int(days), 90))
     today_bd = business_date_now()
     today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
@@ -2643,7 +2652,7 @@ async def admin_dashboard(days: int = 30, admin: Dict = Depends(get_admin)):
 
 @api.get("/admin/captures/pending")
 async def admin_captures_pending(
-    include_all: bool = False, admin: Dict = Depends(get_admin)
+    include_all: bool = False, admin: Dict = Depends(fleet_admin)
 ):
     """Captures that need ops review. By default: flagged for movement or
     beyond the hub-warn radius and not yet reviewed. `include_all=true`
@@ -2675,7 +2684,7 @@ async def admin_captures_pending(
 
 
 @api.get("/admin/captures/{capture_id}/media")
-async def admin_capture_media(capture_id: str, admin: Dict = Depends(get_admin)):
+async def admin_capture_media(capture_id: str, admin: Dict = Depends(fleet_admin)):
     row = await db.go_online_captures.find_one({"id": capture_id}, {"_id": 0})
     if not row:
         raise HTTPException(404, "capture_not_found")
@@ -2713,7 +2722,7 @@ async def admin_capture_review(
 
 @api.get("/admin/documents/pending")
 async def admin_documents_pending(
-    include_all: bool = False, admin: Dict = Depends(get_admin)
+    include_all: bool = False, admin: Dict = Depends(fleet_admin)
 ):
     """Documents where an image has been uploaded but not yet verified.
     `include_all=true` returns every document regardless of state."""
@@ -2742,7 +2751,7 @@ async def admin_documents_pending(
 
 
 @api.get("/admin/documents/{document_id}/media")
-async def admin_document_media(document_id: str, admin: Dict = Depends(get_admin)):
+async def admin_document_media(document_id: str, admin: Dict = Depends(fleet_admin)):
     row = await db.documents.find_one({"id": document_id}, {"_id": 0})
     if not row:
         raise HTTPException(404, "document_not_found")
@@ -2773,7 +2782,7 @@ async def admin_document_review(
 
 
 @api.get("/admin/summary")
-async def admin_summary(admin: Dict = Depends(get_admin)):
+async def admin_summary(admin: Dict = Depends(fleet_admin)):
     """One-shot counts for the dashboard tiles."""
     total_drivers = await db.drivers.count_documents({})
     today_key = business_date_now()
@@ -3132,7 +3141,7 @@ class RequestDecisionIn(BaseModel):
 
 
 @api.get("/admin/cash")
-async def admin_cash(admin: Dict = Depends(get_admin)):
+async def admin_cash(admin: Dict = Depends(fleet_admin)):
     """Fleet cash reconciliation: per driver, settled platform cash collected
     (to yesterday) minus trusted deposits paid in. Reuses the single balance
     rule in `_driver_balances` so this never drifts from the driver's screen."""
@@ -3173,7 +3182,7 @@ async def admin_cash(admin: Dict = Depends(get_admin)):
 
 
 @api.get("/admin/requests")
-async def admin_requests(state: Optional[str] = None, admin: Dict = Depends(get_admin)):
+async def admin_requests(state: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
     """Driver requests (advance / holiday / extra hours). `?state=pending`
     filters the queue."""
     query: Dict[str, Any] = {}
@@ -3217,7 +3226,7 @@ async def admin_decide_request(
 
 
 @api.get("/admin/inspections")
-async def admin_inspections(admin: Dict = Depends(get_admin)):
+async def admin_inspections(admin: Dict = Depends(fleet_admin)):
     """Daily vehicle inspections (dashboard photo + walkaround video). Media
     blobs are excluded here; fetch one via /admin/inspections/{id}/media."""
     rows = [r async for r in db.inspections.find(
@@ -3241,7 +3250,7 @@ async def admin_inspections(admin: Dict = Depends(get_admin)):
 
 
 @api.get("/admin/inspections/{inspection_id}/media")
-async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(get_admin)):
+async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(fleet_admin)):
     row = await db.inspections.find_one({"id": inspection_id}, {"_id": 0})
     if not row:
         raise HTTPException(404, "inspection_not_found")
@@ -3254,7 +3263,7 @@ async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(get_a
 
 
 @api.get("/admin/shift-alarms")
-async def admin_shift_alarms(admin: Dict = Depends(get_admin)):
+async def admin_shift_alarms(admin: Dict = Depends(fleet_admin)):
     """Recent shift-alarm responses across the fleet — who acknowledged, who
     said they weren't coming, and the reason given."""
     rows = [r async for r in db.alarm_responses.find(
@@ -3272,7 +3281,7 @@ async def admin_shift_alarms(admin: Dict = Depends(get_admin)):
 # ---- Notifications (admin) ------------------------------------------------
 @api.get("/admin/notifications")
 async def admin_list_notifications(
-    unread_only: bool = False, admin: Dict = Depends(get_admin)
+    unread_only: bool = False, admin: Dict = Depends(fleet_admin)
 ):
     """Feed of driver → ops notifications across the fleet (newest first),
     with the count still unread by ops — drives the header badge."""
@@ -3294,6 +3303,12 @@ async def admin_list_notifications(
 
 @api.get("/admin/drivers/{driver_id}/notifications")
 async def admin_driver_notifications(driver_id: str, admin: Dict = Depends(get_admin)):
+    scope = hub_scope(admin)
+    if scope:
+        d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "hub_id": 1, "vehicle_id": 1})
+        if not d:
+            raise HTTPException(404, "driver_not_found")
+        await _assert_driver_in_scope(d, scope)
     rows = [r async for r in db.notifications.find(
         {"driver_id": driver_id}, {"_id": 0}
     ).sort("created_at", -1).limit(100)]
@@ -3524,7 +3539,7 @@ async def admin_list_bookings(
     scope: str = "all",          # all | open | closed
     limit: int = 50,
     skip: int = 0,
-    admin: Dict = Depends(get_admin),
+    admin: Dict = Depends(fleet_admin),
 ):
     limit = max(1, min(int(limit), 200))
     q: Dict[str, Any] = {}
@@ -3546,7 +3561,7 @@ async def admin_list_bookings(
 
 
 @api.get("/admin/bookings/{booking_id}")
-async def admin_get_booking(booking_id: str, admin: Dict = Depends(get_admin)):
+async def admin_get_booking(booking_id: str, admin: Dict = Depends(fleet_admin)):
     row = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not row:
         raise HTTPException(404, "booking_not_found")
@@ -4852,7 +4867,7 @@ async def admin_create_payout(
 async def admin_list_payouts(
     driver_id: Optional[str] = None,
     limit: int = 100,
-    admin: Dict = Depends(get_admin),
+    admin: Dict = Depends(fleet_admin),
 ):
     q: Dict[str, Any] = {}
     if driver_id:
@@ -4864,7 +4879,7 @@ async def admin_list_payouts(
 
 @api.get("/admin/payouts/{payout_id}/refresh")
 async def admin_refresh_payout(
-    payout_id: str, admin: Dict = Depends(get_admin)
+    payout_id: str, admin: Dict = Depends(fleet_admin)
 ):
     """Reconciliation fallback: pull latest state from RazorpayX by id."""
     rec = await db.payouts.find_one({"id": payout_id}, {"_id": 0})

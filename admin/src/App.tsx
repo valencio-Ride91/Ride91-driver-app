@@ -26,6 +26,12 @@ import Audit from "./pages/Audit";
 
 import { AdminIdentity, me } from "./auth";
 
+// Fleet-wide pages: a scoped hub_manager is bounced to their drivers list.
+function Fleet({ admin, children }: { admin: AdminIdentity; children: JSX.Element }) {
+  if (admin.role === "hub_manager") return <Navigate to="/drivers" replace />;
+  return children;
+}
+
 export default function App() {
   const [admin, setAdmin] = useState<AdminIdentity | null>(null);
   const [booting, setBooting] = useState(true);
@@ -49,25 +55,28 @@ export default function App() {
         />
         {admin ? (
           <Route element={<Layout admin={admin} onLogout={() => setAdmin(null)} />}>
-            <Route path="/" element={admin.role === "hub_manager" ? <Navigate to="/drivers" replace /> : <Dashboard />} />
-            <Route path="/bookings" element={<Bookings />} />
+            {/* A hub_manager is scoped to their hub's drivers/cars/hubs/rewards.
+                Fleet-wide pages redirect them to /drivers (matching the backend
+                fleet_admin gate, so a typed URL can't reach fleet data). */}
+            <Route path="/" element={<Fleet admin={admin}><Dashboard /></Fleet>} />
+            <Route path="/bookings" element={<Fleet admin={admin}><Bookings /></Fleet>} />
             <Route path="/drivers" element={<Drivers />} />
             <Route path="/drivers/:id" element={<DriverDetail />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/hubs" element={<Hubs />} />
-            <Route path="/cash" element={<Cash />} />
+            <Route path="/cash" element={<Fleet admin={admin}><Cash /></Fleet>} />
             <Route path="/rewards" element={<Rewards />} />
-            <Route path="/requests" element={<Requests />} />
-            <Route path="/live-map" element={<LiveMap />} />
-            <Route path="/review/captures" element={<Captures />} />
-            <Route path="/review/documents" element={<Documents />} />
-            <Route path="/review/inspections" element={<Inspections />} />
-            <Route path="/shift-alarms" element={<ShiftAlarms />} />
-            <Route path="/payouts" element={<Payouts />} />
-            <Route path="/audit" element={<Audit />} />
-            <Route path="/settings" element={<Settings admin={admin} />} />
+            <Route path="/requests" element={<Fleet admin={admin}><Requests /></Fleet>} />
+            <Route path="/live-map" element={<Fleet admin={admin}><LiveMap /></Fleet>} />
+            <Route path="/review/captures" element={<Fleet admin={admin}><Captures /></Fleet>} />
+            <Route path="/review/documents" element={<Fleet admin={admin}><Documents /></Fleet>} />
+            <Route path="/review/inspections" element={<Fleet admin={admin}><Inspections /></Fleet>} />
+            <Route path="/shift-alarms" element={<Fleet admin={admin}><ShiftAlarms /></Fleet>} />
+            <Route path="/payouts" element={<Fleet admin={admin}><Payouts /></Fleet>} />
+            <Route path="/audit" element={<Fleet admin={admin}><Audit /></Fleet>} />
+            <Route path="/settings" element={<Fleet admin={admin}><Settings admin={admin} /></Fleet>} />
             {admin.role === "owner" ? <Route path="/users" element={<Users admin={admin} />} /> : null}
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to={admin.role === "hub_manager" ? "/drivers" : "/"} replace />} />
           </Route>
         ) : (
           <Route path="*" element={<Navigate to="/login" replace />} />
