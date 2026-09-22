@@ -1,8 +1,9 @@
-// Earnings + weekly reward leaderboard. Ops uses this to see each driver's
-// gross/earnings and who qualifies for (and is leading) the weekly rewards.
+// Earnings & rewards — grouped by hub. Each hub shows a CARS board (day+night
+// gross combined → top car of day/week) and a DRIVERS board (individual gross →
+// top driver of week). ★ marks the current leader within that hub; ops pays them.
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, RewardsResponse, downloadCsv } from "../api";
+import { api, RewardsResponse, RewardHub } from "../api";
 
 function fmtINR(n: number) {
   return `₹${(n ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -11,7 +12,6 @@ function fmtINR(n: number) {
 export default function Rewards() {
   const [data, setData] = useState<RewardsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [q, setQ] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -21,100 +21,113 @@ export default function Rewards() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 60000);
-    return () => clearInterval(id);
-  }, [load]);
+  useEffect(() => { load(); const id = setInterval(load, 60000); return () => clearInterval(id); }, [load]);
 
-  const rows = (data?.items ?? []).filter((r) => {
-    if (!q) return true;
-    const s = q.toLowerCase();
-    return (r.name ?? "").toLowerCase().includes(s) || (r.phone ?? "").toLowerCase().includes(s);
-  });
   const th = data?.thresholds;
-  const leadersByHub = data?.leaders_by_hub ?? {};
-  const leaderFor = (hubId: string | null) => (hubId ? leadersByHub[hubId] : undefined);
-
-  const exportCsv = () => downloadCsv(
-    `ride91-rewards-${data?.week_start ?? ""}.csv`,
-    ["Driver", "Phone", "Hub", "Yesterday gross", "Week gross", "Driver earnings (30%)", "Days", "Daily ✓", "Car-week ✓", "Driver-week ✓"],
-    rows.map((r) => [r.name ?? "", r.phone ?? "", r.hub_name ?? "", r.yesterday_gross, r.week_gross, r.driver_earnings, r.days_operated, r.q_daily ? "yes" : "", r.q_car_week ? "yes" : "", r.q_driver_week ? "yes" : ""]),
-  );
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h1>Earnings &amp; rewards</h1>
-          <div className="sub">
-            Week of {data?.week_start ?? "—"} · {data?.days_remaining ?? 0} days to payout · driver share {Math.round((data?.share_rate ?? 0.3) * 100)}%
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input placeholder="Filter driver / phone" value={q} onChange={(e) => setQ(e.target.value)} style={{ maxWidth: 220 }} />
-          <button className="ghost" onClick={exportCsv} disabled={rows.length === 0}>Export</button>
+          <div className="sub">Week of {data?.week_start ?? "—"} · {data?.days_remaining ?? 0} days to payout · rewards decided per hub, on top of the 30% share</div>
         </div>
       </div>
 
       {th ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 16 }}>
-          <RewardCard title="🏆 Top car of the day" target={`${fmtINR(th.daily_target)} gross`} reward={th.top_car_day} />
-          <RewardCard title="🏆 Top car of the week" target={`${fmtINR(th.week_car_target)} gross · all ${th.days_required} days`} reward={th.top_car_week} />
-          <RewardCard title="🏆 Top driver of the week" target={`${fmtINR(th.week_driver_target)} earnings`} reward={th.top_driver_week} />
+          <RewardCard title="🏆 Top car of the day" target={`car ≥ ${fmtINR(th.daily_target)} gross`} reward={th.top_car_day} />
+          <RewardCard title="🏆 Top car of the week" target={`car ≥ ${fmtINR(th.week_car_target)} · all ${th.days_required} days`} reward={th.top_car_week} />
+          <RewardCard title="🏆 Top driver of the week" target={`driver ≥ ${fmtINR(th.week_driver_target)} gross`} reward={th.top_driver_week} />
         </div>
       ) : null}
 
-      <div className="card" style={{ padding: 0 }}>
+      {loading ? (
+        <div className="card"><div className="empty">Loading…</div></div>
+      ) : (data?.hubs ?? []).length === 0 ? (
+        <div className="card"><div className="empty">No hubs with earnings yet.</div></div>
+      ) : (
+        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} daysReq={th?.days_required ?? 7} />)
+      )}
+
+      <div className="muted-sm" style={{ marginTop: 12 }}>
+        ★ = current leader in that hub. A car's gross combines its day + night drivers. Top driver is measured on the driver's own gross. Rewards are additional to the 30% share and paid by ops.
+      </div>
+    </div>
+  );
+}
+
+function HubBlock({ hub, daysReq }: { hub: RewardHub; daysReq: number }) {
+  const [tab, setTab] = useState<"cars" | "drivers">("cars");
+  return (
+    <div className="card" style={{ marginBottom: 20, padding: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--line)" }}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>
+          {hub.hub_name ?? "No hub"}
+          <span className="muted-sm" style={{ marginLeft: 8 }}>{hub.cars.length} car{hub.cars.length === 1 ? "" : "s"} · {hub.drivers.length} driver{hub.drivers.length === 1 ? "" : "s"}</span>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button className={tab === "cars" ? "primary" : "ghost"} onClick={() => setTab("cars")}>Cars</button>
+          <button className={tab === "drivers" ? "primary" : "ghost"} onClick={() => setTab("drivers")}>Drivers</button>
+        </div>
+      </div>
+
+      {tab === "cars" ? (
         <table className="data">
-          <thead>
-            <tr>
-              <th>Driver</th><th>Hub</th>
-              <th style={{ textAlign: "right" }}>Yesterday</th>
-              <th style={{ textAlign: "right" }}>Week gross</th>
-              <th style={{ textAlign: "right" }}>Earnings (30%)</th>
-              <th style={{ textAlign: "center" }}>Days</th>
-              <th style={{ textAlign: "center" }}>Rewards</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Car</th><th>Drivers (day / night)</th><th style={{ textAlign: "right" }}>Yesterday</th><th style={{ textAlign: "right" }}>Week gross</th><th style={{ textAlign: "center" }}>Days</th><th style={{ textAlign: "center" }}>Reward</th></tr></thead>
           <tbody>
-            {loading ? (
-              <tr><td colSpan={7} className="empty">Loading…</td></tr>
-            ) : rows.length === 0 ? (
-              <tr><td colSpan={7} className="empty">No drivers.</td></tr>
-            ) : rows.map((r) => {
-              const L = leaderFor(r.hub_id);
-              return (
-              <tr key={r.driver_id}>
+            {hub.cars.length === 0 ? <tr><td colSpan={6} className="empty">No cars.</td></tr> : hub.cars.map((c) => (
+              <tr key={c.vehicle_id}>
+                <td style={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>{c.number ?? c.vehicle_id.slice(0, 8)}</td>
                 <td>
-                  <Link to={`/drivers/${r.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{r.name ?? r.driver_id.slice(0, 8)}</Link>
-                  <div style={{ fontFamily: "ui-monospace, monospace", color: "var(--muted)", fontSize: 12 }}>{r.phone}</div>
+                  {c.drivers.length === 0 ? <span className="muted-sm">—</span> : c.drivers.map((d) => (
+                    <span key={d.driver_id} style={{ marginRight: 8 }}>
+                      <Link to={`/drivers/${d.driver_id}`} style={{ color: "var(--ink)" }}>{d.name}</Link>
+                      <span className="muted-sm"> ({d.shift})</span>
+                    </span>
+                  ))}
                 </td>
-                <td>{r.hub_name ?? <span className="muted-sm">no hub</span>}</td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
-                  {fmtINR(r.yesterday_gross)}
-                  {L?.top_car_day === r.driver_id ? <span className="tag live" style={{ marginLeft: 6 }}>DAY</span> : null}
+                  {fmtINR(c.yesterday_gross)}
+                  {c.is_top_car_day ? <span className="tag live" style={{ marginLeft: 6 }}>★DAY</span> : null}
                 </td>
-                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>{fmtINR(r.week_gross)}</td>
-                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtINR(r.driver_earnings)}</td>
-                <td style={{ textAlign: "center" }}>
-                  <span className={r.days_operated >= (th?.days_required ?? 7) ? "tag live" : "tag muted"}>{r.days_operated}/{th?.days_required ?? 7}</span>
+                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
+                  {fmtINR(c.week_gross)}
+                  {c.is_top_car_week ? <span className="tag live" style={{ marginLeft: 6 }}>★WEEK</span> : null}
                 </td>
+                <td style={{ textAlign: "center" }}><span className={c.days_operated >= daysReq ? "tag live" : "tag muted"}>{c.days_operated}/{daysReq}</span></td>
                 <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
-                  {r.q_daily ? <span className="tag ok" title="Hit daily target" style={{ marginRight: 4 }}>D</span> : null}
-                  {r.q_car_week ? <span className={`tag ${L?.top_car_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top car of week (in hub)" style={{ marginRight: 4 }}>{L?.top_car_week === r.driver_id ? "★CAR" : "CAR"}</span> : null}
-                  {r.q_driver_week ? <span className={`tag ${L?.top_driver_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top driver of week (in hub)">{L?.top_driver_week === r.driver_id ? "★DRV" : "DRV"}</span> : null}
-                  {!r.q_daily && !r.q_car_week && !r.q_driver_week ? <span className="muted-sm">—</span> : null}
+                  {c.q_car_day ? <span className="tag ok" style={{ marginRight: 4 }} title="Cleared daily target">DAY</span> : null}
+                  {c.q_car_week ? <span className="tag ok" title="Qualifies: top car of week">WEEK</span> : null}
+                  {!c.q_car_day && !c.q_car_week ? <span className="muted-sm">—</span> : null}
                 </td>
               </tr>
-              );
-            })}
+            ))}
           </tbody>
         </table>
-      </div>
-      <div className="muted-sm" style={{ marginTop: 10 }}>
-        ★ = current leader <strong>within that hub</strong> · CAR/DRV = qualifies for that weekly reward · D = hit yesterday's daily target. Rewards are decided per hub and are additional to the 30% share.
-      </div>
+      ) : (
+        <table className="data">
+          <thead><tr><th>Driver</th><th>Shift</th><th style={{ textAlign: "right" }}>Yesterday</th><th style={{ textAlign: "right" }}>Week gross</th><th style={{ textAlign: "center" }}>Days</th><th style={{ textAlign: "center" }}>Reward</th></tr></thead>
+          <tbody>
+            {hub.drivers.length === 0 ? <tr><td colSpan={6} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
+              <tr key={d.driver_id}>
+                <td>
+                  <Link to={`/drivers/${d.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{d.name ?? d.driver_id.slice(0, 8)}</Link>
+                  <div style={{ fontFamily: "ui-monospace, monospace", color: "var(--muted)", fontSize: 12 }}>{d.phone}</div>
+                </td>
+                <td>{d.shift}</td>
+                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtINR(d.yesterday_gross)}</td>
+                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
+                  {fmtINR(d.week_gross)}
+                  {d.is_top_driver_week ? <span className="tag live" style={{ marginLeft: 6 }}>★TOP</span> : null}
+                </td>
+                <td style={{ textAlign: "center" }}><span className="tag muted">{d.days_operated}/{daysReq}</span></td>
+                <td style={{ textAlign: "center" }}>{d.q_driver_week ? <span className="tag ok" title="Qualifies: top driver of week">DRV</span> : <span className="muted-sm">—</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

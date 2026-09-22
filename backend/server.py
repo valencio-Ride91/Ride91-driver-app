@@ -3231,20 +3231,11 @@ async def admin_mark_notification_read(
 
 
 # ---- Earnings & rewards leaderboard (admin) --------------------------------
-@api.get("/admin/rewards")
-async def admin_rewards(admin: Dict = Depends(get_admin)):
-    """Fleet earnings + weekly reward progress. One row per active driver:
-    yesterday's gross, this week's gross and 30% driver earnings, days operated,
-    and which reward thresholds each qualifies for — so ops can pick the top
-    car / top driver of the week."""
-    today_bd = business_date_now()
-    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
-    y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
-    mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
-    rate = get_setting("driver_share", DRIVER_SHARE)
-
-    # Week gross + operated days per driver, in one aggregation.
-    week: Dict[str, Dict[str, Any]] = {}
+async def _reward_gross(mon_bd: str, next_mon_bd: str, y_bd: str):
+    """Per-driver weekly gross, the SET of days they operated, and yesterday's
+    gross — the raw material for both car-level and driver-level rewards."""
+    dweek: Dict[str, float] = {}
+    ddays: Dict[str, set] = {}
     async for r in db.platform_cash.aggregate([
         {"$match": {"business_date": {"$gte": mon_bd, "$lt": next_mon_bd}}},
         {"$group": {
@@ -3252,90 +3243,121 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
             "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}},
         }},
     ]):
-        did = r["_id"]["d"]
-        w = week.setdefault(did, {"gross": 0.0, "days": 0})
-        w["gross"] += float(r.get("g") or 0)
-        if (r.get("g") or 0) > 0:
-            w["days"] += 1
-    # Yesterday gross per driver.
-    yday: Dict[str, float] = {}
+        did, bd, g = r["_id"]["d"], r["_id"]["bd"], float(r.get("g") or 0)
+        dweek[did] = dweek.get(did, 0.0) + g
+        if g > 0:
+            ddays.setdefault(did, set()).add(bd)
+    dyday: Dict[str, float] = {}
     async for r in db.platform_cash.aggregate([
         {"$match": {"business_date": y_bd}},
         {"$group": {"_id": "$driver_id", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
     ]):
-        yday[r["_id"]] = float(r.get("g") or 0)
+        dyday[r["_id"]] = float(r.get("g") or 0)
+    return dweek, ddays, dyday
 
-    # A driver's hub is the hub of the car they hold. Build vehicle->hub and
-    # hub->name maps once.
-    veh_hub = {v["id"]: v.get("hub_id") async for v in db.vehicles.find({}, {"_id": 0, "id": 1, "hub_id": 1})}
-    hub_name = {h["id"]: h.get("name") async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})}
 
+@api.get("/admin/rewards")
+async def admin_rewards(admin: Dict = Depends(get_admin)):
+    """Weekly reward standings, grouped by hub. Each hub has a CARS board
+    (day+night gross combined → top car of day/week) and a DRIVERS board
+    (individual gross → top driver of week). Winners are the ★ per hub; ops
+    pays them (rewards are on top of the 30% share)."""
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
+    mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
+    dweek, ddays, dyday = await _reward_gross(mon_bd, next_mon_bd, y_bd)
+
+    vehicles = {v["id"]: v async for v in db.vehicles.find(
+        {"retired": {"$ne": True}}, {"_id": 0, "id": 1, "number": 1, "hub_id": 1})}
+    hubs = [h async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})]
+    hub_name = {h["id"]: h.get("name") for h in hubs}
     drivers = [d async for d in db.drivers.find(
-        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1})]
-    rows: List[Dict[str, Any]] = []
-    for d in drivers:
-        w = week.get(d["id"], {"gross": 0.0, "days": 0})
-        week_gross = round(w["gross"], 2)
-        driver_earnings = round(week_gross * rate, 2)
-        y_gross = round(yday.get(d["id"], 0.0), 2)
-        # The driver's own hub takes precedence; fall back to their car's hub.
-        hub_id = d.get("hub_id") or veh_hub.get(d.get("vehicle_id"))
-        rows.append({
-            "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
-            "hub_id": hub_id, "hub_name": hub_name.get(hub_id),
-            "yesterday_gross": y_gross,
-            "week_gross": week_gross,
-            "driver_earnings": driver_earnings,
-            "days_operated": w["days"],
-            "q_daily": y_gross >= REWARD_DAILY_TARGET,
-            "q_car_week": week_gross >= REWARD_WEEK_CAR_TARGET and w["days"] >= REWARD_DAYS_REQUIRED,
-            "q_driver_week": driver_earnings >= REWARD_WEEK_DRIVER_TARGET,
-        })
-    rows.sort(key=lambda r: r["week_gross"], reverse=True)
+        {"archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1, "shift_type": 1})]
 
-    # Rewards are decided WITHIN each hub: the best qualifying driver at that hub
-    # wins. Compute leaders per hub_id (None = drivers with no hub).
-    by_hub: Dict[Optional[str], List[Dict]] = {}
-    for r in rows:
-        by_hub.setdefault(r["hub_id"], []).append(r)
-    leaders_by_hub: Dict[str, Dict[str, Optional[str]]] = {}
-    for hid, hrows in by_hub.items():
-        if hid is None:
+    def dstat(did):
+        return dweek.get(did, 0.0), len(ddays.get(did, set())), dyday.get(did, 0.0)
+
+    # ---- Cars: combine each car's day + night drivers ----
+    cars_by_id: Dict[str, Dict[str, Any]] = {}
+    for d in drivers:
+        vid = d.get("vehicle_id")
+        if not vid or vid not in vehicles:
             continue
-        day_q = [r for r in hrows if r["q_daily"]]
-        car_q = [r for r in hrows if r["q_car_week"]]
-        drv_q = [r for r in hrows if r["q_driver_week"]]
-        leaders_by_hub[hid] = {
-            "top_car_day": max(day_q, key=lambda r: r["yesterday_gross"])["driver_id"] if day_q else None,
-            "top_car_week": max(car_q, key=lambda r: r["week_gross"])["driver_id"] if car_q else None,
-            "top_driver_week": max(drv_q, key=lambda r: r["driver_earnings"])["driver_id"] if drv_q else None,
-        }
-    hubs_summary = [
-        {"hub_id": hid, "hub_name": hub_name.get(hid),
-         "drivers": len(hrows),
-         "week_gross": round(sum(r["week_gross"] for r in hrows), 2)}
-        for hid, hrows in by_hub.items() if hid is not None
-    ]
-    hubs_summary.sort(key=lambda h: h["week_gross"], reverse=True)
+        wk, _days, yd = dstat(d["id"])
+        c = cars_by_id.setdefault(vid, {
+            "vehicle_id": vid, "number": vehicles[vid].get("number"),
+            "hub_id": vehicles[vid].get("hub_id"),
+            "week_gross": 0.0, "yesterday_gross": 0.0, "day_set": set(), "drivers": [],
+        })
+        c["week_gross"] += wk
+        c["yesterday_gross"] += yd
+        c["day_set"] |= ddays.get(d["id"], set())
+        c["drivers"].append({"driver_id": d["id"], "name": d.get("name"), "shift": d.get("shift_type", "day")})
+
+    # ---- Group into hubs ----
+    out_hubs: Dict[str, Dict[str, Any]] = {
+        h["id"]: {"hub_id": h["id"], "hub_name": h.get("name"), "cars": [], "drivers": []} for h in hubs
+    }
+    UNASSIGNED = "_none"
+    out_hubs[UNASSIGNED] = {"hub_id": None, "hub_name": None, "cars": [], "drivers": []}
+
+    for c in cars_by_id.values():
+        hid = c["hub_id"] if c["hub_id"] in out_hubs else UNASSIGNED
+        out_hubs[hid]["cars"].append({
+            "vehicle_id": c["vehicle_id"], "number": c["number"],
+            "week_gross": round(c["week_gross"], 2),
+            "yesterday_gross": round(c["yesterday_gross"], 2),
+            "days_operated": len(c["day_set"]),
+            "drivers": c["drivers"],
+            "q_car_day": c["yesterday_gross"] >= REWARD_DAILY_TARGET,
+            "q_car_week": c["week_gross"] >= REWARD_WEEK_CAR_TARGET and len(c["day_set"]) >= REWARD_DAYS_REQUIRED,
+        })
+    for d in drivers:
+        hid = d.get("hub_id") or vehicles.get(d.get("vehicle_id"), {}).get("hub_id")
+        hid = hid if hid in out_hubs else UNASSIGNED
+        wk, days, yd = dstat(d["id"])
+        out_hubs[hid]["drivers"].append({
+            "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+            "shift": d.get("shift_type", "day"),
+            "week_gross": round(wk, 2), "yesterday_gross": round(yd, 2), "days_operated": days,
+            "q_driver_week": wk >= REWARD_WEEK_DRIVER_TARGET,
+        })
+
+    # ---- Rank + mark the ★ leaders within each hub ----
+    hubs_out: List[Dict[str, Any]] = []
+    for hb in out_hubs.values():
+        cars, drvs = hb["cars"], hb["drivers"]
+        cars.sort(key=lambda c: c["week_gross"], reverse=True)
+        drvs.sort(key=lambda d: d["week_gross"], reverse=True)
+        day_q = [c for c in cars if c["q_car_day"]]
+        car_q = [c for c in cars if c["q_car_week"]]
+        drv_q = [d for d in drvs if d["q_driver_week"]]
+        top_day = max(day_q, key=lambda c: c["yesterday_gross"])["vehicle_id"] if day_q else None
+        top_car = max(car_q, key=lambda c: c["week_gross"])["vehicle_id"] if car_q else None
+        top_drv = max(drv_q, key=lambda d: d["week_gross"])["driver_id"] if drv_q else None
+        for c in cars:
+            c["is_top_car_day"] = c["vehicle_id"] == top_day
+            c["is_top_car_week"] = c["vehicle_id"] == top_car
+        for d in drvs:
+            d["is_top_driver_week"] = d["driver_id"] == top_drv
+        if cars or drvs:
+            hb["week_gross"] = round(sum(c["week_gross"] for c in cars), 2)
+            hubs_out.append(hb)
+    # Real hubs first (by gross), unassigned last.
+    hubs_out.sort(key=lambda h: (h["hub_id"] is None, -h.get("week_gross", 0)))
 
     return {
-        "items": rows,
-        "count": len(rows),
         "week_start": mon_bd,
         "days_remaining": days_remaining,
-        "share_rate": rate,
-        "hubs": hubs_summary,
-        "totals": {
-            "yesterday_gross": round(sum(r["yesterday_gross"] for r in rows), 2),
-            "week_gross": round(sum(r["week_gross"] for r in rows), 2),
-        },
+        "hubs": hubs_out,
         "thresholds": {
             "daily_target": REWARD_DAILY_TARGET, "top_car_day": REWARD_TOP_CAR_DAY,
             "week_car_target": REWARD_WEEK_CAR_TARGET, "top_car_week": REWARD_TOP_CAR_WEEK,
             "week_driver_target": REWARD_WEEK_DRIVER_TARGET, "top_driver_week": REWARD_TOP_DRIVER_WEEK,
             "days_required": REWARD_DAYS_REQUIRED,
         },
-        "leaders_by_hub": leaders_by_hub,
     }
 
 
@@ -3753,48 +3775,59 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
     def _gross(r):
         return float(r.get("gross_amount", r.get("cash_amount", 0)) or 0)
 
-    y_rows = await _fetch_platform_cash(driver["id"], y_bd, today_bd)
-    y_gross = round(sum(_gross(r) for r in y_rows), 2)
+    async def _one(did: str):
+        yr = await _fetch_platform_cash(did, y_bd, today_bd)
+        wr = await _fetch_platform_cash(did, mon_bd, next_mon_bd)
+        days = {r["business_date"] for r in wr if _gross(r) > 0}
+        return round(sum(_gross(r) for r in yr), 2), round(sum(_gross(r) for r in wr), 2), days
 
-    wk_rows = await _fetch_platform_cash(driver["id"], mon_bd, next_mon_bd)
-    by_day: Dict[str, float] = {}
-    for r in wk_rows:
-        by_day[r["business_date"]] = by_day.get(r["business_date"], 0.0) + _gross(r)
-    week_gross = round(sum(by_day.values()), 2)
-    days_operated = sum(1 for v in by_day.values() if v > 0)
-    driver_earnings_week = round(week_gross * rate, 2)
+    # This driver's own numbers → the Top-Driver tier (on gross, not the take).
+    driver_y, driver_week, driver_days = await _one(driver["id"])
+
+    # The car's combined numbers → the Top-Car tiers (day + night shift drivers).
+    car_y, car_week, car_days = driver_y, driver_week, set(driver_days)
+    if driver.get("vehicle_id"):
+        async for p in db.drivers.find(
+            {"vehicle_id": driver["vehicle_id"], "id": {"$ne": driver["id"]}, "archived": {"$ne": True}},
+            {"_id": 0, "id": 1},
+        ):
+            py, pw, pd = await _one(p["id"])
+            car_y += py
+            car_week += pw
+            car_days |= pd
+    car_days_n = len(car_days)
 
     def pct(x: float, target: float) -> float:
         return round(min(1.0, x / target), 4) if target else 0.0
 
     return {
         "week_start": mon_bd,
-        "days_operated": days_operated,
+        "days_operated": car_days_n,          # the car's operated days (any shift)
         "days_required": REWARD_DAYS_REQUIRED,
         "share_rate": rate,
         "daily": {
             "label": "Top car of the day",
             "target": REWARD_DAILY_TARGET,
-            "value": y_gross,
-            "qualified": y_gross >= REWARD_DAILY_TARGET,
-            "progress": pct(y_gross, REWARD_DAILY_TARGET),
+            "value": round(car_y, 2),
+            "qualified": car_y >= REWARD_DAILY_TARGET,
+            "progress": pct(car_y, REWARD_DAILY_TARGET),
             "reward": REWARD_TOP_CAR_DAY,
         },
         "top_car_week": {
             "label": "Top car of the week",
             "target": REWARD_WEEK_CAR_TARGET,
-            "value": week_gross,
-            "all_days": days_operated >= REWARD_DAYS_REQUIRED,
-            "qualified": week_gross >= REWARD_WEEK_CAR_TARGET and days_operated >= REWARD_DAYS_REQUIRED,
-            "progress": pct(week_gross, REWARD_WEEK_CAR_TARGET),
+            "value": round(car_week, 2),
+            "all_days": car_days_n >= REWARD_DAYS_REQUIRED,
+            "qualified": car_week >= REWARD_WEEK_CAR_TARGET and car_days_n >= REWARD_DAYS_REQUIRED,
+            "progress": pct(car_week, REWARD_WEEK_CAR_TARGET),
             "reward": REWARD_TOP_CAR_WEEK,
         },
         "top_driver_week": {
             "label": "Top driver of the week",
             "target": REWARD_WEEK_DRIVER_TARGET,
-            "value": driver_earnings_week,
-            "qualified": driver_earnings_week >= REWARD_WEEK_DRIVER_TARGET,
-            "progress": pct(driver_earnings_week, REWARD_WEEK_DRIVER_TARGET),
+            "value": round(driver_week, 2),
+            "qualified": driver_week >= REWARD_WEEK_DRIVER_TARGET,
+            "progress": pct(driver_week, REWARD_WEEK_DRIVER_TARGET),
             "reward": REWARD_TOP_DRIVER_WEEK,
         },
     }

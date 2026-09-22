@@ -332,38 +332,49 @@ export interface InspectionRow {
   has_photo: boolean;
 }
 
-export interface RewardsRow {
+export interface RewardCar {
+  vehicle_id: string;
+  number: string | null;
+  week_gross: number;
+  yesterday_gross: number;
+  days_operated: number;
+  drivers: Array<{ driver_id: string; name: string | null; shift: string }>;
+  q_car_day: boolean;
+  q_car_week: boolean;
+  is_top_car_day: boolean;
+  is_top_car_week: boolean;
+}
+
+export interface RewardDriver {
   driver_id: string;
   name: string | null;
   phone: string | null;
-  hub_id: string | null;
-  hub_name: string | null;
-  yesterday_gross: number;
+  shift: string;
   week_gross: number;
-  driver_earnings: number;
+  yesterday_gross: number;
   days_operated: number;
-  q_daily: boolean;
-  q_car_week: boolean;
   q_driver_week: boolean;
+  is_top_driver_week: boolean;
 }
 
-export interface HubLeaders { top_car_day: string | null; top_car_week: string | null; top_driver_week: string | null }
+export interface RewardHub {
+  hub_id: string | null;
+  hub_name: string | null;
+  week_gross?: number;
+  cars: RewardCar[];
+  drivers: RewardDriver[];
+}
 
 export interface RewardsResponse {
-  items: RewardsRow[];
-  count: number;
   week_start: string;
   days_remaining: number;
-  share_rate: number;
-  hubs: Array<{ hub_id: string; hub_name: string | null; drivers: number; week_gross: number }>;
-  totals: { yesterday_gross: number; week_gross: number };
+  hubs: RewardHub[];
   thresholds: {
     daily_target: number; top_car_day: number;
     week_car_target: number; top_car_week: number;
     week_driver_target: number; top_driver_week: number;
     days_required: number;
   };
-  leaders_by_hub: Record<string, HubLeaders>;
 }
 
 export interface AdminUserRow {
