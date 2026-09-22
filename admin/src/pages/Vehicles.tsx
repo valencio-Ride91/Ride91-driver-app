@@ -163,13 +163,13 @@ export default function Vehicles() {
       <div className="card" style={{ padding: 0, marginTop: 16 }}>
         <table className="data">
           <thead>
-            <tr><th>Plate</th><th>Model</th><th>Hub</th><th>SoC</th><th>Range</th><th>Assigned to</th><th></th></tr>
+            <tr><th>Plate</th><th>Model</th><th>Hub</th><th>SoC</th><th>Range</th><th>Day driver</th><th>Night driver</th><th></th></tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="empty">Loading…</td></tr>
+              <tr><td colSpan={8} className="empty">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={7} className="empty">No vehicles yet.</td></tr>
+              <tr><td colSpan={8} className="empty">No vehicles yet.</td></tr>
             ) : rows.map((v) => (
               <tr key={v.id} style={{ opacity: v.retired ? 0.55 : 1 }}>
                 <td style={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
@@ -180,7 +180,8 @@ export default function Vehicles() {
                 <td>{v.hub_name ? v.hub_name : <span className="muted-sm">—</span>}</td>
                 <td>{v.current_soc != null ? `${v.current_soc}%` : "—"}</td>
                 <td>{v.current_range_km != null ? `${v.current_range_km} km` : "—"}</td>
-                <td>{v.assigned_driver ? v.assigned_driver : <span className="muted-sm">free</span>}</td>
+                <td>{v.day_driver ? v.day_driver : <span className="muted-sm">open</span>}</td>
+                <td>{v.night_driver ? v.night_driver : <span className="muted-sm">open</span>}</td>
                 <td style={{ whiteSpace: "nowrap" }}>
                   {v.retired ? (
                     <button className="ghost" onClick={() => restore(v)}>Restore</button>

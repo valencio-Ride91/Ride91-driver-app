@@ -2024,6 +2024,23 @@ async def admin_delete_hub(hub_id: str, admin: Dict = Depends(require_write)):
     return {"ok": True, "id": hub_id, "deleted": True}
 
 
+async def _check_shift_slot(vehicle_id: Optional[str], shift_type: str, exclude_driver_id: Optional[str]) -> None:
+    """A car holds one day-shift driver and one night-shift driver. Refuse a
+    second active driver on the same car for the same shift."""
+    if not vehicle_id:
+        return
+    q: Dict[str, Any] = {
+        "vehicle_id": vehicle_id,
+        "shift_type": shift_type,
+        "archived": {"$ne": True},
+    }
+    if exclude_driver_id:
+        q["id"] = {"$ne": exclude_driver_id}
+    clash = await db.drivers.find_one(q, {"_id": 0, "id": 1, "name": 1})
+    if clash:
+        raise HTTPException(409, "shift_slot_taken")
+
+
 async def _assign_vehicle_hub(vehicle_id: str, hub_id: Optional[str]) -> None:
     """Validate a hub assignment and enforce its capacity. Raises HTTPException."""
     if not hub_id:
@@ -2044,18 +2061,23 @@ async def admin_list_vehicles(
 ):
     query: Dict[str, Any] = {} if include_retired else {"retired": {"$ne": True}}
     vehicles = [v async for v in db.vehicles.find(query, {"_id": 0}).sort("number", 1)]
-    # Which vehicles already have a driver, so the UI can flag free ones and
-    # name who holds each one.
-    holder: Dict[str, str] = {}
+    # Each car holds one day driver and one night driver. Track both per car so
+    # the UI can show the pair and offer only the open shift slots.
+    by_vehicle: Dict[str, Dict[str, str]] = {}
     async for d in db.drivers.find(
         {"vehicle_id": {"$ne": None}, "archived": {"$ne": True}},
-        {"_id": 0, "vehicle_id": 1, "name": 1},
+        {"_id": 0, "vehicle_id": 1, "name": 1, "shift_type": 1},
     ):
-        holder[d["vehicle_id"]] = d.get("name")
+        by_vehicle.setdefault(d["vehicle_id"], {})[d.get("shift_type", "day")] = d.get("name")
     hub_names = {h["id"]: h.get("name") async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})}
     for v in vehicles:
-        v["assigned"] = v["id"] in holder
-        v["assigned_driver"] = holder.get(v["id"])
+        drs = by_vehicle.get(v["id"], {})
+        v["day_driver"] = drs.get("day")
+        v["night_driver"] = drs.get("night")
+        v["day_open"] = "day" not in drs
+        v["night_open"] = "night" not in drs
+        v["assigned"] = bool(drs)
+        v["assigned_driver"] = drs.get("day") or drs.get("night")   # backward compat
         v["retired"] = bool(v.get("retired"))
         v["hub_id"] = v.get("hub_id")
         v["hub_name"] = hub_names.get(v.get("hub_id"))
@@ -2162,6 +2184,7 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
         veh = await db.vehicles.find_one({"id": body.vehicle_id}, {"_id": 0, "id": 1})
         if not veh:
             raise HTTPException(404, "vehicle_not_found")
+        await _check_shift_slot(body.vehicle_id, body.shift_type, None)
     hub_id, hub_name, hub_lat, hub_lng = body.hub_id or None, body.hub_name, body.hub_lat, body.hub_lng
     if hub_id:
         hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
@@ -2217,6 +2240,11 @@ async def admin_update_driver(
     if updates.get("vehicle_id"):
         if not await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "id": 1}):
             raise HTTPException(404, "vehicle_not_found")
+    # Re-check the shift slot when the car or the shift changes.
+    if "vehicle_id" in updates or "shift_type" in updates:
+        new_vehicle = updates.get("vehicle_id", driver.get("vehicle_id"))
+        new_shift = updates.get("shift_type", driver.get("shift_type", "day"))
+        await _check_shift_slot(new_vehicle, new_shift, driver_id)
     if body.hub_id is not None:
         hub_id = body.hub_id or None
         if hub_id:

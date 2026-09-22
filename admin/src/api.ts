@@ -61,6 +61,10 @@ export interface VehicleRow {
   retired?: boolean;
   hub_id?: string | null;
   hub_name?: string | null;
+  day_driver?: string | null;
+  night_driver?: string | null;
+  day_open?: boolean;
+  night_open?: boolean;
 }
 
 export interface HubRow {

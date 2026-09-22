@@ -111,7 +111,8 @@ export default function Drivers() {
       await load();
       flash("Driver added.");
     } catch (e: any) {
-      setErr(e?.body?.detail === "phone_already_registered" ? "A driver with that phone already exists." : "Could not add driver.");
+      const d = e?.body?.detail;
+      setErr(d === "phone_already_registered" ? "A driver with that phone already exists." : d === "shift_slot_taken" ? "That car already has a driver for this shift." : "Could not add driver.");
     } finally {
       setSaving(false);
     }
@@ -166,16 +167,20 @@ export default function Drivers() {
       await load();
       flash("Driver updated.");
     } catch (e: any) {
-      setErr(e?.body?.detail === "phone_already_registered" ? "A driver with that phone already exists." : "Could not update driver.");
+      const d = e?.body?.detail;
+      setErr(d === "phone_already_registered" ? "A driver with that phone already exists." : d === "shift_slot_taken" ? "That car already has a driver for this shift." : "Could not update driver.");
     } finally {
       setSaving(false);
     }
   };
 
-  const freeVehicles = vehicles.filter((v) => !v.assigned);
-  // For the edit modal: free vehicles PLUS the one this driver already holds.
-  const editVehicleOptions = (currentId: string) =>
-    vehicles.filter((v) => !v.assigned || v.id === currentId);
+  // A car holds one day + one night driver. Offer cars with the chosen shift's
+  // slot open (plus, when editing, the car this driver already holds).
+  const shiftOpen = (v: VehicleRow, shift: string) =>
+    !v.retired && (shift === "night" ? v.night_open !== false : v.day_open !== false);
+  const freeVehicles = vehicles.filter((v) => shiftOpen(v, dShift));
+  const editVehicleOptions = (currentId: string, shift: string) =>
+    vehicles.filter((v) => shiftOpen(v, shift) || v.id === currentId);
 
   const shown = rows.filter((r) => {
     if (!q) return true;
@@ -356,7 +361,7 @@ export default function Drivers() {
               <label>Vehicle
                 <select value={edit.vehicle_id} onChange={(e) => setEdit({ ...edit, vehicle_id: e.target.value })}>
                   <option value="">Unassigned</option>
-                  {editVehicleOptions(edit.vehicle_id).map((v) => (<option key={v.id} value={v.id}>{v.number} · {v.model}</option>))}
+                  {editVehicleOptions(edit.vehicle_id, edit.shift_type).map((v) => (<option key={v.id} value={v.id}>{v.number} · {v.model}</option>))}
                 </select>
               </label>
               <label>Shift
