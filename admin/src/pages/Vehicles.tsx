@@ -3,7 +3,7 @@
 // are hidden unless the toggle is on.
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, VehicleRow } from "../api";
+import { api, VehicleRow, HubRow } from "../api";
 
 interface EditState {
   id: string;
@@ -11,15 +11,18 @@ interface EditState {
   model: string;
   current_soc: string;
   current_range_km: string;
+  hub_id: string;
 }
 
 export default function Vehicles() {
   const [rows, setRows] = useState<VehicleRow[]>([]);
+  const [hubs, setHubs] = useState<HubRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showRetired, setShowRetired] = useState(false);
   const [adding, setAdding] = useState(false);
   const [vNumber, setVNumber] = useState("");
   const [vModel, setVModel] = useState("Citroën ëC3");
+  const [vHub, setVHub] = useState("");
   const [edit, setEdit] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -27,8 +30,12 @@ export default function Vehicles() {
 
   const load = useCallback(async () => {
     try {
-      const v = await api.get<{ items: VehicleRow[] }>(`/admin/vehicles${showRetired ? "?include_retired=true" : ""}`);
+      const [v, h] = await Promise.all([
+        api.get<{ items: VehicleRow[] }>(`/admin/vehicles${showRetired ? "?include_retired=true" : ""}`),
+        api.get<{ items: HubRow[] }>("/admin/hubs"),
+      ]);
       setRows(v.items);
+      setHubs(h.items);
     } finally {
       setLoading(false);
     }
@@ -47,12 +54,13 @@ export default function Vehicles() {
     if (vNumber.trim().length < 3) return setErr("Enter a valid number plate.");
     setSaving(true);
     try {
-      await api.post("/admin/vehicles", { number: vNumber.trim(), model: vModel.trim() || "Citroën ëC3" });
-      setVNumber(""); setAdding(false);
+      await api.post("/admin/vehicles", { number: vNumber.trim(), model: vModel.trim() || "Citroën ëC3", hub_id: vHub || null });
+      setVNumber(""); setVHub(""); setAdding(false);
       await load();
       flash("Vehicle added.");
     } catch (e: any) {
-      setErr(e?.body?.detail === "vehicle_number_exists" ? "That number plate already exists." : "Could not add vehicle.");
+      const d = e?.body?.detail;
+      setErr(d === "vehicle_number_exists" ? "That number plate already exists." : d === "hub_full" ? "That hub is full." : "Could not add vehicle.");
     } finally {
       setSaving(false);
     }
@@ -69,12 +77,14 @@ export default function Vehicles() {
         model: edit.model.trim() || null,
         current_soc: edit.current_soc === "" ? null : Number(edit.current_soc),
         current_range_km: edit.current_range_km === "" ? null : Number(edit.current_range_km),
+        hub_id: edit.hub_id,
       });
       setEdit(null);
       await load();
       flash("Vehicle updated.");
     } catch (e: any) {
-      setErr(e?.body?.detail === "vehicle_number_exists" ? "That number plate already exists." : "Could not update vehicle.");
+      const d = e?.body?.detail;
+      setErr(d === "vehicle_number_exists" ? "That number plate already exists." : d === "hub_full" ? "That hub is full." : "Could not update vehicle.");
     } finally {
       setSaving(false);
     }
@@ -130,7 +140,18 @@ export default function Vehicles() {
             <label>Model
               <input value={vModel} onChange={(e) => setVModel(e.target.value)} />
             </label>
+            <label className="col-2">Hub
+              <select value={vHub} onChange={(e) => setVHub(e.target.value)}>
+                <option value="">Unassigned</option>
+                {hubs.map((h) => (
+                  <option key={h.id} value={h.id} disabled={h.seats_left <= 0}>
+                    {h.name} ({h.car_count}/{h.capacity}){h.seats_left <= 0 ? " — full" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+          {hubs.length === 0 ? <div className="muted-sm" style={{ marginBottom: 8 }}>No hubs yet — create one on the Hubs page, or leave unassigned.</div> : null}
           {err ? <div className="err">{err}</div> : null}
           <div className="form-actions">
             <button className="ghost" onClick={() => setAdding(false)} disabled={saving}>Cancel</button>
@@ -142,13 +163,13 @@ export default function Vehicles() {
       <div className="card" style={{ padding: 0, marginTop: 16 }}>
         <table className="data">
           <thead>
-            <tr><th>Plate</th><th>Model</th><th>SoC</th><th>Range</th><th>Assigned to</th><th></th></tr>
+            <tr><th>Plate</th><th>Model</th><th>Hub</th><th>SoC</th><th>Range</th><th>Assigned to</th><th></th></tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="empty">Loading…</td></tr>
+              <tr><td colSpan={7} className="empty">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={6} className="empty">No vehicles yet.</td></tr>
+              <tr><td colSpan={7} className="empty">No vehicles yet.</td></tr>
             ) : rows.map((v) => (
               <tr key={v.id} style={{ opacity: v.retired ? 0.55 : 1 }}>
                 <td style={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
@@ -156,6 +177,7 @@ export default function Vehicles() {
                   {v.retired ? <span className="tag muted" style={{ marginLeft: 6 }}>retired</span> : null}
                 </td>
                 <td>{v.model}</td>
+                <td>{v.hub_name ? v.hub_name : <span className="muted-sm">—</span>}</td>
                 <td>{v.current_soc != null ? `${v.current_soc}%` : "—"}</td>
                 <td>{v.current_range_km != null ? `${v.current_range_km} km` : "—"}</td>
                 <td>{v.assigned_driver ? v.assigned_driver : <span className="muted-sm">free</span>}</td>
@@ -168,6 +190,7 @@ export default function Vehicles() {
                         id: v.id, number: v.number, model: v.model,
                         current_soc: v.current_soc?.toString() ?? "",
                         current_range_km: v.current_range_km?.toString() ?? "",
+                        hub_id: v.hub_id ?? "",
                       })}>Edit</button>
                       <button className="ghost danger-ghost" onClick={() => retire(v)}>Retire</button>
                     </>
@@ -195,6 +218,16 @@ export default function Vehicles() {
               </label>
               <label>Range (km)
                 <input type="number" min={0} value={edit.current_range_km} onChange={(e) => setEdit({ ...edit, current_range_km: e.target.value })} />
+              </label>
+              <label className="col-2">Hub
+                <select value={edit.hub_id} onChange={(e) => setEdit({ ...edit, hub_id: e.target.value })}>
+                  <option value="">Unassigned</option>
+                  {hubs.map((h) => (
+                    <option key={h.id} value={h.id} disabled={h.seats_left <= 0 && h.id !== edit.hub_id}>
+                      {h.name} ({h.car_count}/{h.capacity})
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
             {err ? <div className="err">{err}</div> : null}

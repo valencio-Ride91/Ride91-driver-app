@@ -59,6 +59,20 @@ export interface VehicleRow {
   assigned: boolean;
   assigned_driver?: string | null;
   retired?: boolean;
+  hub_id?: string | null;
+  hub_name?: string | null;
+}
+
+export interface HubRow {
+  id: string;
+  name: string;
+  city: string | null;
+  capacity: number;
+  lat: number | null;
+  lng: number | null;
+  car_count: number;
+  seats_left: number;
+  created_at: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +331,7 @@ export interface RewardsRow {
   driver_id: string;
   name: string | null;
   phone: string | null;
+  hub_id: string | null;
   hub_name: string | null;
   yesterday_gross: number;
   week_gross: number;
@@ -327,12 +342,15 @@ export interface RewardsRow {
   q_driver_week: boolean;
 }
 
+export interface HubLeaders { top_car_day: string | null; top_car_week: string | null; top_driver_week: string | null }
+
 export interface RewardsResponse {
   items: RewardsRow[];
   count: number;
   week_start: string;
   days_remaining: number;
   share_rate: number;
+  hubs: Array<{ hub_id: string; hub_name: string | null; drivers: number; week_gross: number }>;
   totals: { yesterday_gross: number; week_gross: number };
   thresholds: {
     daily_target: number; top_car_day: number;
@@ -340,7 +358,7 @@ export interface RewardsResponse {
     week_driver_target: number; top_driver_week: number;
     days_required: number;
   };
-  leaders: { top_car_week: string | null; top_driver_week: string | null; top_car_day: string | null };
+  leaders_by_hub: Record<string, HubLeaders>;
 }
 
 export interface AdminUserRow {

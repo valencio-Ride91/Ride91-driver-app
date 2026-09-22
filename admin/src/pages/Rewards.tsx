@@ -33,7 +33,8 @@ export default function Rewards() {
     return (r.name ?? "").toLowerCase().includes(s) || (r.phone ?? "").toLowerCase().includes(s);
   });
   const th = data?.thresholds;
-  const leaders = data?.leaders;
+  const leadersByHub = data?.leaders_by_hub ?? {};
+  const leaderFor = (hubId: string | null) => (hubId ? leadersByHub[hubId] : undefined);
 
   const exportCsv = () => downloadCsv(
     `ride91-rewards-${data?.week_start ?? ""}.csv`,
@@ -81,16 +82,18 @@ export default function Rewards() {
               <tr><td colSpan={7} className="empty">Loading…</td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={7} className="empty">No drivers.</td></tr>
-            ) : rows.map((r) => (
+            ) : rows.map((r) => {
+              const L = leaderFor(r.hub_id);
+              return (
               <tr key={r.driver_id}>
                 <td>
                   <Link to={`/drivers/${r.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{r.name ?? r.driver_id.slice(0, 8)}</Link>
                   <div style={{ fontFamily: "ui-monospace, monospace", color: "var(--muted)", fontSize: 12 }}>{r.phone}</div>
                 </td>
-                <td>{r.hub_name ?? "—"}</td>
+                <td>{r.hub_name ?? <span className="muted-sm">no hub</span>}</td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
                   {fmtINR(r.yesterday_gross)}
-                  {leaders?.top_car_day === r.driver_id ? <span className="tag live" style={{ marginLeft: 6 }}>DAY</span> : null}
+                  {L?.top_car_day === r.driver_id ? <span className="tag live" style={{ marginLeft: 6 }}>DAY</span> : null}
                 </td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>{fmtINR(r.week_gross)}</td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtINR(r.driver_earnings)}</td>
@@ -99,17 +102,18 @@ export default function Rewards() {
                 </td>
                 <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
                   {r.q_daily ? <span className="tag ok" title="Hit daily target" style={{ marginRight: 4 }}>D</span> : null}
-                  {r.q_car_week ? <span className={`tag ${leaders?.top_car_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top car of week" style={{ marginRight: 4 }}>{leaders?.top_car_week === r.driver_id ? "★CAR" : "CAR"}</span> : null}
-                  {r.q_driver_week ? <span className={`tag ${leaders?.top_driver_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top driver of week">{leaders?.top_driver_week === r.driver_id ? "★DRV" : "DRV"}</span> : null}
+                  {r.q_car_week ? <span className={`tag ${L?.top_car_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top car of week (in hub)" style={{ marginRight: 4 }}>{L?.top_car_week === r.driver_id ? "★CAR" : "CAR"}</span> : null}
+                  {r.q_driver_week ? <span className={`tag ${L?.top_driver_week === r.driver_id ? "live" : "ok"}`} title="Qualifies: top driver of week (in hub)">{L?.top_driver_week === r.driver_id ? "★DRV" : "DRV"}</span> : null}
                   {!r.q_daily && !r.q_car_week && !r.q_driver_week ? <span className="muted-sm">—</span> : null}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
       <div className="muted-sm" style={{ marginTop: 10 }}>
-        ★ = current leader · CAR/DRV = qualifies for that weekly reward · D = hit yesterday's daily target. Rewards are additional to the 30% share.
+        ★ = current leader <strong>within that hub</strong> · CAR/DRV = qualifies for that weekly reward · D = hit yesterday's daily target. Rewards are decided per hub and are additional to the 30% share.
       </div>
     </div>
   );

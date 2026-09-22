@@ -334,6 +334,7 @@ class VehicleCreateIn(BaseModel):
     model: str = "Citroën ëC3"
     current_soc: Optional[int] = None
     current_range_km: Optional[int] = None
+    hub_id: Optional[str] = None               # the hub this car sits under
 
 
 class VehicleUpdateIn(BaseModel):
@@ -342,6 +343,23 @@ class VehicleUpdateIn(BaseModel):
     model: Optional[str] = None
     current_soc: Optional[int] = None
     current_range_km: Optional[int] = None
+    hub_id: Optional[str] = None
+
+
+class HubCreateIn(BaseModel):
+    name: str = Field(min_length=2)            # e.g. "Wakad Pune Hub"
+    city: Optional[str] = None
+    capacity: int = Field(default=12, ge=1, le=100)
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+
+class HubUpdateIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2)
+    city: Optional[str] = None
+    capacity: Optional[int] = Field(default=None, ge=1, le=100)
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 
 class DriverCreateIn(BaseModel):
@@ -1932,6 +1950,90 @@ async def admin_drivers(
     return {"items": out, "business_date": day_key, "count": len(out)}
 
 
+# ---- Hubs ------------------------------------------------------------------
+# A hub is a location (e.g. "Wakad Pune Hub") that holds up to `capacity` cars.
+# Each vehicle sits under one hub; weekly rewards are decided within a hub.
+async def _hub_out(h: Dict) -> Dict:
+    cars = await db.vehicles.count_documents(
+        {"hub_id": h["id"], "retired": {"$ne": True}})
+    return {
+        "id": h["id"], "name": h.get("name"), "city": h.get("city"),
+        "capacity": h.get("capacity", 12), "lat": h.get("lat"), "lng": h.get("lng"),
+        "car_count": cars, "seats_left": max(0, h.get("capacity", 12) - cars),
+        "created_at": h.get("created_at"),
+    }
+
+
+@api.get("/admin/hubs")
+async def admin_list_hubs(admin: Dict = Depends(get_admin)):
+    hubs = [h async for h in db.hubs.find({}, {"_id": 0}).sort("name", 1)]
+    items = [await _hub_out(h) for h in hubs]
+    return {"items": items, "count": len(items)}
+
+
+@api.post("/admin/hubs")
+async def admin_create_hub(body: HubCreateIn, admin: Dict = Depends(require_write)):
+    name = body.name.strip()
+    if await db.hubs.find_one({"name": name}, {"_id": 0, "id": 1}):
+        raise HTTPException(409, "hub_name_exists")
+    row = {
+        "id": str(uuid.uuid4()), "name": name, "city": (body.city or "").strip() or None,
+        "capacity": body.capacity, "lat": body.lat, "lng": body.lng,
+        "created_at": iso(now_utc()), "created_by": admin["username"],
+    }
+    await db.hubs.insert_one(row.copy())
+    await _audit(admin, "create_hub", row["id"], {"name": name})
+    return await _hub_out(row)
+
+
+@api.patch("/admin/hubs/{hub_id}")
+async def admin_update_hub(hub_id: str, body: HubUpdateIn, admin: Dict = Depends(require_write)):
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+    updates: Dict[str, Any] = {}
+    if body.name is not None:
+        nm = body.name.strip()
+        clash = await db.hubs.find_one({"name": nm, "id": {"$ne": hub_id}}, {"_id": 0, "id": 1})
+        if clash:
+            raise HTTPException(409, "hub_name_exists")
+        updates["name"] = nm
+    for f in ("city", "capacity", "lat", "lng"):
+        v = getattr(body, f)
+        if v is not None:
+            updates[f] = v.strip() if isinstance(v, str) else v
+    if updates:
+        await db.hubs.update_one({"id": hub_id}, {"$set": updates})
+        await _audit(admin, "update_hub", hub_id, {k: v for k, v in updates.items() if k != "lat" and k != "lng"})
+    return await _hub_out({**hub, **updates})
+
+
+@api.delete("/admin/hubs/{hub_id}")
+async def admin_delete_hub(hub_id: str, admin: Dict = Depends(require_write)):
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+    cars = await db.vehicles.count_documents({"hub_id": hub_id, "retired": {"$ne": True}})
+    if cars > 0:
+        raise HTTPException(409, "hub_has_cars")   # move cars out first
+    await db.hubs.delete_one({"id": hub_id})
+    await _audit(admin, "delete_hub", hub_id)
+    return {"ok": True, "id": hub_id, "deleted": True}
+
+
+async def _assign_vehicle_hub(vehicle_id: str, hub_id: Optional[str]) -> None:
+    """Validate a hub assignment and enforce its capacity. Raises HTTPException."""
+    if not hub_id:
+        return
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "capacity": 1})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+    current = await db.vehicles.count_documents(
+        {"hub_id": hub_id, "retired": {"$ne": True}, "id": {"$ne": vehicle_id}})
+    if current >= hub.get("capacity", 12):
+        raise HTTPException(409, "hub_full")
+
+
 # ---- Fleet onboarding: vehicles + drivers ---------------------------------
 @api.get("/admin/vehicles")
 async def admin_list_vehicles(
@@ -1947,10 +2049,13 @@ async def admin_list_vehicles(
         {"_id": 0, "vehicle_id": 1, "name": 1},
     ):
         holder[d["vehicle_id"]] = d.get("name")
+    hub_names = {h["id"]: h.get("name") async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})}
     for v in vehicles:
         v["assigned"] = v["id"] in holder
         v["assigned_driver"] = holder.get(v["id"])
         v["retired"] = bool(v.get("retired"))
+        v["hub_id"] = v.get("hub_id")
+        v["hub_name"] = hub_names.get(v.get("hub_id"))
     return {"items": vehicles, "count": len(vehicles)}
 
 
@@ -1959,12 +2064,15 @@ async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(requ
     number = body.number.strip().upper()
     if await db.vehicles.find_one({"number": number}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "vehicle_number_exists")
+    vid = str(uuid.uuid4())
+    await _assign_vehicle_hub(vid, body.hub_id)
     row = {
-        "id": str(uuid.uuid4()),
+        "id": vid,
         "number": number,
         "model": body.model,
         "current_soc": body.current_soc,
         "current_range_km": body.current_range_km,
+        "hub_id": body.hub_id,
         "created_by": admin["username"],
         "created_at": iso(now_utc()),
     }
@@ -1994,6 +2102,12 @@ async def admin_update_vehicle(
         val = getattr(body, field)
         if val is not None:
             updates[field] = val
+    if body.hub_id is not None:
+        # "" clears the hub; any other value must exist and have room.
+        hub_id = body.hub_id or None
+        if hub_id:
+            await _assign_vehicle_hub(vehicle_id, hub_id)
+        updates["hub_id"] = hub_id
     if not updates:
         return {"ok": True, "unchanged": True}
     updates["updated_at"] = iso(now_utc())
@@ -3097,17 +3211,23 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     ]):
         yday[r["_id"]] = float(r.get("g") or 0)
 
+    # A driver's hub is the hub of the car they hold. Build vehicle->hub and
+    # hub->name maps once.
+    veh_hub = {v["id"]: v.get("hub_id") async for v in db.vehicles.find({}, {"_id": 0, "id": 1, "hub_id": 1})}
+    hub_name = {h["id"]: h.get("name") async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})}
+
     drivers = [d async for d in db.drivers.find(
-        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "hub_name": 1})]
+        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1})]
     rows: List[Dict[str, Any]] = []
     for d in drivers:
         w = week.get(d["id"], {"gross": 0.0, "days": 0})
         week_gross = round(w["gross"], 2)
         driver_earnings = round(week_gross * rate, 2)
         y_gross = round(yday.get(d["id"], 0.0), 2)
+        hub_id = veh_hub.get(d.get("vehicle_id"))
         rows.append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
-            "hub_name": d.get("hub_name"),
+            "hub_id": hub_id, "hub_name": hub_name.get(hub_id),
             "yesterday_gross": y_gross,
             "week_gross": week_gross,
             "driver_earnings": driver_earnings,
@@ -3117,16 +3237,39 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
             "q_driver_week": driver_earnings >= REWARD_WEEK_DRIVER_TARGET,
         })
     rows.sort(key=lambda r: r["week_gross"], reverse=True)
-    # Current leaders (highest, among those meeting the qualifying minimums).
-    car_leaders = [r for r in rows if r["q_car_week"]]
-    drv_sorted = sorted(rows, key=lambda r: r["driver_earnings"], reverse=True)
-    drv_leaders = [r for r in drv_sorted if r["q_driver_week"]]
+
+    # Rewards are decided WITHIN each hub: the best qualifying driver at that hub
+    # wins. Compute leaders per hub_id (None = drivers with no hub).
+    by_hub: Dict[Optional[str], List[Dict]] = {}
+    for r in rows:
+        by_hub.setdefault(r["hub_id"], []).append(r)
+    leaders_by_hub: Dict[str, Dict[str, Optional[str]]] = {}
+    for hid, hrows in by_hub.items():
+        if hid is None:
+            continue
+        day_q = [r for r in hrows if r["q_daily"]]
+        car_q = [r for r in hrows if r["q_car_week"]]
+        drv_q = [r for r in hrows if r["q_driver_week"]]
+        leaders_by_hub[hid] = {
+            "top_car_day": max(day_q, key=lambda r: r["yesterday_gross"])["driver_id"] if day_q else None,
+            "top_car_week": max(car_q, key=lambda r: r["week_gross"])["driver_id"] if car_q else None,
+            "top_driver_week": max(drv_q, key=lambda r: r["driver_earnings"])["driver_id"] if drv_q else None,
+        }
+    hubs_summary = [
+        {"hub_id": hid, "hub_name": hub_name.get(hid),
+         "drivers": len(hrows),
+         "week_gross": round(sum(r["week_gross"] for r in hrows), 2)}
+        for hid, hrows in by_hub.items() if hid is not None
+    ]
+    hubs_summary.sort(key=lambda h: h["week_gross"], reverse=True)
+
     return {
         "items": rows,
         "count": len(rows),
         "week_start": mon_bd,
         "days_remaining": days_remaining,
         "share_rate": rate,
+        "hubs": hubs_summary,
         "totals": {
             "yesterday_gross": round(sum(r["yesterday_gross"] for r in rows), 2),
             "week_gross": round(sum(r["week_gross"] for r in rows), 2),
@@ -3137,12 +3280,7 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
             "week_driver_target": REWARD_WEEK_DRIVER_TARGET, "top_driver_week": REWARD_TOP_DRIVER_WEEK,
             "days_required": REWARD_DAYS_REQUIRED,
         },
-        "leaders": {
-            "top_car_week": car_leaders[0]["driver_id"] if car_leaders else None,
-            "top_driver_week": drv_leaders[0]["driver_id"] if drv_leaders else None,
-            "top_car_day": max(rows, key=lambda r: r["yesterday_gross"])["driver_id"]
-                if rows and max(r["yesterday_gross"] for r in rows) >= REWARD_DAILY_TARGET else None,
-        },
+        "leaders_by_hub": leaders_by_hub,
     }
 
 
@@ -5208,6 +5346,8 @@ async def _on_startup() -> None:
     await db.admin_audit.create_index([("action", 1), ("at", -1)])
     await db.notifications.create_index([("driver_id", 1), ("created_at", -1)])
     await db.notifications.create_index([("direction", 1), ("read", 1), ("created_at", -1)])
+    await db.hubs.create_index([("name", 1)], unique=True)
+    await db.vehicles.create_index([("hub_id", 1)])
     await _seed_admin_owner()
     await load_settings()
     await _seed_if_empty()
