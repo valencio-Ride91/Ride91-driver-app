@@ -1714,9 +1714,14 @@ async def admin_login(body: AdminLoginIn):
         }
     )
     await _audit({"username": body.username, "role": user.get("role")}, "login")
+    hub_name = None
+    if user.get("hub_id"):
+        h = await db.hubs.find_one({"id": user["hub_id"]}, {"_id": 0, "name": 1})
+        hub_name = h.get("name") if h else None
     return {
         "token": token, "username": body.username,
         "role": user.get("role", "owner"), "hub_id": user.get("hub_id"),
+        "hub_name": hub_name,
         "hours_valid": ADMIN_SESSION_HOURS,
     }
 
