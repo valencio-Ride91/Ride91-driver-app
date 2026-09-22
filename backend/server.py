@@ -75,6 +75,27 @@ ALL_STATES = PLATFORMS | NON_PLATFORM_STATES | DUTY_LAYER | PLATFORM_LAYER
 CASH_LIMIT = 1500  # ₹ — default; overridable via the settings doc
 DRIVER_SHARE = 0.30  # default; overridable via the settings doc
 
+# --- Reward defaults. All overridable from the settings doc; the reward
+# endpoints read the live values via get_setting(). Weekly rewards are ON TOP
+# of the 30% share, measured on gross (the fleet statement number). ---
+REWARD_DAILY_TARGET = 4000            # min daily gross to qualify (top car of day)
+REWARD_TOP_CAR_DAY = 300
+REWARD_WEEK_CAR_TARGET = 28000        # min weekly gross (top car of week)
+REWARD_TOP_CAR_WEEK = 1000
+REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver of week)
+REWARD_TOP_DRIVER_WEEK = 1000
+REWARD_DAYS_REQUIRED = 7
+# Loyalty (tenure) milestones — forfeit-if-you-leave vesting; manual payout.
+LOYALTY_MILESTONES = [
+    {"key": "m3", "label": "3 months", "days": 90,  "reward": 2000},
+    {"key": "m6", "label": "6 months", "days": 180, "reward": 3000},
+    {"key": "y1", "label": "1 year",   "days": 365, "reward": 8000},
+    {"key": "y2", "label": "2 years",  "days": 730, "reward": 15000},
+]
+# Yearly performance, decided per hub over the calendar year to date.
+YEARLY_TOP_DRIVER = 50000             # top driver of the year, per hub (on gross)
+YEARLY_TOP_CAR = 40000                # top car of the year, per hub (combined gross)
+
 # ---------------------------------------------------------------------------
 # Runtime settings — a single `settings` doc (id="global") overlays these
 # defaults. Cached in memory and refreshed on startup and after every save, so
@@ -84,12 +105,38 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "cash_limit": CASH_LIMIT,
     "driver_share": DRIVER_SHARE,
     "hubs": [],                       # list of {name, lat, lng}
+    # Weekly reward thresholds + bonuses.
+    "reward_daily_target": REWARD_DAILY_TARGET,
+    "reward_top_car_day": REWARD_TOP_CAR_DAY,
+    "reward_week_car_target": REWARD_WEEK_CAR_TARGET,
+    "reward_top_car_week": REWARD_TOP_CAR_WEEK,
+    "reward_week_driver_target": REWARD_WEEK_DRIVER_TARGET,
+    "reward_top_driver_week": REWARD_TOP_DRIVER_WEEK,
+    "reward_days_required": REWARD_DAYS_REQUIRED,
+    # Loyalty (list of {key,label,days,reward}) + yearly bonuses.
+    "loyalty_milestones": LOYALTY_MILESTONES,
+    "yearly_top_driver": YEARLY_TOP_DRIVER,
+    "yearly_top_car": YEARLY_TOP_CAR,
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
 
 def get_setting(key: str, default: Any = None) -> Any:
     return _SETTINGS_CACHE.get(key, SETTINGS_DEFAULTS.get(key, default))
+
+
+def _weekly_reward_cfg():
+    """The live weekly-reward thresholds/bonuses, in the fixed order the reward
+    endpoints unpack them. Reads the settings doc (falls back to defaults)."""
+    return (
+        get_setting("reward_daily_target"),
+        get_setting("reward_top_car_day"),
+        get_setting("reward_week_car_target"),
+        get_setting("reward_top_car_week"),
+        get_setting("reward_week_driver_target"),
+        get_setting("reward_top_driver_week"),
+        get_setting("reward_days_required"),
+    )
 
 
 async def load_settings() -> Dict[str, Any]:
@@ -706,6 +753,18 @@ class SettingsIn(BaseModel):
     cash_limit: Optional[int] = Field(default=None, ge=0)
     driver_share: Optional[float] = Field(default=None, ge=0, le=1)
     hubs: Optional[List[Dict[str, Any]]] = None
+    # Weekly reward thresholds + bonuses (all ₹, days as an int count).
+    reward_daily_target: Optional[int] = Field(default=None, ge=0)
+    reward_top_car_day: Optional[int] = Field(default=None, ge=0)
+    reward_week_car_target: Optional[int] = Field(default=None, ge=0)
+    reward_top_car_week: Optional[int] = Field(default=None, ge=0)
+    reward_week_driver_target: Optional[int] = Field(default=None, ge=0)
+    reward_top_driver_week: Optional[int] = Field(default=None, ge=0)
+    reward_days_required: Optional[int] = Field(default=None, ge=1, le=7)
+    # Loyalty milestones [{key,label,days,reward}] + yearly bonuses.
+    loyalty_milestones: Optional[List[Dict[str, Any]]] = None
+    yearly_top_driver: Optional[int] = Field(default=None, ge=0)
+    yearly_top_car: Optional[int] = Field(default=None, ge=0)
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -1865,14 +1924,47 @@ async def admin_delete_user(user_id: str, admin: Dict = Depends(require_owner)):
 
 
 # ---- Settings (owner only) -------------------------------------------------
-@api.get("/admin/settings")
-async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
-    return {
+# Reward keys the settings screen edits (beyond cash_limit/driver_share/hubs).
+_REWARD_SETTING_KEYS = (
+    "reward_daily_target", "reward_top_car_day", "reward_week_car_target",
+    "reward_top_car_week", "reward_week_driver_target", "reward_top_driver_week",
+    "reward_days_required", "loyalty_milestones", "yearly_top_driver", "yearly_top_car",
+)
+
+
+def _settings_out() -> Dict[str, Any]:
+    out = {
         "cash_limit": get_setting("cash_limit", CASH_LIMIT),
         "driver_share": get_setting("driver_share", DRIVER_SHARE),
         "hubs": get_setting("hubs", []),
-        "business_day_cutoff_ist": "04:00",   # read-only: embedded in day math
     }
+    for k in _REWARD_SETTING_KEYS:
+        out[k] = get_setting(k)
+    return out
+
+
+@api.get("/admin/settings")
+async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
+    return {**_settings_out(), "business_day_cutoff_ist": "04:00"}   # cutoff is read-only
+
+
+def _clean_milestones(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Validate/normalise a loyalty_milestones payload from the admin."""
+    out: List[Dict[str, Any]] = []
+    for i, m in enumerate(rows):
+        try:
+            days = int(m["days"]); reward = int(m["reward"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(422, "bad_milestone")
+        if days < 1 or reward < 0:
+            raise HTTPException(422, "bad_milestone")
+        out.append({
+            "key": str(m.get("key") or f"m{i}"),
+            "label": str(m.get("label") or f"{days} days"),
+            "days": days, "reward": reward,
+        })
+    out.sort(key=lambda m: m["days"])
+    return out
 
 
 @api.put("/admin/settings")
@@ -1884,18 +1976,22 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
         updates["driver_share"] = body.driver_share
     if body.hubs is not None:
         updates["hubs"] = body.hubs
+    # Weekly + yearly reward numbers.
+    for k in ("reward_daily_target", "reward_top_car_day", "reward_week_car_target",
+              "reward_top_car_week", "reward_week_driver_target", "reward_top_driver_week",
+              "reward_days_required", "yearly_top_driver", "yearly_top_car"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if body.loyalty_milestones is not None:
+        updates["loyalty_milestones"] = _clean_milestones(body.loyalty_milestones)
     if updates:
         updates["updated_at"] = iso(now_utc())
         updates["updated_by"] = admin["username"]
         await db.settings.update_one({"id": "global"}, {"$set": updates}, upsert=True)
         await load_settings()
-        await _audit(admin, "update_settings", "", {k: v for k, v in updates.items() if k in ("cash_limit", "driver_share")})
-    return {
-        "ok": True,
-        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
-        "driver_share": get_setting("driver_share", DRIVER_SHARE),
-        "hubs": get_setting("hubs", []),
-    }
+        await _audit(admin, "update_settings", "", {k: v for k, v in updates.items() if k not in ("updated_at", "updated_by")})
+    return {"ok": True, **_settings_out()}
 
 
 # ---- Audit log (manager+) --------------------------------------------------
@@ -3383,6 +3479,9 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     (day+night gross combined → top car of day/week) and a DRIVERS board
     (individual gross → top driver of week). Winners are the ★ per hub; ops
     pays them (rewards are on top of the 30% share)."""
+    (REWARD_DAILY_TARGET, REWARD_TOP_CAR_DAY, REWARD_WEEK_CAR_TARGET,
+     REWARD_TOP_CAR_WEEK, REWARD_WEEK_DRIVER_TARGET, REWARD_TOP_DRIVER_WEEK,
+     REWARD_DAYS_REQUIRED) = _weekly_reward_cfg()
     today_bd = business_date_now()
     today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
     y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -3497,6 +3596,9 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
     (top driver + top car of the year, on cumulative gross) and a LOYALTY roster
     (each driver's tenure, next milestone, and vested total). Winners/vested
     amounts are paid manually by ops. Scoped to a hub_manager's own hub."""
+    LOYALTY_MILESTONES = get_setting("loyalty_milestones")
+    YEARLY_TOP_DRIVER = get_setting("yearly_top_driver")
+    YEARLY_TOP_CAR = get_setting("yearly_top_car")
     scope = hub_scope(admin)
     today_bd = business_date_now()
     year_start, next_year, year_label = _year_bounds(today_bd)
@@ -3971,32 +4073,8 @@ async def money_yesterday(driver: Dict = Depends(get_driver)):
     }
 
 
-# ---------------------------------------------------------------------------
-# DRIVER WEEKLY REWARD SYSTEM — motivation. Rewards are ON TOP of the 30%
-# share. Thresholds are on gross earnings (the fleet statement number).
-# ---------------------------------------------------------------------------
-REWARD_DAILY_TARGET = 4000            # min daily gross to qualify (top car of day)
-REWARD_TOP_CAR_DAY = 300
-REWARD_WEEK_CAR_TARGET = 28000        # min weekly gross (top car of week)
-REWARD_TOP_CAR_WEEK = 1000
-REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver of week)
-REWARD_TOP_DRIVER_WEEK = 1000
-REWARD_DAYS_REQUIRED = 7
-
-# --- Loyalty (tenure) milestones: paid for staying with the fleet. Vesting is
-# forfeit-if-you-leave — a milestone becomes claimable only when the driver
-# reaches that tenure WHILE still active; leaving forfeits everything not yet
-# reached. Payout is manual, by ops. ---
-LOYALTY_MILESTONES = [
-    {"key": "m3", "label": "3 months", "days": 90,  "reward": 2000},
-    {"key": "m6", "label": "6 months", "days": 180, "reward": 3000},
-    {"key": "y1", "label": "1 year",   "days": 365, "reward": 8000},
-    {"key": "y2", "label": "2 years",  "days": 730, "reward": 15000},
-]
-# --- Yearly performance, decided per hub (like the weekly boards but over the
-# calendar year to date). One winner each; manual payout. ---
-YEARLY_TOP_DRIVER = 50000             # top driver of the year, per hub (on gross)
-YEARLY_TOP_CAR = 40000                # top car of the year, per hub (combined gross)
+# (Reward thresholds + loyalty/yearly constants live near the top of the file,
+# above SETTINGS_DEFAULTS, so they can be overridden from the settings doc.)
 
 
 def _tenure_days(driver: Dict) -> Optional[int]:
@@ -4016,6 +4094,7 @@ def _loyalty_state(driver: Dict) -> Dict[str, Any]:
     state, the next milestone with days remaining, and the vested total.
     A milestone vests only while the driver is active — leaving forfeits the
     rest (forfeit-if-you-leave)."""
+    LOYALTY_MILESTONES = get_setting("loyalty_milestones")
     tenure = _tenure_days(driver)
     active = driver.get("active", True) and not driver.get("archived")
     ms: List[Dict[str, Any]] = []
@@ -4070,6 +4149,9 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
     driver's 30% share; this only reports how close the driver is to each
     qualifying threshold — the actual top-car / top-driver winner is decided by
     ops across the hub."""
+    (REWARD_DAILY_TARGET, REWARD_TOP_CAR_DAY, REWARD_WEEK_CAR_TARGET,
+     REWARD_TOP_CAR_WEEK, REWARD_WEEK_DRIVER_TARGET, REWARD_TOP_DRIVER_WEEK,
+     REWARD_DAYS_REQUIRED) = _weekly_reward_cfg()
     today_bd = business_date_now()
     today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
     y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -4142,6 +4224,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     """The driver's loyalty (tenure) standing plus where they sit in this
     year's hub race. Loyalty vests only while active — leaving forfeits what
     hasn't been reached yet. Yearly winners are decided per hub by ops."""
+    YEARLY_TOP_DRIVER = get_setting("yearly_top_driver")
     loyalty = _loyalty_state(driver)
 
     today_bd = business_date_now()

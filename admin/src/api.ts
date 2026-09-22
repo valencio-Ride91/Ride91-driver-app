@@ -440,6 +440,18 @@ export interface SettingsData {
   driver_share: number;
   hubs: Array<{ name: string; lat?: number; lng?: number }>;
   business_day_cutoff_ist?: string;
+  // Weekly reward thresholds + bonuses.
+  reward_daily_target: number;
+  reward_top_car_day: number;
+  reward_week_car_target: number;
+  reward_top_car_week: number;
+  reward_week_driver_target: number;
+  reward_top_driver_week: number;
+  reward_days_required: number;
+  // Loyalty milestones + yearly bonuses.
+  loyalty_milestones: Array<{ key: string; label: string; days: number; reward: number }>;
+  yearly_top_driver: number;
+  yearly_top_car: number;
 }
 
 export interface AuditRow {
