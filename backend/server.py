@@ -23,7 +23,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -3491,6 +3491,100 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     }
 
 
+@api.get("/admin/loyalty")
+async def admin_loyalty(admin: Dict = Depends(get_admin)):
+    """Loyalty + yearly standings, grouped by hub. Each hub shows a YEARLY board
+    (top driver + top car of the year, on cumulative gross) and a LOYALTY roster
+    (each driver's tenure, next milestone, and vested total). Winners/vested
+    amounts are paid manually by ops. Scoped to a hub_manager's own hub."""
+    scope = hub_scope(admin)
+    today_bd = business_date_now()
+    year_start, next_year, year_label = _year_bounds(today_bd)
+    ygross = await _yearly_gross(year_start, next_year)
+
+    veh_q: Dict[str, Any] = {"retired": {"$ne": True}}
+    hub_q: Dict[str, Any] = {}
+    if scope:
+        veh_q["hub_id"] = scope
+        hub_q["id"] = scope
+    vehicles = {v["id"]: v async for v in db.vehicles.find(
+        veh_q, {"_id": 0, "id": 1, "number": 1, "hub_id": 1})}
+    hubs = [h async for h in db.hubs.find(hub_q, {"_id": 0, "id": 1, "name": 1})]
+    drivers = [d async for d in db.drivers.find(
+        {"archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1,
+         "shift_type": 1, "created_at": 1, "joined_at": 1, "active": 1, "archived": 1})]
+    if scope:
+        drivers = [d for d in drivers if d.get("hub_id") == scope or d.get("vehicle_id") in vehicles]
+
+    UNASSIGNED = "_none"
+    out_hubs: Dict[str, Dict[str, Any]] = {
+        h["id"]: {"hub_id": h["id"], "hub_name": h.get("name"), "drivers": [], "cars": []} for h in hubs
+    }
+    out_hubs[UNASSIGNED] = {"hub_id": None, "hub_name": None, "drivers": [], "cars": []}
+
+    def bucket(d) -> str:
+        hid = d.get("hub_id") or vehicles.get(d.get("vehicle_id"), {}).get("hub_id")
+        return hid if hid in out_hubs else UNASSIGNED
+
+    # ---- Drivers: year gross + loyalty ----
+    for d in drivers:
+        hb = out_hubs[bucket(d)]
+        ly = _loyalty_state(d)
+        hb["drivers"].append({
+            "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+            "shift": d.get("shift_type", "day"),
+            "year_gross": round(ygross.get(d["id"], 0.0), 2),
+            "tenure_days": ly["tenure_days"],
+            "next_milestone": ly["next"],
+            "vested_total": ly["vested_total"],
+            "milestones": ly["milestones"],
+        })
+
+    # ---- Cars: combine day + night year gross ----
+    cars: Dict[str, Dict[str, Any]] = {}
+    for d in drivers:
+        vid = d.get("vehicle_id")
+        if not vid or vid not in vehicles:
+            continue
+        c = cars.setdefault(vid, {
+            "vehicle_id": vid, "number": vehicles[vid].get("number"),
+            "hub_id": vehicles[vid].get("hub_id"), "year_gross": 0.0, "drivers": [],
+        })
+        c["year_gross"] += ygross.get(d["id"], 0.0)
+        c["drivers"].append({"driver_id": d["id"], "name": d.get("name"), "shift": d.get("shift_type", "day")})
+    for c in cars.values():
+        hid = c["hub_id"] if c["hub_id"] in out_hubs else UNASSIGNED
+        out_hubs[hid]["cars"].append({
+            "vehicle_id": c["vehicle_id"], "number": c["number"],
+            "year_gross": round(c["year_gross"], 2), "drivers": c["drivers"],
+        })
+
+    # ---- Rank + mark ★ per hub ----
+    hubs_out: List[Dict[str, Any]] = []
+    for hb in out_hubs.values():
+        drvs, crs = hb["drivers"], hb["cars"]
+        drvs.sort(key=lambda d: d["year_gross"], reverse=True)
+        crs.sort(key=lambda c: c["year_gross"], reverse=True)
+        top_drv = drvs[0]["driver_id"] if drvs and drvs[0]["year_gross"] > 0 else None
+        top_car = crs[0]["vehicle_id"] if crs and crs[0]["year_gross"] > 0 else None
+        for d in drvs:
+            d["is_top_driver_year"] = d["driver_id"] == top_drv
+        for c in crs:
+            c["is_top_car_year"] = c["vehicle_id"] == top_car
+        if drvs or crs:
+            hb["year_gross"] = round(sum(c["year_gross"] for c in crs), 2)
+            hubs_out.append(hb)
+    hubs_out.sort(key=lambda h: (h["hub_id"] is None, -h.get("year_gross", 0)))
+
+    return {
+        "year": year_label,
+        "hubs": hubs_out,
+        "milestones": LOYALTY_MILESTONES,
+        "thresholds": {"top_driver_year": YEARLY_TOP_DRIVER, "top_car_year": YEARLY_TOP_CAR},
+    }
+
+
 # ---------------------------------------------------------------------------
 # BOOKINGS (admin) — map-free scheduled rides
 # ---------------------------------------------------------------------------
@@ -3889,6 +3983,86 @@ REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver o
 REWARD_TOP_DRIVER_WEEK = 1000
 REWARD_DAYS_REQUIRED = 7
 
+# --- Loyalty (tenure) milestones: paid for staying with the fleet. Vesting is
+# forfeit-if-you-leave — a milestone becomes claimable only when the driver
+# reaches that tenure WHILE still active; leaving forfeits everything not yet
+# reached. Payout is manual, by ops. ---
+LOYALTY_MILESTONES = [
+    {"key": "m3", "label": "3 months", "days": 90,  "reward": 2000},
+    {"key": "m6", "label": "6 months", "days": 180, "reward": 3000},
+    {"key": "y1", "label": "1 year",   "days": 365, "reward": 8000},
+    {"key": "y2", "label": "2 years",  "days": 730, "reward": 15000},
+]
+# --- Yearly performance, decided per hub (like the weekly boards but over the
+# calendar year to date). One winner each; manual payout. ---
+YEARLY_TOP_DRIVER = 50000             # top driver of the year, per hub (on gross)
+YEARLY_TOP_CAR = 40000                # top car of the year, per hub (combined gross)
+
+
+def _tenure_days(driver: Dict) -> Optional[int]:
+    """Whole days since the driver joined (created_at). None if unknown."""
+    raw = driver.get("joined_at") or driver.get("created_at")
+    if not raw:
+        return None
+    try:
+        joined = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, (now_utc() - joined).days)
+
+
+def _loyalty_state(driver: Dict) -> Dict[str, Any]:
+    """A driver's loyalty standing: tenure, each milestone's reached/vested
+    state, the next milestone with days remaining, and the vested total.
+    A milestone vests only while the driver is active — leaving forfeits the
+    rest (forfeit-if-you-leave)."""
+    tenure = _tenure_days(driver)
+    active = driver.get("active", True) and not driver.get("archived")
+    ms: List[Dict[str, Any]] = []
+    vested_total = 0
+    nxt = None
+    for m in LOYALTY_MILESTONES:
+        reached = tenure is not None and tenure >= m["days"]
+        vested = reached and active            # forfeit-if-you-leave
+        if vested:
+            vested_total += m["reward"]
+        if not reached and nxt is None and tenure is not None:
+            nxt = {
+                "key": m["key"], "label": m["label"], "reward": m["reward"],
+                "days": m["days"], "days_remaining": m["days"] - tenure,
+                "progress": round(min(1.0, tenure / m["days"]), 4) if m["days"] else 0.0,
+            }
+        ms.append({
+            "key": m["key"], "label": m["label"], "reward": m["reward"],
+            "days": m["days"], "reached": reached, "vested": vested,
+            "forfeited": reached and not active,
+        })
+    return {
+        "tenure_days": tenure,
+        "active": active,
+        "milestones": ms,
+        "next": nxt,
+        "vested_total": vested_total,
+    }
+
+
+def _year_bounds(today_bd: str) -> Tuple[str, str, str]:
+    """(year_start_bd, next_year_start_bd, year_label) for the business date's
+    calendar year, e.g. ('2026-01-01', '2027-01-01', '2026')."""
+    y = int(today_bd[:4])
+    return f"{y}-01-01", f"{y + 1}-01-01", str(y)
+
+
+async def _yearly_gross(year_start: str, next_year: str) -> Dict[str, float]:
+    """Per-driver cumulative gross across the calendar year to date."""
+    out: Dict[str, float] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"business_date": {"$gte": year_start, "$lt": next_year}}},
+        {"$group": {"_id": "$driver_id", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        out[r["_id"]] = float(r.get("g") or 0)
+    return out
+
 
 @api.get("/money/rewards")
 async def money_rewards(driver: Dict = Depends(get_driver)):
@@ -3959,6 +4133,47 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
             "qualified": driver_week >= REWARD_WEEK_DRIVER_TARGET,
             "progress": pct(driver_week, REWARD_WEEK_DRIVER_TARGET),
             "reward": REWARD_TOP_DRIVER_WEEK,
+        },
+    }
+
+
+@api.get("/money/loyalty")
+async def money_loyalty(driver: Dict = Depends(get_driver)):
+    """The driver's loyalty (tenure) standing plus where they sit in this
+    year's hub race. Loyalty vests only while active — leaving forfeits what
+    hasn't been reached yet. Yearly winners are decided per hub by ops."""
+    loyalty = _loyalty_state(driver)
+
+    today_bd = business_date_now()
+    year_start, next_year, year_label = _year_bounds(today_bd)
+    ygross = await _yearly_gross(year_start, next_year)
+    my_year = round(ygross.get(driver["id"], 0.0), 2)
+
+    # Rank within the driver's hub (by year gross) so they see how close #1 is.
+    hub_id = driver.get("hub_id")
+    peers = []
+    if hub_id:
+        vids = {v["id"] async for v in db.vehicles.find({"hub_id": hub_id}, {"_id": 0, "id": 1})}
+        async for d in db.drivers.find(
+            {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1}
+        ):
+            if d.get("hub_id") == hub_id or d.get("vehicle_id") in vids:
+                peers.append(ygross.get(d["id"], 0.0))
+    peers_sorted = sorted(peers, reverse=True)
+    rank = (peers_sorted.index(my_year) + 1) if my_year in peers_sorted else None
+    leader = peers_sorted[0] if peers_sorted else my_year
+
+    return {
+        "year": year_label,
+        "loyalty": loyalty,
+        "yearly": {
+            "label": "Top driver of the year",
+            "value": my_year,
+            "hub_leader": round(leader, 2),
+            "rank": rank,
+            "of": len(peers_sorted),
+            "gap_to_leader": round(max(0.0, leader - my_year), 2),
+            "reward": YEARLY_TOP_DRIVER,
         },
     }
 

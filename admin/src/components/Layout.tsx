@@ -14,6 +14,7 @@ const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?
   { to: "/hubs", label: "Hubs", hub: true },
   { to: "/cash", label: "Cash" },
   { to: "/rewards", label: "Earnings & rewards", hub: true },
+  { to: "/loyalty", label: "Loyalty & yearly", hub: true },
   { to: "/requests", label: "Requests" },
   { to: "/live-map", label: "Live map" },
   { to: "/review/captures", label: "Capture reviews" },

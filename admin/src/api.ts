@@ -377,6 +377,52 @@ export interface RewardsResponse {
   };
 }
 
+export interface LoyaltyMilestone {
+  key: string;
+  label: string;
+  reward: number;
+  days: number;
+  reached: boolean;
+  vested: boolean;
+  forfeited: boolean;
+}
+
+export interface LoyaltyDriver {
+  driver_id: string;
+  name: string | null;
+  phone: string | null;
+  shift: string;
+  year_gross: number;
+  tenure_days: number | null;
+  next_milestone: { key: string; label: string; reward: number; days: number; days_remaining: number; progress: number } | null;
+  vested_total: number;
+  milestones: LoyaltyMilestone[];
+  is_top_driver_year?: boolean;
+}
+
+export interface LoyaltyCar {
+  vehicle_id: string;
+  number: string | null;
+  year_gross: number;
+  drivers: Array<{ driver_id: string; name: string | null; shift: string }>;
+  is_top_car_year?: boolean;
+}
+
+export interface LoyaltyHub {
+  hub_id: string | null;
+  hub_name: string | null;
+  year_gross?: number;
+  drivers: LoyaltyDriver[];
+  cars: LoyaltyCar[];
+}
+
+export interface LoyaltyResponse {
+  year: string;
+  hubs: LoyaltyHub[];
+  milestones: Array<{ key: string; label: string; reward: number; days: number }>;
+  thresholds: { top_driver_year: number; top_car_year: number };
+}
+
 export interface AdminUserRow {
   id: string;
   username: string;

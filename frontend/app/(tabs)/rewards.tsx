@@ -26,15 +26,42 @@ interface Rewards {
   top_car_week: RewardTier;
   top_driver_week: RewardTier;
 }
+interface LoyaltyMilestone { key: string; label: string; reward: number; days: number; reached: boolean; vested: boolean; forfeited: boolean; }
+interface Loyalty {
+  year: string;
+  loyalty: {
+    tenure_days: number | null;
+    active: boolean;
+    milestones: LoyaltyMilestone[];
+    next: { key: string; label: string; reward: number; days: number; days_remaining: number; progress: number } | null;
+    vested_total: number;
+  };
+  yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
+}
+
+function tenureText(days: number | null): string {
+  if (days == null) return "—";
+  if (days < 60) return `${days} days`;
+  if (days < 365) return `${Math.floor(days / 30)} months`;
+  const y = Math.floor(days / 365);
+  const mo = Math.floor((days % 365) / 30);
+  return mo ? `${y}y ${mo}mo` : `${y} year${y > 1 ? "s" : ""}`;
+}
 
 export default function RewardsTab() {
   const { t } = useI18n();
   const [rewards, setRewards] = useState<Rewards | null>(null);
+  const [loyalty, setLoyalty] = useState<Loyalty | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setRewards(await api.get<Rewards>("/money/rewards"));
+      const [r, l] = await Promise.all([
+        api.get<Rewards>("/money/rewards"),
+        api.get<Loyalty>("/money/loyalty").catch(() => null),
+      ]);
+      setRewards(r);
+      if (l) setLoyalty(l);
     } catch {
       // keep whatever we had
     }
@@ -82,6 +109,68 @@ export default function RewardsTab() {
             <Text style={styles.hint}>Loading…</Text>
           )}
         </Card>
+
+        {loyalty ? (
+          <Card testID="rewards-loyalty-card" style={{ marginTop: spacing.md }}>
+            <View style={styles.head}>
+              <Text style={styles.cardTitle}>Loyalty 🎖️</Text>
+              <Text style={styles.hint}>{tenureText(loyalty.loyalty.tenure_days)} with Ride91</Text>
+            </View>
+            {loyalty.loyalty.vested_total > 0 ? (
+              <View style={styles.daysRow}>
+                <Text style={styles.daysLabel}>Earned so far</Text>
+                <Text style={[styles.daysValue, { color: colors.live }]}>{formatINR(loyalty.loyalty.vested_total)}</Text>
+              </View>
+            ) : null}
+            {loyalty.loyalty.next ? (
+              <View style={styles.reward}>
+                <View style={styles.rewardHead}>
+                  <Text style={styles.rewardLabel}>Next: {loyalty.loyalty.next.label}</Text>
+                  <Text style={styles.rewardAmount}>+{formatINR(loyalty.loyalty.next.reward)}</Text>
+                </View>
+                <View style={styles.bar}>
+                  <View style={[styles.barFill, { width: `${Math.round(loyalty.loyalty.next.progress * 100)}%` as const, backgroundColor: colors.amber }]} />
+                </View>
+                <View style={styles.rewardFoot}>
+                  <Text style={styles.rewardProgress}>{loyalty.loyalty.next.days_remaining} days to go</Text>
+                  <Text style={styles.rewardNote}>keep driving to unlock</Text>
+                </View>
+              </View>
+            ) : (
+              <Text style={styles.tip}>✅ You've reached every loyalty milestone. Thank you!</Text>
+            )}
+            <View style={styles.chips}>
+              {loyalty.loyalty.milestones.map((m) => (
+                <Text key={m.key} style={[styles.chip, m.vested ? styles.chipDone : m.forfeited ? styles.chipOff : styles.chipPending]}>
+                  {m.vested ? "✓ " : ""}{m.label}
+                </Text>
+              ))}
+            </View>
+            <Text style={styles.note}>Milestones unlock only while you're active — they're paid by the office.</Text>
+          </Card>
+        ) : null}
+
+        {loyalty ? (
+          <Card testID="rewards-yearly-card" style={{ marginTop: spacing.md }}>
+            <View style={styles.head}>
+              <Text style={styles.cardTitle}>This year 🗓️</Text>
+              <Text style={styles.hint}>{loyalty.year}</Text>
+            </View>
+            <View style={styles.reward}>
+              <View style={styles.rewardHead}>
+                <Text style={styles.rewardLabel}>{loyalty.yearly.rank ? `Rank #${loyalty.yearly.rank}` : "Top driver of the year"}{loyalty.yearly.of ? ` of ${loyalty.yearly.of}` : ""}</Text>
+                <Text style={styles.rewardAmount}>+{formatINR(loyalty.yearly.reward)}</Text>
+              </View>
+              <View style={styles.bar}>
+                <View style={[styles.barFill, { width: `${loyalty.yearly.hub_leader ? Math.round(Math.min(1, loyalty.yearly.value / loyalty.yearly.hub_leader) * 100) : 0}%` as const, backgroundColor: loyalty.yearly.rank === 1 ? colors.live : colors.amber }]} />
+              </View>
+              <View style={styles.rewardFoot}>
+                <Text style={styles.rewardProgress}>{formatINR(loyalty.yearly.value)} gross</Text>
+                <Text style={styles.rewardNote}>{loyalty.yearly.rank === 1 ? "you're leading! 🏆" : `${formatINR(loyalty.yearly.gap_to_leader)} behind #1`}</Text>
+              </View>
+            </View>
+          </Card>
+        ) : null}
 
         <Card testID="rewards-tip-card" style={{ marginTop: spacing.md }}>
           <Text style={styles.cardTitle}>How to win</Text>
@@ -133,4 +222,10 @@ const styles = StyleSheet.create({
   rewardProgress: { fontFamily: fonts.data, fontSize: 12, color: colors.ink },
   rewardNote: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted },
   tip: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink, paddingVertical: 3 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: spacing.sm },
+  chip: { fontFamily: fonts.uiMed, fontSize: 12, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, overflow: "hidden" },
+  chipDone: { backgroundColor: "#dcfce7", color: "#166534" },
+  chipPending: { backgroundColor: colors.line, color: colors.muted },
+  chipOff: { backgroundColor: "#fee2e2", color: "#991b1b" },
+  note: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: spacing.sm },
 });
