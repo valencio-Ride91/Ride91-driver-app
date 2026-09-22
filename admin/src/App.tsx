@@ -49,7 +49,7 @@ export default function App() {
         />
         {admin ? (
           <Route element={<Layout admin={admin} onLogout={() => setAdmin(null)} />}>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={admin.role === "hub_manager" ? <Navigate to="/drivers" replace /> : <Dashboard />} />
             <Route path="/bookings" element={<Bookings />} />
             <Route path="/drivers" element={<Drivers />} />
             <Route path="/drivers/:id" element={<DriverDetail />} />

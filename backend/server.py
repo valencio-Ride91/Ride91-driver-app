@@ -600,10 +600,19 @@ LOGIN_MAX_ATTEMPTS = 6      # failures allowed within the window
 LOGIN_WINDOW_MIN = 15       # rolling window for counting failures
 LOGIN_LOCK_MIN = 15         # lockout duration once the limit is hit
 
-# Role hierarchy. A viewer may only read; a manager may perform ops actions; an
-# owner additionally manages admin accounts and settings.
-ROLE_RANK = {"viewer": 0, "manager": 1, "owner": 2}
+# Role hierarchy.
+#   viewer       — read only
+#   hub_manager  — manages ONE hub (its drivers, cars, assignments, rewards)
+#   manager      — fleet-wide ops
+#   owner        — additionally manages admin accounts and settings
+ROLE_RANK = {"viewer": 0, "hub_manager": 1, "manager": 2, "owner": 3}
 ROLES = set(ROLE_RANK)
+
+
+def hub_scope(admin: Dict) -> Optional[str]:
+    """The hub a hub_manager is limited to; None means unrestricted (manager /
+    owner see the whole fleet)."""
+    return admin.get("hub_id") if admin.get("role") == "hub_manager" else None
 
 
 async def login_guard(key: str) -> None:
@@ -677,13 +686,15 @@ class AdminLoginIn(BaseModel):
 class AdminUserCreateIn(BaseModel):
     username: str = Field(min_length=3)
     password: str = Field(min_length=6)
-    role: Literal["viewer", "manager", "owner"] = "manager"
+    role: Literal["viewer", "hub_manager", "manager", "owner"] = "manager"
+    hub_id: Optional[str] = None   # required when role == hub_manager
 
 
 class AdminUserUpdateIn(BaseModel):
-    role: Optional[Literal["viewer", "manager", "owner"]] = None
+    role: Optional[Literal["viewer", "hub_manager", "manager", "owner"]] = None
     active: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=6)
+    hub_id: Optional[str] = None
 
 
 class ChangePasswordIn(BaseModel):
@@ -726,14 +737,23 @@ async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict
     return {
         "username": sess["username"],
         "role": role,
+        "hub_id": user.get("hub_id"),
         "user_id": user.get("id"),
         "token": token,
     }
 
 
 async def require_write(admin: Dict = Depends(get_admin)) -> Dict:
-    """Any role above viewer. Use for mutating ops endpoints."""
+    """Fleet-wide mutations: manager or owner (NOT hub_manager or viewer)."""
     if ROLE_RANK.get(admin.get("role", "viewer"), 0) < ROLE_RANK["manager"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "read_only_role")
+    return admin
+
+
+async def require_ops(admin: Dict = Depends(get_admin)) -> Dict:
+    """Hub-scoped ops: hub_manager, manager or owner. A hub_manager is limited
+    to their own hub (enforced per endpoint via hub_scope)."""
+    if ROLE_RANK.get(admin.get("role", "viewer"), 0) < ROLE_RANK["hub_manager"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "read_only_role")
     return admin
 
@@ -1696,7 +1716,8 @@ async def admin_login(body: AdminLoginIn):
     await _audit({"username": body.username, "role": user.get("role")}, "login")
     return {
         "token": token, "username": body.username,
-        "role": user.get("role", "owner"), "hours_valid": ADMIN_SESSION_HOURS,
+        "role": user.get("role", "owner"), "hub_id": user.get("hub_id"),
+        "hours_valid": ADMIN_SESSION_HOURS,
     }
 
 
@@ -1708,7 +1729,11 @@ async def admin_logout(admin: Dict = Depends(get_admin)):
 
 @api.get("/admin/me")
 async def admin_me(admin: Dict = Depends(get_admin)):
-    return {"username": admin["username"], "role": admin["role"]}
+    hub = None
+    if admin.get("hub_id"):
+        hub = await db.hubs.find_one({"id": admin["hub_id"]}, {"_id": 0, "id": 1, "name": 1})
+    return {"username": admin["username"], "role": admin["role"],
+            "hub_id": admin.get("hub_id"), "hub_name": hub.get("name") if hub else None}
 
 
 @api.post("/admin/change-password")
@@ -1731,11 +1756,21 @@ def _user_out(u: Dict) -> Dict:
         "id": u.get("id"),
         "username": u.get("username"),
         "role": u.get("role"),
+        "hub_id": u.get("hub_id"),
         "active": u.get("active", True),
         "created_at": u.get("created_at"),
         "created_by": u.get("created_by"),
         "last_login_at": u.get("last_login_at"),
     }
+
+
+async def _validate_hub_manager(role: Optional[str], hub_id: Optional[str]) -> None:
+    """A hub_manager must point at an existing hub."""
+    if role == "hub_manager":
+        if not hub_id:
+            raise HTTPException(400, "hub_required_for_hub_manager")
+        if not await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1}):
+            raise HTTPException(404, "hub_not_found")
 
 
 @api.get("/admin/users")
@@ -1749,11 +1784,13 @@ async def admin_create_user(body: AdminUserCreateIn, admin: Dict = Depends(requi
     username = body.username.strip()
     if await db.admin_users.find_one({"username": username}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "username_taken")
+    await _validate_hub_manager(body.role, body.hub_id)
     row = {
         "id": str(uuid.uuid4()),
         "username": username,
         "password_hash": hash_password(body.password),
         "role": body.role,
+        "hub_id": body.hub_id if body.role == "hub_manager" else None,
         "active": True,
         "created_at": iso(now_utc()),
         "created_by": admin["username"],
@@ -1776,6 +1813,11 @@ async def admin_update_user(user_id: str, body: AdminUserUpdateIn, admin: Dict =
         owners = await db.admin_users.count_documents({"role": "owner", "active": True})
         if owners <= 1:
             raise HTTPException(409, "cannot_remove_last_owner")
+    new_role = body.role if body.role is not None else user.get("role")
+    new_hub = body.hub_id if body.hub_id is not None else user.get("hub_id")
+    if body.role is not None or body.hub_id is not None:
+        await _validate_hub_manager(new_role, new_hub)
+        updates["hub_id"] = new_hub if new_role == "hub_manager" else None
     if body.role is not None:
         updates["role"] = body.role
     if body.active is not None:
@@ -1867,6 +1909,12 @@ async def admin_drivers(
     table view — never returns base64 media. Archived drivers are hidden
     unless `include_archived=true`."""
     query: Dict[str, Any] = {} if include_archived else {"archived": {"$ne": True}}
+    # A hub_manager only sees drivers in their hub (by driver.hub_id or their
+    # car's hub).
+    scope = hub_scope(admin)
+    if scope is not None:
+        scoped_vids = await _scope_vehicle_ids(scope)
+        query["$or"] = [{"hub_id": scope}, {"vehicle_id": {"$in": scoped_vids or []}}]
     drivers = [d async for d in db.drivers.find(query, {"_id": 0})]
     vehicles = {
         v["id"]: v async for v in db.vehicles.find({}, {"_id": 0})
@@ -1969,7 +2017,9 @@ async def _hub_out(h: Dict) -> Dict:
 
 @api.get("/admin/hubs")
 async def admin_list_hubs(admin: Dict = Depends(get_admin)):
-    hubs = [h async for h in db.hubs.find({}, {"_id": 0}).sort("name", 1)]
+    scope = hub_scope(admin)
+    query = {"id": scope} if scope else {}
+    hubs = [h async for h in db.hubs.find(query, {"_id": 0}).sort("name", 1)]
     items = [await _hub_out(h) for h in hubs]
     return {"items": items, "count": len(items)}
 
@@ -2041,6 +2091,33 @@ async def _check_shift_slot(vehicle_id: Optional[str], shift_type: str, exclude_
         raise HTTPException(409, "shift_slot_taken")
 
 
+async def _scope_vehicle_ids(scope: Optional[str]) -> Optional[List[str]]:
+    """Vehicle ids under the scope hub; None means unrestricted."""
+    if scope is None:
+        return None
+    return [v["id"] async for v in db.vehicles.find({"hub_id": scope}, {"_id": 0, "id": 1})]
+
+
+async def _assert_driver_in_scope(driver: Dict, scope: Optional[str]) -> None:
+    if scope is None:
+        return
+    if driver.get("hub_id") == scope:
+        return
+    vid = driver.get("vehicle_id")
+    if vid:
+        v = await db.vehicles.find_one({"id": vid}, {"_id": 0, "hub_id": 1})
+        if v and v.get("hub_id") == scope:
+            return
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+
+
+async def _assert_vehicle_in_scope(vehicle: Dict, scope: Optional[str]) -> None:
+    if scope is None:
+        return
+    if vehicle.get("hub_id") != scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+
+
 async def _assign_vehicle_hub(vehicle_id: str, hub_id: Optional[str]) -> None:
     """Validate a hub assignment and enforce its capacity. Raises HTTPException."""
     if not hub_id:
@@ -2060,6 +2137,9 @@ async def admin_list_vehicles(
     include_retired: bool = False, admin: Dict = Depends(get_admin)
 ):
     query: Dict[str, Any] = {} if include_retired else {"retired": {"$ne": True}}
+    scope = hub_scope(admin)
+    if scope:
+        query["hub_id"] = scope   # a hub_manager sees only their hub's cars
     vehicles = [v async for v in db.vehicles.find(query, {"_id": 0}).sort("number", 1)]
     # Each car holds one day driver and one night driver. Track both per car so
     # the UI can show the pair and offer only the open shift slots.
@@ -2085,19 +2165,21 @@ async def admin_list_vehicles(
 
 
 @api.post("/admin/vehicles")
-async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(require_write)):
+async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(require_ops)):
     number = body.number.strip().upper()
     if await db.vehicles.find_one({"number": number}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "vehicle_number_exists")
+    scope = hub_scope(admin)
+    veh_hub = scope if scope is not None else body.hub_id   # a hub_manager's cars land in their hub
     vid = str(uuid.uuid4())
-    await _assign_vehicle_hub(vid, body.hub_id)
+    await _assign_vehicle_hub(vid, veh_hub)
     row = {
         "id": vid,
         "number": number,
         "model": body.model,
         "current_soc": body.current_soc,
         "current_range_km": body.current_range_km,
-        "hub_id": body.hub_id,
+        "hub_id": veh_hub,
         "created_by": admin["username"],
         "created_at": iso(now_utc()),
     }
@@ -2109,11 +2191,13 @@ async def admin_create_vehicle(body: VehicleCreateIn, admin: Dict = Depends(requ
 
 @api.patch("/admin/vehicles/{vehicle_id}")
 async def admin_update_vehicle(
-    vehicle_id: str, body: VehicleUpdateIn, admin: Dict = Depends(require_write)
+    vehicle_id: str, body: VehicleUpdateIn, admin: Dict = Depends(require_ops)
 ):
-    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
+    scope = hub_scope(admin)
+    await _assert_vehicle_in_scope(veh, scope)
     updates: Dict[str, Any] = {}
     if body.number is not None:
         number = body.number.strip().upper()
@@ -2127,7 +2211,8 @@ async def admin_update_vehicle(
         val = getattr(body, field)
         if val is not None:
             updates[field] = val
-    if body.hub_id is not None:
+    # A hub_manager can't move a car out of their hub.
+    if body.hub_id is not None and scope is None:
         # "" clears the hub; any other value must exist and have room.
         hub_id = body.hub_id or None
         if hub_id:
@@ -2142,12 +2227,13 @@ async def admin_update_vehicle(
 
 
 @api.delete("/admin/vehicles/{vehicle_id}")
-async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(require_write)):
+async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(require_ops)):
     """Retire a vehicle (reversible). Refuses while a driver still holds it —
     unassign the driver first so a plate is never orphaned on a live driver."""
-    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
+    await _assert_vehicle_in_scope(veh, hub_scope(admin))
     holder = await db.drivers.find_one(
         {"vehicle_id": vehicle_id, "archived": {"$ne": True}},
         {"_id": 0, "id": 1, "name": 1},
@@ -2164,10 +2250,11 @@ async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(require_wr
 
 
 @api.post("/admin/vehicles/{vehicle_id}/restore")
-async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_write)):
-    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1})
+async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_ops)):
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
+    await _assert_vehicle_in_scope(veh, hub_scope(admin))
     await db.vehicles.update_one(
         {"id": vehicle_id},
         {"$set": {"retired": False}, "$unset": {"retired_at": "", "retired_by": ""}},
@@ -2176,16 +2263,20 @@ async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_w
 
 
 @api.post("/admin/drivers")
-async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(require_write)):
+async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(require_ops)):
     phone = body.phone.strip()
     if await db.drivers.find_one({"phone": phone}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "phone_already_registered")
+    scope = hub_scope(admin)
     if body.vehicle_id:
-        veh = await db.vehicles.find_one({"id": body.vehicle_id}, {"_id": 0, "id": 1})
+        veh = await db.vehicles.find_one({"id": body.vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
         if not veh:
             raise HTTPException(404, "vehicle_not_found")
+        await _assert_vehicle_in_scope(veh, scope)   # hub_manager: car must be in their hub
         await _check_shift_slot(body.vehicle_id, body.shift_type, None)
-    hub_id, hub_name, hub_lat, hub_lng = body.hub_id or None, body.hub_name, body.hub_lat, body.hub_lng
+    # A hub_manager's new drivers always belong to their hub.
+    hub_id = scope if scope is not None else (body.hub_id or None)
+    hub_name, hub_lat, hub_lng = body.hub_name, body.hub_lat, body.hub_lng
     if hub_id:
         hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
         if not hub:
@@ -2220,11 +2311,13 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
 
 @api.patch("/admin/drivers/{driver_id}")
 async def admin_update_driver(
-    driver_id: str, body: DriverUpdateIn, admin: Dict = Depends(require_write)
+    driver_id: str, body: DriverUpdateIn, admin: Dict = Depends(require_ops)
 ):
     driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
     if not driver:
         raise HTTPException(404, "driver_not_found")
+    scope = hub_scope(admin)
+    await _assert_driver_in_scope(driver, scope)
     updates: Dict[str, Any] = {}
     for field in ("name", "phone", "vehicle_id", "hub_name", "hub_lat",
                   "hub_lng", "shift_type", "status", "active"):
@@ -2240,12 +2333,17 @@ async def admin_update_driver(
     if updates.get("vehicle_id"):
         if not await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "id": 1}):
             raise HTTPException(404, "vehicle_not_found")
+    # A hub_manager can only assign cars within their own hub.
+    if scope is not None and updates.get("vehicle_id"):
+        nv = await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "hub_id": 1})
+        await _assert_vehicle_in_scope(nv or {}, scope)
     # Re-check the shift slot when the car or the shift changes.
     if "vehicle_id" in updates or "shift_type" in updates:
         new_vehicle = updates.get("vehicle_id", driver.get("vehicle_id"))
         new_shift = updates.get("shift_type", driver.get("shift_type", "day"))
         await _check_shift_slot(new_vehicle, new_shift, driver_id)
-    if body.hub_id is not None:
+    # Only fleet managers may move a driver between hubs.
+    if body.hub_id is not None and scope is None:
         hub_id = body.hub_id or None
         if hub_id:
             hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
@@ -2284,6 +2382,7 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
     d = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
     vehicle = None
     if d.get("vehicle_id"):
         vehicle = await db.vehicles.find_one(
@@ -2344,16 +2443,17 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
 
 @api.delete("/admin/drivers/{driver_id}")
 async def admin_delete_driver(
-    driver_id: str, hard: bool = False, admin: Dict = Depends(require_write)
+    driver_id: str, hard: bool = False, admin: Dict = Depends(require_ops)
 ):
     """Remove a driver. Default is a reversible archive: the driver is
     deactivated, hidden from the roster, and their vehicle freed — cash and
     payout history are preserved for the audit trail. `hard=true` permanently
     deletes the driver record, and is refused when any financial history
     exists (deposits, platform cash, or payouts)."""
-    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not d:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
 
     if hard:
         has_money = (
@@ -2382,10 +2482,11 @@ async def admin_delete_driver(
 
 
 @api.post("/admin/drivers/{driver_id}/restore")
-async def admin_restore_driver(driver_id: str, admin: Dict = Depends(require_write)):
-    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+async def admin_restore_driver(driver_id: str, admin: Dict = Depends(require_ops)):
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not d:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
     await db.drivers.update_one(
         {"id": driver_id},
         {"$set": {"archived": False, "active": True},
@@ -3268,13 +3369,22 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
     dweek, ddays, dyday = await _reward_gross(mon_bd, next_mon_bd, y_bd)
 
+    scope = hub_scope(admin)
+    veh_q: Dict[str, Any] = {"retired": {"$ne": True}}
+    hub_q: Dict[str, Any] = {}
+    if scope:
+        veh_q["hub_id"] = scope
+        hub_q["id"] = scope
     vehicles = {v["id"]: v async for v in db.vehicles.find(
-        {"retired": {"$ne": True}}, {"_id": 0, "id": 1, "number": 1, "hub_id": 1})}
-    hubs = [h async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})]
+        veh_q, {"_id": 0, "id": 1, "number": 1, "hub_id": 1})}
+    hubs = [h async for h in db.hubs.find(hub_q, {"_id": 0, "id": 1, "name": 1})]
     hub_name = {h["id"]: h.get("name") for h in hubs}
     drivers = [d async for d in db.drivers.find(
         {"archived": {"$ne": True}},
         {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1, "shift_type": 1})]
+    if scope:
+        # A hub_manager sees drivers of their hub, or drivers holding one of its cars.
+        drivers = [d for d in drivers if d.get("hub_id") == scope or d.get("vehicle_id") in vehicles]
 
     def dstat(did):
         return dweek.get(did, 0.0), len(ddays.get(did, set())), dyday.get(did, 0.0)

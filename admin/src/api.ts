@@ -380,7 +380,9 @@ export interface RewardsResponse {
 export interface AdminUserRow {
   id: string;
   username: string;
-  role: "owner" | "manager" | "viewer";
+  role: "owner" | "manager" | "hub_manager" | "viewer";
+  hub_id?: string | null;
+  hub_name?: string | null;
   active: boolean;
   created_at: string | null;
   created_by: string | null;
