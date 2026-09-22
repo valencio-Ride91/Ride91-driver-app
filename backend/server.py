@@ -367,7 +367,8 @@ class DriverCreateIn(BaseModel):
     phone: str = Field(min_length=5)           # login identity (username); unique
     password: str = Field(min_length=6)        # admin-set driver app password
     vehicle_id: Optional[str] = None
-    hub_name: Optional[str] = None
+    hub_id: Optional[str] = None               # the hub the driver belongs to
+    hub_name: Optional[str] = None             # kept for display; derived from hub
     hub_lat: Optional[float] = None
     hub_lng: Optional[float] = None
     shift_type: str = "day"                    # day | night
@@ -380,6 +381,7 @@ class DriverUpdateIn(BaseModel):
     phone: Optional[str] = None
     password: Optional[str] = Field(default=None, min_length=6)  # reset password
     vehicle_id: Optional[str] = None
+    hub_id: Optional[str] = None
     hub_name: Optional[str] = None
     hub_lat: Optional[float] = None
     hub_lng: Optional[float] = None
@@ -1926,6 +1928,7 @@ async def admin_drivers(
                 "id": d["id"],
                 "name": d.get("name"),
                 "phone": d.get("phone"),
+                "hub_id": d.get("hub_id"),
                 "hub_name": d.get("hub_name"),
                 "shift_type": d.get("shift_type"),
                 "active": d.get("active", True),
@@ -2159,6 +2162,14 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
         veh = await db.vehicles.find_one({"id": body.vehicle_id}, {"_id": 0, "id": 1})
         if not veh:
             raise HTTPException(404, "vehicle_not_found")
+    hub_id, hub_name, hub_lat, hub_lng = body.hub_id or None, body.hub_name, body.hub_lat, body.hub_lng
+    if hub_id:
+        hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
+        if not hub:
+            raise HTTPException(404, "hub_not_found")
+        hub_name = hub.get("name")           # keep the label in sync with the hub
+        hub_lat = hub.get("lat", hub_lat)
+        hub_lng = hub.get("lng", hub_lng)
     driver_id = str(uuid.uuid4())
     row = {
         "id": driver_id,
@@ -2170,9 +2181,10 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
         "active": True,
         "status": body.status,
         "shift_type": body.shift_type,
-        "hub_name": body.hub_name,
-        "hub_lat": body.hub_lat,
-        "hub_lng": body.hub_lng,
+        "hub_id": hub_id,
+        "hub_name": hub_name,
+        "hub_lat": hub_lat,
+        "hub_lng": hub_lng,
         "created_by": admin["username"],
         "created_at": iso(now_utc()),
     }
@@ -2205,6 +2217,20 @@ async def admin_update_driver(
     if updates.get("vehicle_id"):
         if not await db.vehicles.find_one({"id": updates["vehicle_id"]}, {"_id": 0, "id": 1}):
             raise HTTPException(404, "vehicle_not_found")
+    if body.hub_id is not None:
+        hub_id = body.hub_id or None
+        if hub_id:
+            hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
+            if not hub:
+                raise HTTPException(404, "hub_not_found")
+            updates["hub_name"] = hub.get("name")   # keep the label in sync
+            if hub.get("lat") is not None:
+                updates["hub_lat"] = hub["lat"]
+            if hub.get("lng") is not None:
+                updates["hub_lng"] = hub["lng"]
+        else:
+            updates["hub_name"] = None
+        updates["hub_id"] = hub_id
     # Password reset is handled separately so the raw value never enters the
     # audit trail or the list of "updated" field names.
     password_reset = body.password is not None
@@ -3217,14 +3243,15 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     hub_name = {h["id"]: h.get("name") async for h in db.hubs.find({}, {"_id": 0, "id": 1, "name": 1})}
 
     drivers = [d async for d in db.drivers.find(
-        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1})]
+        {"archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1})]
     rows: List[Dict[str, Any]] = []
     for d in drivers:
         w = week.get(d["id"], {"gross": 0.0, "days": 0})
         week_gross = round(w["gross"], 2)
         driver_earnings = round(week_gross * rate, 2)
         y_gross = round(yday.get(d["id"], 0.0), 2)
-        hub_id = veh_hub.get(d.get("vehicle_id"))
+        # The driver's own hub takes precedence; fall back to their car's hub.
+        hub_id = d.get("hub_id") or veh_hub.get(d.get("vehicle_id"))
         rows.append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
             "hub_id": hub_id, "hub_name": hub_name.get(hub_id),

@@ -128,6 +128,7 @@ export interface DriverRow {
   id: string;
   name: string;
   phone: string;
+  hub_id: string | null;
   hub_name: string | null;
   shift_type: string | null;
   active: boolean;

@@ -3,7 +3,7 @@
 // and open a per-driver detail page. Archived drivers are hidden by default.
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, DriverRow, VehicleRow, downloadCsv } from "../api";
+import { api, DriverRow, VehicleRow, HubRow, downloadCsv } from "../api";
 
 function pingAge(iso: string | null): string {
   if (!iso) return "never";
@@ -19,7 +19,7 @@ interface EditState {
   id: string;
   name: string;
   phone: string;
-  hub_name: string;
+  hub_id: string;
   shift_type: string;
   vehicle_id: string;
   password: string;   // blank = leave unchanged
@@ -28,6 +28,7 @@ interface EditState {
 export default function Drivers() {
   const [rows, setRows] = useState<DriverRow[]>([]);
   const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
+  const [hubs, setHubs] = useState<HubRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [q, setQ] = useState("");
@@ -41,7 +42,7 @@ export default function Drivers() {
   const [dPhone, setDPhone] = useState("+91");
   const [dPassword, setDPassword] = useState("");
   const [dVehicle, setDVehicle] = useState("");
-  const [dHub, setDHub] = useState("");
+  const [dHubId, setDHubId] = useState("");
   const [dShift, setDShift] = useState("day");
   // vehicle form
   const [vNumber, setVNumber] = useState("");
@@ -51,12 +52,14 @@ export default function Drivers() {
 
   const load = useCallback(async () => {
     try {
-      const [d, v] = await Promise.all([
+      const [d, v, h] = await Promise.all([
         api.get<{ items: DriverRow[] }>(`/admin/drivers${showArchived ? "?include_archived=true" : ""}`),
         api.get<{ items: VehicleRow[] }>("/admin/vehicles"),
+        api.get<{ items: HubRow[] }>("/admin/hubs"),
       ]);
       setRows(d.items);
       setVehicles(v.items);
+      setHubs(h.items);
     } finally {
       setLoading(false);
     }
@@ -101,9 +104,9 @@ export default function Drivers() {
       await api.post("/admin/drivers", {
         name: dName.trim(), phone: dPhone.trim(), password: dPassword,
         vehicle_id: dVehicle || null,
-        hub_name: dHub.trim() || null, shift_type: dShift,
+        hub_id: dHubId || null, shift_type: dShift,
       });
-      setDName(""); setDPhone("+91"); setDPassword(""); setDVehicle(""); setDHub("");
+      setDName(""); setDPhone("+91"); setDPassword(""); setDVehicle(""); setDHubId("");
       setPanel("none");
       await load();
       flash("Driver added.");
@@ -155,7 +158,7 @@ export default function Drivers() {
     try {
       await api.patch(`/admin/drivers/${edit.id}`, {
         name: edit.name.trim(), phone: edit.phone.trim(),
-        hub_name: edit.hub_name.trim() || null, shift_type: edit.shift_type,
+        hub_id: edit.hub_id || null, shift_type: edit.shift_type,
         vehicle_id: edit.vehicle_id || null,
         ...(edit.password ? { password: edit.password } : {}),
       });
@@ -263,7 +266,12 @@ export default function Drivers() {
               </select>
             </label>
             <label className="col-2">Hub
-              <input value={dHub} onChange={(e) => setDHub(e.target.value)} placeholder="e.g. Koramangala Hub" />
+              <select value={dHubId} onChange={(e) => setDHubId(e.target.value)}>
+                <option value="">No hub</option>
+                {hubs.map((h) => (
+                  <option key={h.id} value={h.id}>{h.name}{h.city ? ` · ${h.city}` : ""}</option>
+                ))}
+              </select>
             </label>
           </div>
           {freeVehicles.length === 0 ? (
@@ -316,7 +324,7 @@ export default function Drivers() {
                     <>
                       <button className="ghost" onClick={() => setEdit({
                         id: r.id, name: r.name, phone: r.phone,
-                        hub_name: r.hub_name ?? "", shift_type: r.shift_type ?? "day",
+                        hub_id: r.hub_id ?? "", shift_type: r.shift_type ?? "day",
                         vehicle_id: r.vehicle_id ?? "", password: "",
                       })}>Edit</button>
                       {r.active ? (
@@ -358,7 +366,12 @@ export default function Drivers() {
                 </select>
               </label>
               <label>Hub
-                <input value={edit.hub_name} onChange={(e) => setEdit({ ...edit, hub_name: e.target.value })} />
+                <select value={edit.hub_id} onChange={(e) => setEdit({ ...edit, hub_id: e.target.value })}>
+                  <option value="">No hub</option>
+                  {hubs.map((h) => (
+                    <option key={h.id} value={h.id}>{h.name}{h.city ? ` · ${h.city}` : ""}</option>
+                  ))}
+                </select>
               </label>
               <label>Reset password (blank = keep)
                 <input value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} placeholder="new password" autoComplete="new-password" />
