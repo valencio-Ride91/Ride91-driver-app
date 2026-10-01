@@ -4750,6 +4750,150 @@ async def razorpay_qr_status(
     }
 
 
+# ---------------------------------------------------------------------------
+# COLLECTION QR — a permanent, reusable UPI QR per driver. The RIDER scans it
+# and pays the fare; money lands in the fleet's Razorpay account, tagged with
+# the driver_id (notes.purpose = "collection"). This is tracked money only: it
+# is recorded in its own `collections` ledger and deliberately does NOT touch
+# the driver's cash-in-hand, dues, gross, or rewards.
+# ---------------------------------------------------------------------------
+async def _reconcile_collection_once(
+    driver_id: str, qr_code_id: str, razorpay_payment_id: str, amount_paise: int
+) -> None:
+    """Record one rider payment on a driver's collection QR. Idempotent on the
+    razorpay_payment_id so a replayed webhook never double-counts."""
+    await db.collections.update_one(
+        {"razorpay_payment_id": razorpay_payment_id},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "amount": round(int(amount_paise) / 100, 2),
+            "qr_code_id": qr_code_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "occurred_at": iso(now_utc()),
+            "business_date": business_date_now(),
+            "created_at": iso(now_utc()),
+        }},
+        upsert=True,
+    )
+
+
+async def _get_or_create_collection_qr(driver: Dict) -> Dict[str, Any]:
+    """Return the driver's reusable collection QR, creating it on first use."""
+    existing = await db.driver_collection_qrs.find_one(
+        {"driver_id": driver["id"]}, {"_id": 0}
+    )
+    if existing:
+        return existing
+    qr = await _rzp_request(
+        "POST", "/payments/qr_codes",
+        json={
+            "type": "upi_qr",
+            "name": (driver.get("name") or "Ride91 driver")[:27],
+            "usage": "multiple_use",       # reusable — one QR for the driver, forever
+            "fixed_amount": False,         # rider enters the fare
+            "description": f"Ride91 collection - {driver.get('name') or driver['id']}",
+            "notes": {"driver_id": driver["id"], "purpose": "collection"},
+        },
+    )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver["id"],
+        "qr_code_id": qr["id"],
+        "image_url": qr.get("image_url"),
+        "short_url": qr.get("short_url"),
+        "status": "active",
+        "created_at": iso(now_utc()),
+        "created_by": None,
+    }
+    await db.driver_collection_qrs.insert_one(row.copy())
+    row.pop("_id", None)
+    return row
+
+
+def _collection_qr_out(row: Optional[Dict]) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    return {
+        "qr_code_id": row.get("qr_code_id"),
+        "image_url": row.get("image_url"),
+        "short_url": row.get("short_url"),
+        "status": row.get("status"),
+        "created_at": row.get("created_at"),
+    }
+
+
+@api.post("/admin/drivers/{driver_id}/collection-qr")
+async def admin_create_collection_qr(driver_id: str, admin: Dict = Depends(require_write)):
+    if not _razorpay_configured():
+        raise HTTPException(503, "razorpay_not_configured")
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "name": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    row = await _get_or_create_collection_qr(driver)
+    await _audit(admin, "create_collection_qr", driver_id, {"qr_code_id": row.get("qr_code_id")})
+    return _collection_qr_out(row)
+
+
+@api.get("/admin/drivers/{driver_id}/collection-qr")
+async def admin_get_collection_qr(driver_id: str, admin: Dict = Depends(fleet_admin)):
+    row = await db.driver_collection_qrs.find_one({"driver_id": driver_id}, {"_id": 0})
+    return _collection_qr_out(row) or {"qr_code_id": None}
+
+
+@api.get("/admin/collections")
+async def admin_collections(
+    from_date: Optional[str] = None, to_date: Optional[str] = None,
+    admin: Dict = Depends(fleet_admin),
+):
+    """Money collected via drivers' collection QRs: a per-driver total (plus
+    count + last payment) and the fleet grand total, optionally filtered by a
+    business-date range [from_date, to_date] inclusive."""
+    match: Dict[str, Any] = {}
+    if from_date or to_date:
+        bd: Dict[str, Any] = {}
+        if from_date:
+            bd["$gte"] = from_date
+        if to_date:
+            bd["$lte"] = to_date
+        match["business_date"] = bd
+
+    per: Dict[str, Dict[str, Any]] = {}
+    grand_total = 0.0
+    grand_count = 0
+    pipeline = [{"$match": match}] if match else []
+    pipeline.append({"$group": {
+        "_id": "$driver_id",
+        "total": {"$sum": "$amount"},
+        "count": {"$sum": 1},
+        "last_at": {"$max": "$occurred_at"},
+    }})
+    async for r in db.collections.aggregate(pipeline):
+        per[r["_id"]] = {"total": round(float(r.get("total") or 0), 2),
+                         "count": r.get("count", 0), "last_at": r.get("last_at")}
+        grand_total += float(r.get("total") or 0)
+        grand_count += r.get("count", 0)
+
+    # Attach driver names (hide archived unless they have collections).
+    ids = list(per.keys())
+    names = {d["id"]: d async for d in db.drivers.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "phone": 1})} if ids else {}
+    items = []
+    for did, v in per.items():
+        d = names.get(did, {})
+        items.append({
+            "driver_id": did, "name": d.get("name"), "phone": d.get("phone"),
+            "total": v["total"], "count": v["count"], "last_at": v["last_at"],
+        })
+    items.sort(key=lambda x: x["total"], reverse=True)
+    return {
+        "items": items,
+        "grand_total": round(grand_total, 2),
+        "count": grand_count,
+        "from_date": from_date, "to_date": to_date,
+    }
+
+
 @api.get("/payments/razorpay/checkout", response_class=Response)
 async def razorpay_checkout_page(
     order_id: str,
@@ -4826,12 +4970,22 @@ async def razorpay_webhook(req: Request):
         driver_id = notes.get("driver_id")
         amount_paise = payment.get("amount") or 0
         if qr_code_id and payment_id and driver_id:
-            await _reconcile_qr_once(
-                driver_id=driver_id,
-                qr_code_id=qr_code_id,
-                razorpay_payment_id=payment_id,
-                amount_paise=int(amount_paise),
-            )
+            if notes.get("purpose") == "collection":
+                # Rider paid a driver's collection QR — tracked money only.
+                await _reconcile_collection_once(
+                    driver_id=driver_id,
+                    qr_code_id=qr_code_id,
+                    razorpay_payment_id=payment_id,
+                    amount_paise=int(amount_paise),
+                )
+            else:
+                # Driver paid their dues via a single-use deposit QR.
+                await _reconcile_qr_once(
+                    driver_id=driver_id,
+                    qr_code_id=qr_code_id,
+                    razorpay_payment_id=payment_id,
+                    amount_paise=int(amount_paise),
+                )
     elif kind == "qr_code.closed":
         qr_entity = ((event.get("payload") or {}).get("qr_code") or {}).get("entity") or {}
         qr_code_id = qr_entity.get("id")
@@ -5864,6 +6018,9 @@ async def _on_startup() -> None:
     await db.notifications.create_index([("direction", 1), ("read", 1), ("created_at", -1)])
     await db.hubs.create_index([("name", 1)], unique=True)
     await db.vehicles.create_index([("hub_id", 1)])
+    await db.driver_collection_qrs.create_index([("driver_id", 1)], unique=True)
+    await db.collections.create_index([("razorpay_payment_id", 1)], unique=True)
+    await db.collections.create_index([("driver_id", 1), ("business_date", 1)])
     await _seed_admin_owner()
     await load_settings()
     await _seed_if_empty()

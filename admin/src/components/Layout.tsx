@@ -13,6 +13,7 @@ const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?
   { to: "/vehicles", label: "Vehicles", hub: true },
   { to: "/hubs", label: "Hubs", hub: true },
   { to: "/cash", label: "Cash" },
+  { to: "/collections", label: "Collections" },
   { to: "/rewards", label: "Earnings & rewards", hub: true },
   { to: "/loyalty", label: "Loyalty & yearly", hub: true },
   { to: "/requests", label: "Requests" },

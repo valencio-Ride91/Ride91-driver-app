@@ -21,6 +21,7 @@ import Vehicles from "./pages/Vehicles";
 import Hubs from "./pages/Hubs";
 import Rewards from "./pages/Rewards";
 import Loyalty from "./pages/Loyalty";
+import Collections from "./pages/Collections";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
 import Audit from "./pages/Audit";
@@ -66,6 +67,7 @@ export default function App() {
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/hubs" element={<Hubs />} />
             <Route path="/cash" element={<Fleet admin={admin}><Cash /></Fleet>} />
+            <Route path="/collections" element={<Fleet admin={admin}><Collections /></Fleet>} />
             <Route path="/rewards" element={<Rewards />} />
             <Route path="/loyalty" element={<Loyalty />} />
             <Route path="/requests" element={<Fleet admin={admin}><Requests /></Fleet>} />

@@ -423,6 +423,31 @@ export interface LoyaltyResponse {
   thresholds: { top_driver_year: number; top_car_year: number };
 }
 
+export interface CollectionRow {
+  driver_id: string;
+  name: string | null;
+  phone: string | null;
+  total: number;
+  count: number;
+  last_at: string | null;
+}
+
+export interface CollectionsResponse {
+  items: CollectionRow[];
+  grand_total: number;
+  count: number;
+  from_date: string | null;
+  to_date: string | null;
+}
+
+export interface CollectionQr {
+  qr_code_id: string | null;
+  image_url?: string | null;
+  short_url?: string | null;
+  status?: string;
+  created_at?: string | null;
+}
+
 export interface AdminUserRow {
   id: string;
   username: string;
