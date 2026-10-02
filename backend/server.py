@@ -641,7 +641,9 @@ def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
 # people. Tokens are opaque UUIDs stored in the `admin_sessions` collection
 # with a rolling 12-hour TTL that refreshes on activity.
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ride91-admin-2026")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")  # no default — must be set to seed a bootstrap owner
+# Shared secret for the hardware GPS tracker feed (/vehicles/pings/ingest).
+TRACKER_INGEST_SECRET = os.environ.get("TRACKER_INGEST_SECRET", "")
 ADMIN_SESSION_HOURS = 12
 # Driver sessions get a long sliding TTL: a driver active within this many days
 # stays signed in, but a truly dormant (e.g. stolen) token dies.
@@ -5046,6 +5048,12 @@ async def razorpay_checkout_page(
         raise HTTPException(503, "razorpay_not_configured")
     safe_order = html_lib.escape(order_id)
     safe_action = html_lib.escape(action)
+    # Only allow redirecting back into the app (ride91://) or our own https
+    # origins — never an arbitrary attacker-supplied URL (open-redirect guard).
+    if not (redirect.startswith("ride91://")
+            or redirect.startswith("https://ride91-")
+            or redirect.startswith("exp://")):   # Expo Go during dev
+        redirect = "ride91://money"
     safe_redirect = html_lib.escape(redirect)
     safe_name = html_lib.escape(name)
     rzp_key = _rzp_key_id()
@@ -5680,13 +5688,18 @@ async def heartbeat(body: HeartbeatIn, driver: Dict = Depends(get_driver)):
 # VEHICLE PINGS — real feed stub + distance computation from mock data
 # ---------------------------------------------------------------------------
 @api.post("/vehicles/pings/ingest")
-async def vehicle_ping_ingest(body: VehiclePingIn):
-    """STUB endpoint for the real hardware tracker feed.
-
-    The real integration will POST here with a shared secret; for now we accept
-    unauthenticated writes so the demo seed / mock ingester can populate the
-    collection. Filter `accuracy_m > 30` at read time.
-    """
+async def vehicle_ping_ingest(
+    body: VehiclePingIn, x_tracker_secret: Optional[str] = Header(default=None)
+):
+    """Hardware tracker feed. Authenticated with a shared secret so random
+    callers can't inject fake GPS. Set TRACKER_INGEST_SECRET (env) or
+    `tracker_ingest_secret` in settings and send it as the X-Tracker-Secret
+    header. Filter `accuracy_m > 30` at read time."""
+    expected = get_setting("tracker_ingest_secret") or TRACKER_INGEST_SECRET
+    if not expected:
+        raise HTTPException(503, "tracker_ingest_not_configured")
+    if not x_tracker_secret or not hmac.compare_digest(x_tracker_secret, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad_tracker_secret")
     row = body.model_dump()
     row["id"] = str(uuid.uuid4())
     row["received_at"] = iso(now_utc())
@@ -6053,10 +6066,25 @@ async def health():
 
 app.include_router(api)
 
+# CORS: only browsers enforce this, and only the admin SPA is a browser client
+# (the driver app is native and the checkout page is same-origin). Lock it to
+# the admin origin(s). Override with ALLOWED_ORIGINS (comma-separated), or set
+# it to "*" to allow all (not recommended).
+_DEFAULT_ORIGINS = [
+    "https://ride91-admin-561130004577.asia-south1.run.app",
+    "http://localhost:5173", "http://localhost:3000",   # local admin dev
+]
+_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
+if _origins_env == "*":
+    _cors_origins = ["*"]
+elif _origins_env:
+    _cors_origins = [o.strip() for o in _origins_env.split(",") if o.strip()]
+else:
+    _cors_origins = _DEFAULT_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -6189,6 +6217,11 @@ async def _seed_admin_owner() -> None:
     env-configured ADMIN_USERNAME/ADMIN_PASSWORD into a real, hashed user row so
     the existing login keeps working while the panel gains per-user accounts."""
     if await db.admin_users.count_documents({}) > 0:
+        return
+    # Only bootstrap when an explicit ADMIN_PASSWORD is provided — never seed a
+    # guessable default owner. If it's unset, an owner must be created out of band.
+    if not ADMIN_PASSWORD:
+        logger.warning("no ADMIN_PASSWORD set — skipping bootstrap owner seed")
         return
     await db.admin_users.insert_one({
         "id": str(uuid.uuid4()),
