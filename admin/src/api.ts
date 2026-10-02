@@ -132,6 +132,7 @@ export interface DriverRow {
   id: string;
   name: string;
   phone: string;
+  code: string | null;
   hub_id: string | null;
   hub_name: string | null;
   shift_type: string | null;
@@ -427,6 +428,7 @@ export interface CollectionRow {
   driver_id: string;
   name: string | null;
   phone: string | null;
+  code: string | null;
   total: number;
   count: number;
   last_at: string | null;
@@ -446,6 +448,7 @@ export interface CollectionQr {
   short_url?: string | null;
   status?: string;
   created_at?: string | null;
+  code?: string | null;
 }
 
 export interface AdminUserRow {

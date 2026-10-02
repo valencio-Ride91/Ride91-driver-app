@@ -68,15 +68,16 @@ export default function Collections() {
       <div className="card" style={{ padding: 0 }}>
         <table className="data">
           <thead>
-            <tr><th>Driver</th><th style={{ textAlign: "right" }}>Collected</th><th style={{ textAlign: "center" }}>Payments</th><th>Last payment</th><th></th></tr>
+            <tr><th>Code</th><th>Driver</th><th style={{ textAlign: "right" }}>Collected</th><th style={{ textAlign: "center" }}>Payments</th><th>Last payment</th><th></th></tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="empty">Loading…</td></tr>
+              <tr><td colSpan={6} className="empty">Loading…</td></tr>
             ) : (data?.items ?? []).length === 0 ? (
-              <tr><td colSpan={5} className="empty">No collections yet.</td></tr>
+              <tr><td colSpan={6} className="empty">No collections yet.</td></tr>
             ) : data!.items.map((r) => (
               <tr key={r.driver_id}>
+                <td style={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>{r.code ?? <span className="muted-sm">—</span>}</td>
                 <td>
                   <Link to={`/drivers/${r.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{r.name ?? r.driver_id.slice(0, 8)}</Link>
                   {r.phone ? <div className="muted-sm" style={{ fontFamily: "ui-monospace, monospace" }}>{r.phone}</div> : null}
@@ -131,7 +132,8 @@ function QrModal({ driverId, name, onClose }: { driverId: string; name: string |
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
       <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: 380, maxWidth: "92vw", textAlign: "center" }}>
         <h2 style={{ marginTop: 0 }}>Collection QR</h2>
-        <div className="muted-sm" style={{ marginBottom: 12 }}>{name ?? driverId.slice(0, 8)}</div>
+        <div className="muted-sm" style={{ marginBottom: 4 }}>{name ?? driverId.slice(0, 8)}</div>
+        {qr?.code ? <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, marginBottom: 12 }}>{qr.code}</div> : null}
         {loading ? <div className="empty">Loading…</div> : has ? (
           <>
             <img src={qr!.image_url!} alt="Collection QR" style={{ width: 240, height: 240, objectFit: "contain", border: "1px solid var(--line)", borderRadius: 8 }} />

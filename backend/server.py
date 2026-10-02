@@ -2086,6 +2086,7 @@ async def admin_drivers(
                 "id": d["id"],
                 "name": d.get("name"),
                 "phone": d.get("phone"),
+                "code": d.get("code"),
                 "hub_id": d.get("hub_id"),
                 "hub_name": d.get("hub_name"),
                 "shift_type": d.get("shift_type"),
@@ -2528,6 +2529,7 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
             "id": d["id"],
             "name": d.get("name"),
             "phone": d.get("phone"),
+            "code": d.get("code"),
             "hub_name": d.get("hub_name"),
             "hub_lat": d.get("hub_lat"),
             "hub_lng": d.get("hub_lng"),
@@ -4778,22 +4780,72 @@ async def _reconcile_collection_once(
     )
 
 
+# Driver codes: R91D-<4-digit running number>-<CITY>, e.g. R91D-0106-PNQ. One
+# global sequence across cities; the city comes from the driver's hub.
+CITY_CODES = {"ahmedabad": "AMD", "amdavad": "AMD", "pune": "PNQ"}
+
+
+def _city_code_from_text(txt: Optional[str]) -> Optional[str]:
+    t = (txt or "").lower()
+    for key, code in CITY_CODES.items():
+        if key in t:
+            return code
+    return None
+
+
+async def _driver_city_code(driver: Dict) -> str:
+    """City code (AMD/PNQ) from the driver's hub; 'XXX' if it can't be told."""
+    hub = None
+    if driver.get("hub_id"):
+        hub = await db.hubs.find_one({"id": driver["hub_id"]}, {"_id": 0, "city": 1, "name": 1})
+    if hub:
+        return (_city_code_from_text(hub.get("city"))
+                or _city_code_from_text(hub.get("name")) or "XXX")
+    return _city_code_from_text(driver.get("hub_name")) or "XXX"
+
+
+async def _next_driver_seq() -> int:
+    """Atomically take the next number in the global driver-code sequence."""
+    doc = await db.counters.find_one_and_update(
+        {"id": "driver_code"}, {"$inc": {"seq": 1}},
+        upsert=True, return_document=True,
+    )
+    return int(doc["seq"])
+
+
+async def _assign_driver_code(driver: Dict) -> str:
+    """Return the driver's code, assigning the next one in the sequence if they
+    don't have it yet (R91D-<seq>-<CITY>)."""
+    if driver.get("code"):
+        return driver["code"]
+    city = await _driver_city_code(driver)
+    n = await _next_driver_seq()
+    code = f"R91D-{n:04d}-{city}"
+    await db.drivers.update_one({"id": driver["id"]}, {"$set": {"code": code}})
+    driver["code"] = code
+    return code
+
+
 async def _get_or_create_collection_qr(driver: Dict) -> Dict[str, Any]:
-    """Return the driver's reusable collection QR, creating it on first use."""
+    """Return the driver's reusable collection QR, creating it on first use.
+    The QR is named with the driver's code (R91D-####-CITY) to match the
+    fleet's existing Razorpay naming."""
     existing = await db.driver_collection_qrs.find_one(
         {"driver_id": driver["id"]}, {"_id": 0}
     )
     if existing:
         return existing
+    code = await _assign_driver_code(driver)
+    label = f"{code} {driver.get('name') or ''}".strip()
     qr = await _rzp_request(
         "POST", "/payments/qr_codes",
         json={
             "type": "upi_qr",
-            "name": (driver.get("name") or "Ride91 driver")[:27],
+            "name": code[:27],             # the QR's name = the driver code
             "usage": "multiple_use",       # reusable — one QR for the driver, forever
             "fixed_amount": False,         # rider enters the fare
-            "description": f"Ride91 collection - {driver.get('name') or driver['id']}",
-            "notes": {"driver_id": driver["id"], "purpose": "collection"},
+            "description": label,
+            "notes": {"driver_id": driver["id"], "code": code, "purpose": "collection"},
         },
     )
     row = {
@@ -4811,7 +4863,7 @@ async def _get_or_create_collection_qr(driver: Dict) -> Dict[str, Any]:
     return row
 
 
-def _collection_qr_out(row: Optional[Dict]) -> Optional[Dict[str, Any]]:
+def _collection_qr_out(row: Optional[Dict], code: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     return {
@@ -4820,6 +4872,7 @@ def _collection_qr_out(row: Optional[Dict]) -> Optional[Dict[str, Any]]:
         "short_url": row.get("short_url"),
         "status": row.get("status"),
         "created_at": row.get("created_at"),
+        "code": code,
     }
 
 
@@ -4827,18 +4880,20 @@ def _collection_qr_out(row: Optional[Dict]) -> Optional[Dict[str, Any]]:
 async def admin_create_collection_qr(driver_id: str, admin: Dict = Depends(require_write)):
     if not _razorpay_configured():
         raise HTTPException(503, "razorpay_not_configured")
-    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "name": 1})
+    driver = await db.drivers.find_one(
+        {"id": driver_id}, {"_id": 0, "id": 1, "name": 1, "hub_id": 1, "hub_name": 1, "code": 1})
     if not driver:
         raise HTTPException(404, "driver_not_found")
     row = await _get_or_create_collection_qr(driver)
     await _audit(admin, "create_collection_qr", driver_id, {"qr_code_id": row.get("qr_code_id")})
-    return _collection_qr_out(row)
+    return _collection_qr_out(row, driver.get("code"))
 
 
 @api.get("/admin/drivers/{driver_id}/collection-qr")
 async def admin_get_collection_qr(driver_id: str, admin: Dict = Depends(fleet_admin)):
     row = await db.driver_collection_qrs.find_one({"driver_id": driver_id}, {"_id": 0})
-    return _collection_qr_out(row) or {"qr_code_id": None}
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "code": 1})
+    return _collection_qr_out(row, (d or {}).get("code")) or {"qr_code_id": None, "code": (d or {}).get("code")}
 
 
 @api.get("/admin/collections")
@@ -4877,12 +4932,12 @@ async def admin_collections(
     # Attach driver names (hide archived unless they have collections).
     ids = list(per.keys())
     names = {d["id"]: d async for d in db.drivers.find(
-        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "phone": 1})} if ids else {}
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "code": 1})} if ids else {}
     items = []
     for did, v in per.items():
         d = names.get(did, {})
         items.append({
-            "driver_id": did, "name": d.get("name"), "phone": d.get("phone"),
+            "driver_id": did, "name": d.get("name"), "phone": d.get("phone"), "code": d.get("code"),
             "total": v["total"], "count": v["count"], "last_at": v["last_at"],
         })
     items.sort(key=lambda x: x["total"], reverse=True)
@@ -6021,6 +6076,11 @@ async def _on_startup() -> None:
     await db.driver_collection_qrs.create_index([("driver_id", 1)], unique=True)
     await db.collections.create_index([("razorpay_payment_id", 1)], unique=True)
     await db.collections.create_index([("driver_id", 1), ("business_date", 1)])
+    await db.drivers.create_index([("code", 1)], unique=True, sparse=True)
+    # Seed the driver-code sequence so the first new code is R91D-0106-*
+    # (continuing after the fleet's existing R91D-0105). Leaves it if present.
+    await db.counters.update_one(
+        {"id": "driver_code"}, {"$setOnInsert": {"id": "driver_code", "seq": 105}}, upsert=True)
     await _seed_admin_owner()
     await load_settings()
     await _seed_if_empty()
