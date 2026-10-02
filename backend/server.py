@@ -126,6 +126,17 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "loyalty_wallet_min_gross": 1500,      # a day counts only if gross >= this (0 = any on-duty day)
     "loyalty_wallet_start_date": "2026-10-01",   # accrue from this business date onward
     "loyalty_wallet_payout_every_days": 90,      # suggested payout cadence (for the "due" nudge)
+    # Attendance & monthly-target bonus. A "good day" = logged in on time (vs the
+    # driver's own scheduled shift start + grace) AND hit the daily gross target.
+    # The monthly bonus pays when good days (and optional monthly gross) clear the
+    # floor. All live.
+    "attendance_enabled": True,
+    "attendance_daily_target": 2500,       # ₹ gross for a day to count
+    "attendance_require_ontime": True,     # require punctual login (vs their scheduled shift start)
+    "attendance_grace_minutes": 30,        # minutes past scheduled start still "on time"
+    "attendance_monthly_min_days": 24,     # good days needed in the month
+    "attendance_monthly_min_gross": 0,     # optional monthly gross floor (0 = ignore)
+    "attendance_monthly_bonus": 3000,      # ₹ paid when the month qualifies
     # Razorpay credentials (owner-editable; override the env vars). Secret
     # values are never returned by the API — only their "set" status is.
     "razorpay_key_id": "",
@@ -776,6 +787,14 @@ class SettingsIn(BaseModel):
     loyalty_wallet_min_gross: Optional[int] = Field(default=None, ge=0)
     loyalty_wallet_start_date: Optional[str] = None
     loyalty_wallet_payout_every_days: Optional[int] = Field(default=None, ge=1)
+    # Attendance & monthly-target config.
+    attendance_enabled: Optional[bool] = None
+    attendance_daily_target: Optional[int] = Field(default=None, ge=0)
+    attendance_require_ontime: Optional[bool] = None
+    attendance_grace_minutes: Optional[int] = Field(default=None, ge=0)
+    attendance_monthly_min_days: Optional[int] = Field(default=None, ge=0)
+    attendance_monthly_min_gross: Optional[int] = Field(default=None, ge=0)
+    attendance_monthly_bonus: Optional[int] = Field(default=None, ge=0)
     # Razorpay credentials (owner only; override env vars, never read back).
     razorpay_key_id: Optional[str] = None
     razorpay_key_secret: Optional[str] = None
@@ -1853,6 +1872,9 @@ _REWARD_SETTING_KEYS = (
     "reward_days_required", "loyalty_milestones", "yearly_top_driver", "yearly_top_car",
     "loyalty_wallet_enabled", "loyalty_wallet_per_day", "loyalty_wallet_min_gross",
     "loyalty_wallet_start_date", "loyalty_wallet_payout_every_days",
+    "attendance_enabled", "attendance_daily_target", "attendance_require_ontime",
+    "attendance_grace_minutes", "attendance_monthly_min_days",
+    "attendance_monthly_min_gross", "attendance_monthly_bonus",
 )
 
 
@@ -1924,12 +1946,18 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
     for k in ("reward_daily_target", "reward_top_car_day", "reward_week_car_target",
               "reward_top_car_week", "reward_week_driver_target", "reward_top_driver_week",
               "reward_days_required", "yearly_top_driver", "yearly_top_car",
-              "loyalty_wallet_per_day", "loyalty_wallet_min_gross", "loyalty_wallet_payout_every_days"):
+              "loyalty_wallet_per_day", "loyalty_wallet_min_gross", "loyalty_wallet_payout_every_days",
+              "attendance_daily_target", "attendance_grace_minutes", "attendance_monthly_min_days",
+              "attendance_monthly_min_gross", "attendance_monthly_bonus"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v
     if body.loyalty_wallet_enabled is not None:
         updates["loyalty_wallet_enabled"] = bool(body.loyalty_wallet_enabled)
+    if body.attendance_enabled is not None:
+        updates["attendance_enabled"] = bool(body.attendance_enabled)
+    if body.attendance_require_ontime is not None:
+        updates["attendance_require_ontime"] = bool(body.attendance_require_ontime)
     if body.loyalty_wallet_start_date is not None:
         updates["loyalty_wallet_start_date"] = body.loyalty_wallet_start_date.strip()
     if body.loyalty_milestones is not None:
@@ -3599,6 +3627,7 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
         hb = out_hubs[bucket(d)]
         ly = _loyalty_state(d, cum.get(d["id"], 0.0))
         wallet = await _loyalty_wallet(d)
+        att = await _attendance_state(d)
         hb["drivers"].append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
             "shift": d.get("shift_type", "day"),
@@ -3610,6 +3639,12 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
             "wallet_balance": wallet["balance"],
             "wallet_accrued": wallet["accrued"],
             "wallet_paid": wallet["paid"],
+            "att_good_days": att["good_days"],
+            "att_min_days": att["min_days"],
+            "att_qualified": att["qualified"],
+            "att_bonus": att["bonus"],
+            "att_paid": att["paid"],
+            "att_month": att["month"],
         })
 
     # ---- Cars: combine day + night year gross ----
@@ -3654,6 +3689,7 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
         "milestones": LOYALTY_MILESTONES,
         "thresholds": {"top_driver_year": YEARLY_TOP_DRIVER, "top_car_year": YEARLY_TOP_CAR},
         "wallet_enabled": bool(get_setting("loyalty_wallet_enabled")),
+        "attendance_enabled": bool(get_setting("attendance_enabled")),
     }
 
 
@@ -3689,6 +3725,35 @@ async def admin_loyalty_payout(
     await db.reward_payouts.insert_one(row.copy())
     await _audit(admin, "loyalty_wallet_payout", driver_id, {"amount": row["amount"]})
     return {"ok": True, "paid": row["amount"], "wallet": await _loyalty_wallet(driver)}
+
+
+@api.post("/admin/drivers/{driver_id}/attendance-payout")
+async def admin_attendance_payout(driver_id: str, admin: Dict = Depends(require_write)):
+    """Pay the current month's attendance bonus. Only when the month qualifies,
+    and once per driver per month (idempotent)."""
+    driver = await db.drivers.find_one(
+        {"id": driver_id}, {"_id": 0, "id": 1, "active": 1, "archived": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    att = await _attendance_state(driver)
+    if not att["enabled"]:
+        raise HTTPException(409, "attendance_disabled")
+    if not att["qualified"]:
+        raise HTTPException(409, "month_not_qualified")
+    if att["paid"]:
+        raise HTTPException(409, "already_paid_this_month")
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver_id,
+        "type": "attendance",
+        "month": att["month"],
+        "amount": int(att["bonus"]),
+        "created_at": iso(now_utc()),
+        "created_by": admin["username"],
+    }
+    await db.reward_payouts.insert_one(row.copy())
+    await _audit(admin, "attendance_payout", driver_id, {"month": att["month"], "amount": row["amount"]})
+    return {"ok": True, "paid": row["amount"], "attendance": await _attendance_state(driver)}
 
 
 # ---------------------------------------------------------------------------
@@ -4217,6 +4282,102 @@ async def _loyalty_wallet(driver: Dict) -> Dict[str, Any]:
     }
 
 
+def _month_start_bd(today_bd: str) -> str:
+    return today_bd[:7] + "-01"
+
+
+async def _attendance_state(driver: Dict) -> Dict[str, Any]:
+    """Attendance & monthly-target standing for the current calendar month. A
+    'good day' = daily gross >= target AND (if required) the driver started duty
+    on time vs their own scheduled shift start + grace. The monthly bonus pays
+    when good days (and optional monthly gross) clear the floor."""
+    enabled = bool(get_setting("attendance_enabled"))
+    daily_target = float(get_setting("attendance_daily_target") or 0)
+    require_ontime = bool(get_setting("attendance_require_ontime"))
+    grace_min = int(get_setting("attendance_grace_minutes") or 0)
+    min_days = int(get_setting("attendance_monthly_min_days") or 0)
+    min_gross = float(get_setting("attendance_monthly_min_gross") or 0)
+    bonus = int(get_setting("attendance_monthly_bonus") or 0)
+    active = driver.get("active", True) and not driver.get("archived")
+    today_bd = business_date_now()
+    month_start = _month_start_bd(today_bd)
+    month = today_bd[:7]
+    if not enabled:
+        return {"enabled": False, "month": month, "good_days": 0, "min_days": min_days,
+                "month_gross": 0, "min_gross": min_gross, "bonus": bonus, "qualified": False,
+                "require_ontime": require_ontime, "daily_target": daily_target, "active": active, "paid": False}
+
+    did = driver["id"]
+    # Daily gross for the month.
+    daily_gross: Dict[str, float] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"driver_id": did, "business_date": {"$gte": month_start, "$lte": today_bd}}},
+        {"$group": {"_id": "$business_date", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        daily_gross[r["_id"]] = float(r.get("g") or 0)
+
+    # Earliest start_duty per business day.
+    first_start: Dict[str, datetime] = {}
+    async for r in db.duty_states.find(
+        {"driver_id": did, "state": "start_duty", "business_date": {"$gte": month_start, "$lte": today_bd}},
+        {"_id": 0, "business_date": 1, "started_at": 1, "synced_at": 1},
+    ):
+        bd = r.get("business_date")
+        raw = r.get("started_at") or r.get("synced_at")
+        if not bd or not raw:
+            continue
+        try:
+            ts = _parse_iso(raw)
+        except Exception:
+            continue
+        if bd not in first_start or ts < first_start[bd]:
+            first_start[bd] = ts
+
+    # Scheduled shift start per business day (from the shift-alarm system).
+    scheduled: Dict[str, datetime] = {}
+    if require_ontime:
+        async for r in db.shift_schedules.find(
+            {"driver_id": did}, {"_id": 0, "shift_start": 1}
+        ):
+            raw = r.get("shift_start")
+            if not raw:
+                continue
+            try:
+                ts = _parse_iso(raw)
+            except Exception:
+                continue
+            bd = business_date_from_dt(ts)
+            if bd not in scheduled or ts < scheduled[bd]:
+                scheduled[bd] = ts
+
+    good_days = 0
+    month_gross = 0.0
+    for bd, g in daily_gross.items():
+        month_gross += g
+        if g < daily_target:
+            continue
+        if require_ontime:
+            sched = scheduled.get(bd)
+            started = first_start.get(bd)
+            if not sched or not started:
+                continue   # can't confirm punctuality → not a good day
+            if started > sched + timedelta(minutes=grace_min):
+                continue   # logged in late
+        good_days += 1
+
+    qualified = (good_days >= min_days) and (min_gross <= 0 or month_gross >= min_gross)
+    paid = await db.reward_payouts.find_one(
+        {"driver_id": did, "type": "attendance", "month": month}, {"_id": 1}) is not None
+    return {
+        "enabled": True, "month": month,
+        "good_days": good_days, "min_days": min_days,
+        "month_gross": round(month_gross, 2), "min_gross": min_gross,
+        "bonus": bonus, "qualified": qualified and active,
+        "require_ontime": require_ontime, "daily_target": daily_target,
+        "active": active, "paid": paid,
+    }
+
+
 @api.get("/money/rewards")
 async def money_rewards(driver: Dict = Depends(get_driver)):
     """Progress toward the weekly reward system. Rewards are additional to the
@@ -4303,6 +4464,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     cum_gross = await _driver_cumulative_gross(driver["id"], loyalty_start)
     loyalty = _loyalty_state(driver, cum_gross)
     wallet = await _loyalty_wallet(driver)
+    attendance = await _attendance_state(driver)
 
     today_bd = business_date_now()
     year_start, next_year, year_label = _year_bounds(today_bd)
@@ -4327,6 +4489,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
         "year": year_label,
         "loyalty": loyalty,
         "wallet": wallet,
+        "attendance": attendance,
         "yearly": {
             "label": "Top driver of the year",
             "value": my_year,

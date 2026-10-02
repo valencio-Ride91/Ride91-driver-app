@@ -42,6 +42,18 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [wMsg, setWMsg] = useState<string | null>(null);
   const [wErr, setWErr] = useState<string | null>(null);
 
+  // attendance
+  const [aEnabled, setAEnabled] = useState(true);
+  const [aReqOntime, setAReqOntime] = useState(true);
+  const [aDaily, setADaily] = useState("");
+  const [aGrace, setAGrace] = useState("");
+  const [aMinDays, setAMinDays] = useState("");
+  const [aMinGross, setAMinGross] = useState("");
+  const [aBonus, setABonus] = useState("");
+  const [aBusy, setABusy] = useState(false);
+  const [aMsg, setAMsg] = useState<string | null>(null);
+  const [aErr, setAErr] = useState<string | null>(null);
+
   // change password
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -72,6 +84,13 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     setWMinGross(String(s.loyalty_wallet_min_gross ?? ""));
     setWStart(s.loyalty_wallet_start_date ?? "");
     setWCadence(String(s.loyalty_wallet_payout_every_days ?? ""));
+    setAEnabled(!!s.attendance_enabled);
+    setAReqOntime(!!s.attendance_require_ontime);
+    setADaily(String(s.attendance_daily_target ?? ""));
+    setAGrace(String(s.attendance_grace_minutes ?? ""));
+    setAMinDays(String(s.attendance_monthly_min_days ?? ""));
+    setAMinGross(String(s.attendance_monthly_min_gross ?? ""));
+    setABonus(String(s.attendance_monthly_bonus ?? ""));
   }, []);
 
   useEffect(() => { load().catch(() => setErr("Could not load settings.")); }, [load]);
@@ -171,6 +190,30 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setWErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
     } finally {
       setWBusy(false);
+    }
+  };
+
+  const saveAttendance = async () => {
+    setAErr(null); setAMsg(null);
+    const nums = { attendance_daily_target: Number(aDaily), attendance_grace_minutes: Number(aGrace),
+      attendance_monthly_min_days: Number(aMinDays), attendance_monthly_min_gross: Number(aMinGross),
+      attendance_monthly_bonus: Number(aBonus) };
+    for (const [k, v] of Object.entries(nums)) {
+      if (!Number.isFinite(v) || v < 0) return setAErr(`"${k.replace(/_/g, " ")}" must be 0 or more.`);
+    }
+    setABusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", {
+        attendance_enabled: aEnabled, attendance_require_ontime: aReqOntime,
+        ...Object.fromEntries(Object.entries(nums).map(([k, v]) => [k, Math.round(v)])),
+      });
+      setData(s);
+      setAMsg("Attendance settings saved.");
+      setTimeout(() => setAMsg(null), 3000);
+    } catch (e: any) {
+      setAErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setABusy(false);
     }
   };
 
@@ -302,6 +345,46 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
         {isOwner ? (
           <div className="form-actions">
             <button className="primary" onClick={saveWallet} disabled={wBusy}>{wBusy ? "Saving…" : "Save loyalty wallet"}</button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Attendance &amp; monthly target {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          A "good day" = driver logged in on time (vs their own scheduled shift start + grace) and hit the daily target. The monthly bonus pays when good days clear the floor. Forfeited if they leave.
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 6 }}>
+          <input type="checkbox" checked={aEnabled} disabled={!isOwner} onChange={(e) => setAEnabled(e.target.checked)} style={{ width: "auto" }} />
+          Enabled
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 10 }}>
+          <input type="checkbox" checked={aReqOntime} disabled={!isOwner} onChange={(e) => setAReqOntime(e.target.checked)} style={{ width: "auto" }} />
+          Require on-time login (uses each driver's scheduled shift start)
+        </label>
+        <div className="form-grid">
+          <label>Daily target (₹ gross)
+            <input type="number" min={0} value={aDaily} disabled={!isOwner} onChange={(e) => setADaily(e.target.value)} />
+          </label>
+          <label>On-time grace (minutes)
+            <input type="number" min={0} value={aGrace} disabled={!isOwner} onChange={(e) => setAGrace(e.target.value)} />
+          </label>
+          <label>Monthly minimum good days
+            <input type="number" min={0} value={aMinDays} disabled={!isOwner} onChange={(e) => setAMinDays(e.target.value)} />
+          </label>
+          <label>Monthly minimum gross (₹, 0 = ignore)
+            <input type="number" min={0} value={aMinGross} disabled={!isOwner} onChange={(e) => setAMinGross(e.target.value)} />
+          </label>
+          <label>Monthly bonus (₹)
+            <input type="number" min={0} value={aBonus} disabled={!isOwner} onChange={(e) => setABonus(e.target.value)} />
+          </label>
+        </div>
+        {!aReqOntime ? <div className="muted-sm" style={{ marginTop: 6 }}>On-time check is off — a good day only needs the daily target.</div> : null}
+        {aErr ? <div className="err">{aErr}</div> : null}
+        {aMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{aMsg}</div> : null}
+        {isOwner ? (
+          <div className="form-actions">
+            <button className="primary" onClick={saveAttendance} disabled={aBusy}>{aBusy ? "Saving…" : "Save attendance"}</button>
           </div>
         ) : null}
       </div>

@@ -402,6 +402,12 @@ export interface LoyaltyDriver {
   wallet_balance?: number;
   wallet_accrued?: number;
   wallet_paid?: number;
+  att_good_days?: number;
+  att_min_days?: number;
+  att_qualified?: boolean;
+  att_bonus?: number;
+  att_paid?: boolean;
+  att_month?: string;
 }
 
 export interface LoyaltyCar {
@@ -426,6 +432,7 @@ export interface LoyaltyResponse {
   milestones: Array<{ key: string; label: string; reward: number; amount: number }>;
   thresholds: { top_driver_year: number; top_car_year: number };
   wallet_enabled?: boolean;
+  attendance_enabled?: boolean;
 }
 
 export interface CollectionRow {
@@ -490,6 +497,14 @@ export interface SettingsData {
   loyalty_wallet_min_gross: number;
   loyalty_wallet_start_date: string;
   loyalty_wallet_payout_every_days: number;
+  // Attendance config.
+  attendance_enabled: boolean;
+  attendance_daily_target: number;
+  attendance_require_ontime: boolean;
+  attendance_grace_minutes: number;
+  attendance_monthly_min_days: number;
+  attendance_monthly_min_gross: number;
+  attendance_monthly_bonus: number;
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
 }

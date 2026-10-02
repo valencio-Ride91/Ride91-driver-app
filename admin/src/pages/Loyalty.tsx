@@ -69,7 +69,7 @@ export default function Loyalty() {
       ) : (data?.hubs ?? []).length === 0 ? (
         <div className="card"><div className="empty">No hubs with drivers yet.</div></div>
       ) : (
-        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} walletOn={!!data!.wallet_enabled} onPaid={load} />)
+        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} walletOn={!!data!.wallet_enabled} attOn={!!data!.attendance_enabled} onPaid={load} />)
       )}
 
       <div className="muted-sm" style={{ marginTop: 12 }}>
@@ -79,7 +79,7 @@ export default function Loyalty() {
   );
 }
 
-function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolean; onPaid: () => void }) {
+function HubBlock({ hub, walletOn, attOn, onPaid }: { hub: LoyaltyHub; walletOn: boolean; attOn: boolean; onPaid: () => void }) {
   const [tab, setTab] = useState<"drivers" | "cars">("drivers");
 
   const payWallet = async (driverId: string, name: string | null, balance: number) => {
@@ -93,6 +93,17 @@ function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolea
       onPaid();
     } catch (e: any) {
       window.alert(e?.body?.detail === "amount_exceeds_balance" ? "Amount is more than the balance." : "Could not record the payout.");
+    }
+  };
+
+  const payAttendance = async (driverId: string, name: string | null, bonus: number) => {
+    if (!window.confirm(`Pay this month's attendance bonus (₹${bonus}) to ${name ?? driverId.slice(0, 8)}?`)) return;
+    try {
+      await api.post(`/admin/drivers/${driverId}/attendance-payout`, {});
+      onPaid();
+    } catch (e: any) {
+      const d = e?.body?.detail;
+      window.alert(d === "month_not_qualified" ? "This month hasn't qualified yet." : d === "already_paid_this_month" ? "Already paid this month." : "Could not pay.");
     }
   };
 
@@ -111,9 +122,9 @@ function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolea
 
       {tab === "drivers" ? (
         <table className="data">
-          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th>{walletOn ? <th style={{ textAlign: "right" }}>Wallet</th> : null}<th style={{ textAlign: "right" }}>Vested</th><th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
+          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th>{walletOn ? <th style={{ textAlign: "right" }}>Wallet</th> : null}{attOn ? <th style={{ textAlign: "center" }}>Attendance</th> : null}<th style={{ textAlign: "right" }}>Vested</th><th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
           <tbody>
-            {hub.drivers.length === 0 ? <tr><td colSpan={walletOn ? 6 : 5} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
+            {hub.drivers.length === 0 ? <tr><td colSpan={5 + (walletOn ? 1 : 0) + (attOn ? 1 : 0)} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
               <tr key={d.driver_id}>
                 <td>
                   <Link to={`/drivers/${d.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{d.name ?? d.driver_id.slice(0, 8)}</Link>
@@ -131,6 +142,14 @@ function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolea
                     {(d.wallet_balance ?? 0) > 0 ? (
                       <button className="ghost" style={{ marginLeft: 6 }} onClick={() => payWallet(d.driver_id, d.name, d.wallet_balance ?? 0)}>Pay</button>
                     ) : null}
+                  </td>
+                ) : null}
+                {attOn ? (
+                  <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
+                    <span className={`tag ${d.att_qualified ? "live" : "muted"}`}>{d.att_good_days ?? 0}/{d.att_min_days ?? 0}</span>
+                    {d.att_paid ? <span className="tag ok" style={{ marginLeft: 4 }}>paid</span>
+                      : d.att_qualified ? <button className="ghost" style={{ marginLeft: 4 }} onClick={() => payAttendance(d.driver_id, d.name, d.att_bonus ?? 0)}>Pay ₹{d.att_bonus ?? 0}</button>
+                      : null}
                   </td>
                 ) : null}
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>

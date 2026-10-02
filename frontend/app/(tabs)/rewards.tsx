@@ -37,6 +37,7 @@ interface Loyalty {
     vested_total: number;
   };
   wallet?: { enabled: boolean; per_day: number; qualifying_days: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
+  attendance?: { enabled: boolean; month: string; good_days: number; min_days: number; bonus: number; qualified: boolean; require_ontime: boolean; daily_target: number; paid: boolean };
   yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
 }
 
@@ -110,6 +111,28 @@ export default function RewardsTab() {
             <Text style={styles.hint}>Loading…</Text>
           )}
         </Card>
+
+        {loyalty?.attendance?.enabled ? (
+          <Card testID="rewards-attendance-card" style={{ marginTop: spacing.md }}>
+            <View style={styles.head}>
+              <Text style={styles.cardTitle}>Attendance 📅</Text>
+              <Text style={styles.hint}>{loyalty.attendance.month}</Text>
+            </View>
+            <View style={styles.reward}>
+              <View style={styles.rewardHead}>
+                <Text style={styles.rewardLabel}>{loyalty.attendance.qualified ? "✅ Qualified" : "Good days this month"}</Text>
+                <Text style={styles.rewardAmount}>+{formatINR(loyalty.attendance.bonus)}</Text>
+              </View>
+              <View style={styles.bar}>
+                <View style={[styles.barFill, { width: `${loyalty.attendance.min_days ? Math.round(Math.min(1, loyalty.attendance.good_days / loyalty.attendance.min_days) * 100) : 0}%` as const, backgroundColor: loyalty.attendance.qualified ? colors.live : colors.amber }]} />
+              </View>
+              <View style={styles.rewardFoot}>
+                <Text style={styles.rewardProgress}>{loyalty.attendance.good_days} / {loyalty.attendance.min_days} days</Text>
+                <Text style={styles.rewardNote}>{loyalty.attendance.paid ? "paid 🎉" : `≥ ${formatINR(loyalty.attendance.daily_target)}/day${loyalty.attendance.require_ontime ? ", on time" : ""}`}</Text>
+              </View>
+            </View>
+          </Card>
+        ) : null}
 
         {loyalty?.wallet?.enabled ? (
           <Card testID="rewards-wallet-card" style={{ marginTop: spacing.md }}>
