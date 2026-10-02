@@ -399,6 +399,9 @@ export interface LoyaltyDriver {
   vested_total: number;
   milestones: LoyaltyMilestone[];
   is_top_driver_year?: boolean;
+  wallet_balance?: number;
+  wallet_accrued?: number;
+  wallet_paid?: number;
 }
 
 export interface LoyaltyCar {
@@ -422,6 +425,7 @@ export interface LoyaltyResponse {
   hubs: LoyaltyHub[];
   milestones: Array<{ key: string; label: string; reward: number; days: number }>;
   thresholds: { top_driver_year: number; top_car_year: number };
+  wallet_enabled?: boolean;
 }
 
 export interface CollectionRow {
@@ -480,6 +484,12 @@ export interface SettingsData {
   loyalty_milestones: Array<{ key: string; label: string; days: number; reward: number }>;
   yearly_top_driver: number;
   yearly_top_car: number;
+  // Loyalty wallet config.
+  loyalty_wallet_enabled: boolean;
+  loyalty_wallet_per_day: number;
+  loyalty_wallet_min_gross: number;
+  loyalty_wallet_start_date: string;
+  loyalty_wallet_payout_every_days: number;
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
 }

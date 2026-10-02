@@ -69,7 +69,7 @@ export default function Loyalty() {
       ) : (data?.hubs ?? []).length === 0 ? (
         <div className="card"><div className="empty">No hubs with drivers yet.</div></div>
       ) : (
-        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} />)
+        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} walletOn={!!data!.wallet_enabled} onPaid={load} />)
       )}
 
       <div className="muted-sm" style={{ marginTop: 12 }}>
@@ -79,8 +79,23 @@ export default function Loyalty() {
   );
 }
 
-function HubBlock({ hub }: { hub: LoyaltyHub }) {
+function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolean; onPaid: () => void }) {
   const [tab, setTab] = useState<"drivers" | "cars">("drivers");
+
+  const payWallet = async (driverId: string, name: string | null, balance: number) => {
+    if (balance <= 0) return;
+    const raw = window.prompt(`Pay loyalty wallet to ${name ?? driverId.slice(0, 8)} (balance ₹${balance}). Amount:`, String(balance));
+    if (raw == null) return;
+    const amt = Number(raw);
+    if (!Number.isFinite(amt) || amt <= 0) return;
+    try {
+      await api.post(`/admin/drivers/${driverId}/loyalty-payout`, { amount: amt });
+      onPaid();
+    } catch (e: any) {
+      window.alert(e?.body?.detail === "amount_exceeds_balance" ? "Amount is more than the balance." : "Could not record the payout.");
+    }
+  };
+
   return (
     <div className="card" style={{ marginBottom: 20, padding: 0 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--line)" }}>
@@ -96,9 +111,9 @@ function HubBlock({ hub }: { hub: LoyaltyHub }) {
 
       {tab === "drivers" ? (
         <table className="data">
-          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th><th style={{ textAlign: "right" }}>Vested</th><th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
+          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th>{walletOn ? <th style={{ textAlign: "right" }}>Wallet</th> : null}<th style={{ textAlign: "right" }}>Vested</th><th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
           <tbody>
-            {hub.drivers.length === 0 ? <tr><td colSpan={5} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
+            {hub.drivers.length === 0 ? <tr><td colSpan={walletOn ? 6 : 5} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
               <tr key={d.driver_id}>
                 <td>
                   <Link to={`/drivers/${d.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{d.name ?? d.driver_id.slice(0, 8)}</Link>
@@ -110,6 +125,14 @@ function HubBlock({ hub }: { hub: LoyaltyHub }) {
                     <span className="muted-sm">{d.next_milestone.label} · {d.next_milestone.days_remaining}d left · {fmtINR(d.next_milestone.reward)}</span>
                   ) : <span className="tag ok">all reached</span>}
                 </td>
+                {walletOn ? (
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>{fmtINR(d.wallet_balance ?? 0)}</span>
+                    {(d.wallet_balance ?? 0) > 0 ? (
+                      <button className="ghost" style={{ marginLeft: 6 }} onClick={() => payWallet(d.driver_id, d.name, d.wallet_balance ?? 0)}>Pay</button>
+                    ) : null}
+                  </td>
+                ) : null}
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
                   {d.vested_total > 0 ? fmtINR(d.vested_total) : <span className="muted-sm">—</span>}
                 </td>

@@ -36,6 +36,7 @@ interface Loyalty {
     next: { key: string; label: string; reward: number; days: number; days_remaining: number; progress: number } | null;
     vested_total: number;
   };
+  wallet?: { enabled: boolean; per_day: number; qualifying_days: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
   yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
 }
 
@@ -109,6 +110,21 @@ export default function RewardsTab() {
             <Text style={styles.hint}>Loading…</Text>
           )}
         </Card>
+
+        {loyalty?.wallet?.enabled ? (
+          <Card testID="rewards-wallet-card" style={{ marginTop: spacing.md }}>
+            <View style={styles.head}>
+              <Text style={styles.cardTitle}>Loyalty wallet 💰</Text>
+              <Text style={styles.hint}>grows every day you drive</Text>
+            </View>
+            <Text style={[styles.hero, { color: colors.live }]}>{formatINR(loyalty.wallet.balance)}</Text>
+            <Text style={styles.sub}>
+              {loyalty.wallet.qualifying_days} days × {formatINR(loyalty.wallet.per_day)}
+              {loyalty.wallet.paid > 0 ? ` · ${formatINR(loyalty.wallet.paid)} already paid` : ""}
+            </Text>
+            <Text style={styles.note}>Paid out by the office. You keep it by staying — it's lost if you leave.</Text>
+          </Card>
+        ) : null}
 
         {loyalty ? (
           <Card testID="rewards-loyalty-card" style={{ marginTop: spacing.md }}>
@@ -209,6 +225,8 @@ const styles = StyleSheet.create({
   head: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   cardTitle: { fontFamily: fonts.display, fontSize: 18, color: colors.ink, marginBottom: spacing.sm },
   hint: { fontFamily: fonts.uiMed, fontSize: 11, color: colors.muted },
+  hero: { fontFamily: fonts.dataMed, fontSize: 34, color: colors.ink, marginTop: 2 },
+  sub: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted, marginTop: 2 },
   daysRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line, marginBottom: 4 },
   daysLabel: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
   daysValue: { fontFamily: fonts.dataMed, fontSize: 15, color: colors.ink },

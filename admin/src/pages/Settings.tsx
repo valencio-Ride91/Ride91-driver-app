@@ -32,6 +32,16 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [payMsg, setPayMsg] = useState<string | null>(null);
   const [payErr, setPayErr] = useState<string | null>(null);
 
+  // loyalty wallet
+  const [wEnabled, setWEnabled] = useState(true);
+  const [wPerDay, setWPerDay] = useState("");
+  const [wMinGross, setWMinGross] = useState("");
+  const [wStart, setWStart] = useState("");
+  const [wCadence, setWCadence] = useState("");
+  const [wBusy, setWBusy] = useState(false);
+  const [wMsg, setWMsg] = useState<string | null>(null);
+  const [wErr, setWErr] = useState<string | null>(null);
+
   // change password
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -57,6 +67,11 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       yearly_top_car: String(s.yearly_top_car),
     });
     setMs((s.loyalty_milestones ?? []).map((m) => ({ ...m })));
+    setWEnabled(!!s.loyalty_wallet_enabled);
+    setWPerDay(String(s.loyalty_wallet_per_day ?? ""));
+    setWMinGross(String(s.loyalty_wallet_min_gross ?? ""));
+    setWStart(s.loyalty_wallet_start_date ?? "");
+    setWCadence(String(s.loyalty_wallet_payout_every_days ?? ""));
   }, []);
 
   useEffect(() => { load().catch(() => setErr("Could not load settings.")); }, [load]);
@@ -131,6 +146,31 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setPayErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
     } finally {
       setPayBusy(false);
+    }
+  };
+
+  const saveWallet = async () => {
+    setWErr(null); setWMsg(null);
+    const perDay = Number(wPerDay), minGross = Number(wMinGross), cadence = Number(wCadence);
+    if (!Number.isFinite(perDay) || perDay < 0) return setWErr("Per-day amount must be 0 or more.");
+    if (!Number.isFinite(minGross) || minGross < 0) return setWErr("Minimum gross must be 0 or more.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(wStart)) return setWErr("Start date must be YYYY-MM-DD.");
+    setWBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", {
+        loyalty_wallet_enabled: wEnabled,
+        loyalty_wallet_per_day: Math.round(perDay),
+        loyalty_wallet_min_gross: Math.round(minGross),
+        loyalty_wallet_start_date: wStart,
+        loyalty_wallet_payout_every_days: Number.isFinite(cadence) && cadence > 0 ? Math.round(cadence) : 90,
+      });
+      setData(s);
+      setWMsg("Loyalty wallet settings saved.");
+      setTimeout(() => setWMsg(null), 3000);
+    } catch (e: any) {
+      setWErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setWBusy(false);
     }
   };
 
@@ -227,6 +267,41 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
         {isOwner ? (
           <div className="form-actions">
             <button className="primary" onClick={saveRewards} disabled={rwSaving}>{rwSaving ? "Saving…" : "Save reward settings"}</button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Loyalty wallet {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          A balance that grows every qualifying day a driver works, paid out by ops, and <strong>forfeited if they leave</strong>. The strongest retention lock — paid on top of the 30% share.
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 10 }}>
+          <input type="checkbox" checked={wEnabled} disabled={!isOwner} onChange={(e) => setWEnabled(e.target.checked)} style={{ width: "auto" }} />
+          Enabled
+        </label>
+        <div className="form-grid">
+          <label>Accrual per qualifying day (₹)
+            <input type="number" min={0} value={wPerDay} disabled={!isOwner} onChange={(e) => setWPerDay(e.target.value)} />
+          </label>
+          <label>Min daily gross to count a day (₹)
+            <input type="number" min={0} value={wMinGross} disabled={!isOwner} onChange={(e) => setWMinGross(e.target.value)} />
+          </label>
+          <label>Accrue from (business date)
+            <input type="date" value={wStart} disabled={!isOwner} onChange={(e) => setWStart(e.target.value)} />
+          </label>
+          <label>Suggested payout every (days)
+            <input type="number" min={1} value={wCadence} disabled={!isOwner} onChange={(e) => setWCadence(e.target.value)} />
+          </label>
+        </div>
+        <div className="muted-sm" style={{ marginTop: 6 }}>
+          A day counts when that driver's gross ≥ the minimum. At ₹{wPerDay || 0}/day that's about ₹{((Number(wPerDay) || 0) * 26).toLocaleString("en-IN")}/month of lock-in per active driver.
+        </div>
+        {wErr ? <div className="err">{wErr}</div> : null}
+        {wMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{wMsg}</div> : null}
+        {isOwner ? (
+          <div className="form-actions">
+            <button className="primary" onClick={saveWallet} disabled={wBusy}>{wBusy ? "Saving…" : "Save loyalty wallet"}</button>
           </div>
         ) : null}
       </div>

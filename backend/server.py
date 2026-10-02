@@ -117,6 +117,13 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "loyalty_milestones": LOYALTY_MILESTONES,
     "yearly_top_driver": YEARLY_TOP_DRIVER,
     "yearly_top_car": YEARLY_TOP_CAR,
+    # Loyalty Wallet — a forfeitable balance that accrues per qualifying day a
+    # driver works, paid out by ops, forfeited if they leave. All knobs live.
+    "loyalty_wallet_enabled": True,
+    "loyalty_wallet_per_day": 25,          # ₹ accrued per qualifying day
+    "loyalty_wallet_min_gross": 1500,      # a day counts only if gross >= this (0 = any on-duty day)
+    "loyalty_wallet_start_date": "2026-10-01",   # accrue from this business date onward
+    "loyalty_wallet_payout_every_days": 90,      # suggested payout cadence (for the "due" nudge)
     # Razorpay credentials (owner-editable; override the env vars). Secret
     # values are never returned by the API — only their "set" status is.
     "razorpay_key_id": "",
@@ -761,6 +768,12 @@ class SettingsIn(BaseModel):
     loyalty_milestones: Optional[List[Dict[str, Any]]] = None
     yearly_top_driver: Optional[int] = Field(default=None, ge=0)
     yearly_top_car: Optional[int] = Field(default=None, ge=0)
+    # Loyalty wallet config.
+    loyalty_wallet_enabled: Optional[bool] = None
+    loyalty_wallet_per_day: Optional[int] = Field(default=None, ge=0)
+    loyalty_wallet_min_gross: Optional[int] = Field(default=None, ge=0)
+    loyalty_wallet_start_date: Optional[str] = None
+    loyalty_wallet_payout_every_days: Optional[int] = Field(default=None, ge=1)
     # Razorpay credentials (owner only; override env vars, never read back).
     razorpay_key_id: Optional[str] = None
     razorpay_key_secret: Optional[str] = None
@@ -1836,6 +1849,8 @@ _REWARD_SETTING_KEYS = (
     "reward_daily_target", "reward_top_car_day", "reward_week_car_target",
     "reward_top_car_week", "reward_week_driver_target", "reward_top_driver_week",
     "reward_days_required", "loyalty_milestones", "yearly_top_driver", "yearly_top_car",
+    "loyalty_wallet_enabled", "loyalty_wallet_per_day", "loyalty_wallet_min_gross",
+    "loyalty_wallet_start_date", "loyalty_wallet_payout_every_days",
 )
 
 
@@ -1905,10 +1920,15 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
     # Weekly + yearly reward numbers.
     for k in ("reward_daily_target", "reward_top_car_day", "reward_week_car_target",
               "reward_top_car_week", "reward_week_driver_target", "reward_top_driver_week",
-              "reward_days_required", "yearly_top_driver", "yearly_top_car"):
+              "reward_days_required", "yearly_top_driver", "yearly_top_car",
+              "loyalty_wallet_per_day", "loyalty_wallet_min_gross", "loyalty_wallet_payout_every_days"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v
+    if body.loyalty_wallet_enabled is not None:
+        updates["loyalty_wallet_enabled"] = bool(body.loyalty_wallet_enabled)
+    if body.loyalty_wallet_start_date is not None:
+        updates["loyalty_wallet_start_date"] = body.loyalty_wallet_start_date.strip()
     if body.loyalty_milestones is not None:
         updates["loyalty_milestones"] = _clean_milestones(body.loyalty_milestones)
     # Razorpay credentials — only overwrite when a non-empty value is supplied,
@@ -3569,10 +3589,11 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
         hid = d.get("hub_id") or vehicles.get(d.get("vehicle_id"), {}).get("hub_id")
         return hid if hid in out_hubs else UNASSIGNED
 
-    # ---- Drivers: year gross + loyalty ----
+    # ---- Drivers: year gross + loyalty + wallet ----
     for d in drivers:
         hb = out_hubs[bucket(d)]
         ly = _loyalty_state(d)
+        wallet = await _loyalty_wallet(d)
         hb["drivers"].append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
             "shift": d.get("shift_type", "day"),
@@ -3581,6 +3602,9 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
             "next_milestone": ly["next"],
             "vested_total": ly["vested_total"],
             "milestones": ly["milestones"],
+            "wallet_balance": wallet["balance"],
+            "wallet_accrued": wallet["accrued"],
+            "wallet_paid": wallet["paid"],
         })
 
     # ---- Cars: combine day + night year gross ----
@@ -3624,7 +3648,42 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
         "hubs": hubs_out,
         "milestones": LOYALTY_MILESTONES,
         "thresholds": {"top_driver_year": YEARLY_TOP_DRIVER, "top_car_year": YEARLY_TOP_CAR},
+        "wallet_enabled": bool(get_setting("loyalty_wallet_enabled")),
     }
+
+
+class LoyaltyPayoutIn(BaseModel):
+    amount: float = Field(gt=0)
+    note: Optional[str] = None
+
+
+@api.post("/admin/drivers/{driver_id}/loyalty-payout")
+async def admin_loyalty_payout(
+    driver_id: str, body: LoyaltyPayoutIn, admin: Dict = Depends(require_write)
+):
+    """Record a payout of a driver's loyalty-wallet balance. Capped at the
+    current payable balance so a driver can't be over-paid."""
+    driver = await db.drivers.find_one(
+        {"id": driver_id}, {"_id": 0, "id": 1, "active": 1, "archived": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    wallet = await _loyalty_wallet(driver)
+    if not wallet["enabled"]:
+        raise HTTPException(409, "loyalty_wallet_disabled")
+    if body.amount > wallet["balance"] + 0.01:
+        raise HTTPException(409, "amount_exceeds_balance")
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": driver_id,
+        "type": "loyalty_wallet",
+        "amount": round(float(body.amount), 2),
+        "note": body.note,
+        "created_at": iso(now_utc()),
+        "created_by": admin["username"],
+    }
+    await db.reward_payouts.insert_one(row.copy())
+    await _audit(admin, "loyalty_wallet_payout", driver_id, {"amount": row["amount"]})
+    return {"ok": True, "paid": row["amount"], "wallet": await _loyalty_wallet(driver)}
 
 
 # ---------------------------------------------------------------------------
@@ -4083,6 +4142,54 @@ async def _yearly_gross(year_start: str, next_year: str) -> Dict[str, float]:
     return out
 
 
+async def _loyalty_wallet_qualifying_days(driver_id: str, start_date: str, min_gross: float) -> int:
+    """Count business days (from start_date onward) where the driver's gross met
+    the minimum — these are the days that accrue into the loyalty wallet."""
+    pipeline = [
+        {"$match": {"driver_id": driver_id, "business_date": {"$gte": start_date}}},
+        {"$group": {"_id": "$business_date", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+        {"$match": {"g": {"$gte": min_gross}}},
+        {"$count": "days"},
+    ]
+    async for r in db.platform_cash.aggregate(pipeline):
+        return int(r.get("days") or 0)
+    return 0
+
+
+async def _loyalty_wallet(driver: Dict) -> Dict[str, Any]:
+    """A driver's loyalty-wallet standing. Accrues per qualifying day worked,
+    minus what ops has already paid out. Forfeited (not payable) once the driver
+    leaves/deactivates. All parameters are live settings."""
+    enabled = bool(get_setting("loyalty_wallet_enabled"))
+    per_day = int(get_setting("loyalty_wallet_per_day") or 0)
+    min_gross = float(get_setting("loyalty_wallet_min_gross") or 0)
+    start_date = get_setting("loyalty_wallet_start_date") or "2000-01-01"
+    active = driver.get("active", True) and not driver.get("archived")
+    if not enabled:
+        return {"enabled": False, "balance": 0, "accrued": 0, "paid": 0,
+                "qualifying_days": 0, "per_day": per_day, "forfeited": 0, "active": active}
+    days = await _loyalty_wallet_qualifying_days(driver["id"], start_date, min_gross)
+    accrued = days * per_day
+    paid = 0.0
+    async for r in db.reward_payouts.aggregate([
+        {"$match": {"driver_id": driver["id"], "type": "loyalty_wallet"}},
+        {"$group": {"_id": None, "s": {"$sum": "$amount"}}},
+    ]):
+        paid = float(r.get("s") or 0)
+    unpaid = max(0.0, accrued - paid)
+    # A driver who has left forfeits the un-paid balance — it's no longer payable.
+    return {
+        "enabled": True,
+        "per_day": per_day,
+        "qualifying_days": days,
+        "accrued": round(accrued, 2),
+        "paid": round(paid, 2),
+        "balance": round(0.0 if not active else unpaid, 2),   # payable now
+        "forfeited": round(unpaid if not active else 0.0, 2),  # lost by leaving
+        "active": active,
+    }
+
+
 @api.get("/money/rewards")
 async def money_rewards(driver: Dict = Depends(get_driver)):
     """Progress toward the weekly reward system. Rewards are additional to the
@@ -4166,6 +4273,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     hasn't been reached yet. Yearly winners are decided per hub by ops."""
     YEARLY_TOP_DRIVER = get_setting("yearly_top_driver")
     loyalty = _loyalty_state(driver)
+    wallet = await _loyalty_wallet(driver)
 
     today_bd = business_date_now()
     year_start, next_year, year_label = _year_bounds(today_bd)
@@ -4189,6 +4297,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     return {
         "year": year_label,
         "loyalty": loyalty,
+        "wallet": wallet,
         "yearly": {
             "label": "Top driver of the year",
             "value": my_year,
@@ -6081,6 +6190,7 @@ async def _on_startup() -> None:
     await db.driver_collection_qrs.create_index([("driver_id", 1)], unique=True)
     await db.collections.create_index([("razorpay_payment_id", 1)], unique=True)
     await db.collections.create_index([("driver_id", 1), ("business_date", 1)])
+    await db.reward_payouts.create_index([("driver_id", 1), ("type", 1)])
     await db.drivers.create_index([("code", 1)], unique=True, sparse=True)
     # Seed the driver-code sequence so the first new code is R91D-0106-*
     # (continuing after the fleet's existing R91D-0105). Leaves it if present.
