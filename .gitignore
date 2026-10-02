@@ -86,3 +86,7 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+
+# build/test artifacts
+apk_build.log
+verify_live.py
