@@ -24,6 +24,14 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [rwErr, setRwErr] = useState<string | null>(null);
   const setRwField = (k: string, v: string) => setRw((p) => ({ ...p, [k]: v }));
 
+  // payment credentials (Razorpay)
+  const [pKeyId, setPKeyId] = useState("");
+  const [pKeySecret, setPKeySecret] = useState("");
+  const [pWebhook, setPWebhook] = useState("");
+  const [payBusy, setPayBusy] = useState(false);
+  const [payMsg, setPayMsg] = useState<string | null>(null);
+  const [payErr, setPayErr] = useState<string | null>(null);
+
   // change password
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -102,6 +110,27 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setRwErr(d === "owner_only" ? "Only an owner can change these." : d === "bad_milestone" ? "Check the milestone rows." : "Could not save.");
     } finally {
       setRwSaving(false);
+    }
+  };
+
+  const savePayments = async () => {
+    setPayErr(null); setPayMsg(null);
+    const body: Record<string, string> = {};
+    if (pKeyId.trim()) body.razorpay_key_id = pKeyId.trim();
+    if (pKeySecret.trim()) body.razorpay_key_secret = pKeySecret.trim();
+    if (pWebhook.trim()) body.razorpay_webhook_secret = pWebhook.trim();
+    if (Object.keys(body).length === 0) return setPayErr("Enter at least one value to update.");
+    setPayBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", body);
+      setData(s);
+      setPKeyId(""); setPKeySecret(""); setPWebhook("");   // never keep secrets in the form
+      setPayMsg("Payment credentials updated.");
+      setTimeout(() => setPayMsg(null), 4000);
+    } catch (e: any) {
+      setPayErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setPayBusy(false);
     }
   };
 
@@ -199,6 +228,50 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
           <div className="form-actions">
             <button className="primary" onClick={saveRewards} disabled={rwSaving}>{rwSaving ? "Saving…" : "Save reward settings"}</button>
           </div>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Payment credentials — Razorpay {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          Status:{" "}
+          <span className={`tag ${data?.payments?.razorpay_enabled ? "live" : "muted"}`}>
+            {data?.payments?.razorpay_enabled ? "connected" : "not configured"}
+          </span>
+          {data?.payments?.source ? <span style={{ marginLeft: 6 }}>· source: {data.payments.source}</span> : null}
+        </div>
+        <table className="data" style={{ marginBottom: 12 }}>
+          <tbody>
+            <tr><td>Key ID</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.payments?.razorpay_key_id ?? <span className="muted-sm">—</span>}</td></tr>
+            <tr><td>Key Secret</td><td>{data?.payments?.razorpay_key_secret_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+            <tr><td>Webhook Secret</td><td>{data?.payments?.razorpay_webhook_secret_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+          </tbody>
+        </table>
+
+        {isOwner ? (
+          <>
+            <div className="muted-sm" style={{ marginBottom: 6 }}>Enter new values to rotate. Leave a field blank to keep the current one. Secrets are never shown back.</div>
+            <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+              <label>New Key ID
+                <input value={pKeyId} onChange={(e) => setPKeyId(e.target.value)} placeholder="rzp_live_…" autoComplete="off" />
+              </label>
+              <label>New Key Secret
+                <input type="password" value={pKeySecret} onChange={(e) => setPKeySecret(e.target.value)} placeholder="•••••••• (leave blank to keep)" autoComplete="new-password" />
+              </label>
+              <label>New Webhook Secret
+                <input type="password" value={pWebhook} onChange={(e) => setPWebhook(e.target.value)} placeholder="•••••••• (leave blank to keep)" autoComplete="new-password" />
+              </label>
+            </div>
+            <div className="muted-sm" style={{ marginTop: 6 }}>
+              After changing the Webhook Secret, update it in Razorpay → Settings → Webhooks (URL: <code>{data?.payments?.webhook_url ?? "/api/webhooks/razorpay"}</code>).
+            </div>
+            {payErr ? <div className="err">{payErr}</div> : null}
+            {payMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{payMsg}</div> : null}
+            <div className="form-actions">
+              <button className="primary" onClick={savePayments} disabled={payBusy}>{payBusy ? "Saving…" : "Update credentials"}</button>
+            </div>
+          </>
         ) : null}
       </div>
 

@@ -117,6 +117,11 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "loyalty_milestones": LOYALTY_MILESTONES,
     "yearly_top_driver": YEARLY_TOP_DRIVER,
     "yearly_top_car": YEARLY_TOP_CAR,
+    # Razorpay credentials (owner-editable; override the env vars). Secret
+    # values are never returned by the API — only their "set" status is.
+    "razorpay_key_id": "",
+    "razorpay_key_secret": "",
+    "razorpay_webhook_secret": "",
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -765,6 +770,10 @@ class SettingsIn(BaseModel):
     loyalty_milestones: Optional[List[Dict[str, Any]]] = None
     yearly_top_driver: Optional[int] = Field(default=None, ge=0)
     yearly_top_car: Optional[int] = Field(default=None, ge=0)
+    # Razorpay credentials (owner only; override env vars, never read back).
+    razorpay_key_id: Optional[str] = None
+    razorpay_key_secret: Optional[str] = None
+    razorpay_webhook_secret: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -1943,9 +1952,28 @@ def _settings_out() -> Dict[str, Any]:
     return out
 
 
+def _payments_status() -> Dict[str, Any]:
+    """Razorpay credential STATUS for the admin — never the secret values.
+    Shows the (public) Key ID, whether each secret is set, and where the live
+    values come from (admin settings override the env vars)."""
+    from_settings = bool(get_setting("razorpay_key_id"))
+    return {
+        "razorpay_enabled": _razorpay_configured(),
+        "razorpay_key_id": _rzp_key_id() or None,          # Key ID is public
+        "razorpay_key_secret_set": bool(_rzp_key_secret()),
+        "razorpay_webhook_secret_set": bool(_rzp_webhook_secret()),
+        "source": "settings" if from_settings else ("env" if RAZORPAY_KEY_ID else "none"),
+        "webhook_url": "/api/webhooks/razorpay",
+    }
+
+
 @api.get("/admin/settings")
 async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
-    return {**_settings_out(), "business_day_cutoff_ist": "04:00"}   # cutoff is read-only
+    return {
+        **_settings_out(),
+        "business_day_cutoff_ist": "04:00",   # cutoff is read-only
+        "payments": _payments_status(),
+    }
 
 
 def _clean_milestones(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1985,13 +2013,25 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
             updates[k] = v
     if body.loyalty_milestones is not None:
         updates["loyalty_milestones"] = _clean_milestones(body.loyalty_milestones)
+    # Razorpay credentials — only overwrite when a non-empty value is supplied,
+    # so blank fields don't wipe existing keys. These are SECRET: redacted from
+    # the audit trail below.
+    secret_keys = set()
+    for k in ("razorpay_key_id", "razorpay_key_secret", "razorpay_webhook_secret"):
+        v = getattr(body, k)
+        if v is not None and v.strip() != "":
+            updates[k] = v.strip()
+            if k != "razorpay_key_id":
+                secret_keys.add(k)
     if updates:
         updates["updated_at"] = iso(now_utc())
         updates["updated_by"] = admin["username"]
         await db.settings.update_one({"id": "global"}, {"$set": updates}, upsert=True)
         await load_settings()
-        await _audit(admin, "update_settings", "", {k: v for k, v in updates.items() if k not in ("updated_at", "updated_by")})
-    return {"ok": True, **_settings_out()}
+        meta = {k: ("***" if k in secret_keys else v)
+                for k, v in updates.items() if k not in ("updated_at", "updated_by")}
+        await _audit(admin, "update_settings", "", meta)
+    return {"ok": True, **_settings_out(), "payments": _payments_status()}
 
 
 # ---- Audit log (manager+) --------------------------------------------------
@@ -4307,6 +4347,21 @@ RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 RAZORPAY_BASE = "https://api.razorpay.com/v1"
 
 
+# Live credentials: a value saved in the settings doc (owner-editable from the
+# admin) wins over the environment variable, so keys can be rotated without a
+# redeploy. The secret values are never read back out through the API.
+def _rzp_key_id() -> str:
+    return get_setting("razorpay_key_id") or RAZORPAY_KEY_ID
+
+
+def _rzp_key_secret() -> str:
+    return get_setting("razorpay_key_secret") or RAZORPAY_KEY_SECRET
+
+
+def _rzp_webhook_secret() -> str:
+    return get_setting("razorpay_webhook_secret") or RAZORPAY_WEBHOOK_SECRET
+
+
 class RazorpayOrderIn(BaseModel):
     client_action_id: str
     amount_rupees: Optional[float] = None      # optional override; caps at dues
@@ -4321,7 +4376,7 @@ class RazorpayVerifyIn(BaseModel):
 
 
 def _razorpay_configured() -> bool:
-    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+    return bool(_rzp_key_id() and _rzp_key_secret())
 
 
 def _zero_balance(today_bd: str) -> Dict:
@@ -4444,7 +4499,7 @@ async def _rzp_request(method: str, path: str, **kw) -> Dict[str, Any]:
         r = await c.request(
             method,
             RAZORPAY_BASE + path,
-            auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+            auth=(_rzp_key_id(), _rzp_key_secret()),
             **kw,
         )
     if r.status_code >= 400:
@@ -4503,7 +4558,7 @@ async def razorpay_config(driver: Dict = Depends(get_driver)):
     dues_paise = await _driver_dues_paise(driver["id"])
     return {
         "enabled": _razorpay_configured(),
-        "key_id": RAZORPAY_KEY_ID if _razorpay_configured() else None,
+        "key_id": _rzp_key_id() if _razorpay_configured() else None,
         "dues_paise": dues_paise,
         "dues_rupees": round(dues_paise / 100, 2),
     }
@@ -4525,7 +4580,7 @@ async def create_razorpay_order(
             "order_id": existing["razorpay_order_id"],
             "amount_paise": existing["amount_paise"],
             "currency": "INR",
-            "key_id": RAZORPAY_KEY_ID,
+            "key_id": _rzp_key_id(),
             "status": existing["status"],
         }
     dues_paise = await _driver_dues_paise(driver["id"])
@@ -4569,7 +4624,7 @@ async def create_razorpay_order(
         "order_id": order["id"],
         "amount_paise": amount_paise,
         "currency": "INR",
-        "key_id": RAZORPAY_KEY_ID,
+        "key_id": _rzp_key_id(),
         "status": "created",
     }
 
@@ -4590,7 +4645,7 @@ async def verify_razorpay_payment(body: RazorpayVerifyIn):
         raise HTTPException(404, "order_not_found")
     msg = f"{rec['razorpay_order_id']}|{body.razorpay_payment_id}".encode()
     expected = hmac.new(
-        RAZORPAY_KEY_SECRET.encode(), msg, hashlib.sha256
+        _rzp_key_secret().encode(), msg, hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(expected, body.razorpay_signature):
         raise HTTPException(400, "invalid_signature")
@@ -4993,8 +5048,9 @@ async def razorpay_checkout_page(
     safe_action = html_lib.escape(action)
     safe_redirect = html_lib.escape(redirect)
     safe_name = html_lib.escape(name)
+    rzp_key = _rzp_key_id()
     verify_url = "/api/payments/razorpay/verify"
-    page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ride91 · Pay dues</title><style>body{{font-family:-apple-system,system-ui,sans-serif;background:#EEF1EC;color:#10231C;margin:0;padding:40px 24px;text-align:center}} .card{{max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(16,35,28,.08)}} h1{{margin:0 0 8px}} .amt{{font-size:36px;font-weight:700;color:#0B7A4B;margin:16px 0}} button{{background:#0B7A4B;color:#fff;border:none;border-radius:8px;padding:14px 28px;font-size:16px;font-weight:600;cursor:pointer;width:100%}} .muted{{color:#67756D;font-size:13px;margin-top:16px}}</style></head><body><div class="card"><h1>Ride91 · Pay dues</h1><div class="amt">₹{amount/100:.2f}</div><button id="pay">Open Razorpay</button><div class="muted">Test card: 4111 1111 1111 1111 · any CVV · any future date</div></div><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const CFG={_json.dumps({"key":RAZORPAY_KEY_ID,"order_id":safe_order,"amount":amount,"action":safe_action,"redirect":safe_redirect,"name":safe_name,"verify":verify_url})};function pay(){{const rzp=new Razorpay({{key:CFG.key,order_id:CFG.order_id,amount:CFG.amount,currency:"INR",name:CFG.name,description:"Driver dues",theme:{{color:"#0B7A4B"}},handler:async function(r){{await fetch(CFG.verify,{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{client_action_id:CFG.action,razorpay_payment_id:r.razorpay_payment_id,razorpay_order_id:r.razorpay_order_id,razorpay_signature:r.razorpay_signature}})}}).catch(()=>{{}});location.href=CFG.redirect+"#status=paid&order_id="+encodeURIComponent(r.razorpay_order_id);}},modal:{{ondismiss:function(){{location.href=CFG.redirect+"#status=dismissed";}}}}}});rzp.open();}}document.getElementById("pay").onclick=pay;setTimeout(pay,300);</script></body></html>"""
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ride91 · Pay dues</title><style>body{{font-family:-apple-system,system-ui,sans-serif;background:#EEF1EC;color:#10231C;margin:0;padding:40px 24px;text-align:center}} .card{{max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(16,35,28,.08)}} h1{{margin:0 0 8px}} .amt{{font-size:36px;font-weight:700;color:#0B7A4B;margin:16px 0}} button{{background:#0B7A4B;color:#fff;border:none;border-radius:8px;padding:14px 28px;font-size:16px;font-weight:600;cursor:pointer;width:100%}} .muted{{color:#67756D;font-size:13px;margin-top:16px}}</style></head><body><div class="card"><h1>Ride91 · Pay dues</h1><div class="amt">₹{amount/100:.2f}</div><button id="pay">Open Razorpay</button></div><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const CFG={_json.dumps({"key":rzp_key,"order_id":safe_order,"amount":amount,"action":safe_action,"redirect":safe_redirect,"name":safe_name,"verify":verify_url})};function pay(){{const rzp=new Razorpay({{key:CFG.key,order_id:CFG.order_id,amount:CFG.amount,currency:"INR",name:CFG.name,description:"Driver dues",theme:{{color:"#0B7A4B"}},handler:async function(r){{await fetch(CFG.verify,{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{client_action_id:CFG.action,razorpay_payment_id:r.razorpay_payment_id,razorpay_order_id:r.razorpay_order_id,razorpay_signature:r.razorpay_signature}})}}).catch(()=>{{}});location.href=CFG.redirect+"#status=paid&order_id="+encodeURIComponent(r.razorpay_order_id);}},modal:{{ondismiss:function(){{location.href=CFG.redirect+"#status=dismissed";}}}}}});rzp.open();}}document.getElementById("pay").onclick=pay;setTimeout(pay,300);</script></body></html>"""
     return Response(content=page, media_type="text/html")
 
 
@@ -5004,9 +5060,10 @@ async def razorpay_webhook(req: Request):
     the RAW body before parsing JSON. Dedup by event id."""
     raw = await req.body()
     got = req.headers.get("X-Razorpay-Signature", "")
-    if not RAZORPAY_WEBHOOK_SECRET:
+    wh_secret = _rzp_webhook_secret()
+    if not wh_secret:
         raise HTTPException(503, "webhook_not_configured")
-    want = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    want = hmac.new(wh_secret.encode(), raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(got, want):
         raise HTTPException(400, "bad_signature")
     event = _json.loads(raw)

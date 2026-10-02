@@ -480,6 +480,17 @@ export interface SettingsData {
   loyalty_milestones: Array<{ key: string; label: string; days: number; reward: number }>;
   yearly_top_driver: number;
   yearly_top_car: number;
+  // Razorpay credential status (never the secret values).
+  payments?: PaymentsStatus;
+}
+
+export interface PaymentsStatus {
+  razorpay_enabled: boolean;
+  razorpay_key_id: string | null;
+  razorpay_key_secret_set: boolean;
+  razorpay_webhook_secret_set: boolean;
+  source: "settings" | "env" | "none" | string;
+  webhook_url: string;
 }
 
 export interface AuditRow {
