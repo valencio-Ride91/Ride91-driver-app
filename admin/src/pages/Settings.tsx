@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, SettingsData } from "../api";
 import { AdminIdentity } from "../auth";
 
-type Milestone = { key: string; label: string; days: number; reward: number };
+type Milestone = { key: string; label: string; amount: number; reward: number };
 
 export default function Settings({ admin }: { admin: AdminIdentity }) {
   const isOwner = admin.role === "owner";
@@ -107,14 +107,14 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     }
     if (nums.reward_days_required < 1 || nums.reward_days_required > 7) return setRwErr("Days required must be 1–7.");
     for (const m of ms) {
-      if (!Number.isFinite(m.days) || m.days < 1) return setRwErr("Each milestone needs a day count of at least 1.");
+      if (!Number.isFinite(m.amount) || m.amount < 1) return setRwErr("Each milestone needs an earnings threshold of at least ₹1.");
       if (!Number.isFinite(m.reward) || m.reward < 0) return setRwErr("Each milestone reward must be a positive number.");
     }
     setRwSaving(true);
     try {
       const s = await api.put<SettingsData & { ok: boolean }>("/admin/settings", {
         ...nums,
-        loyalty_milestones: ms.map((m) => ({ key: m.key, label: m.label, days: Math.round(m.days), reward: Math.round(m.reward) })),
+        loyalty_milestones: ms.map((m) => ({ key: m.key, label: m.label, amount: Math.round(m.amount), reward: Math.round(m.reward) })),
       });
       setData(s);
       setMs((s.loyalty_milestones ?? []).map((m) => ({ ...m })));
@@ -238,9 +238,9 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
           <NumField label="Top car of the year — bonus (₹)" k="yearly_top_car" rw={rw} set={setRwField} dis={!isOwner} />
         </div>
 
-        <h3 style={{ margin: "16px 0 4px", fontSize: 14 }}>Loyalty milestones (tenure)</h3>
+        <h3 style={{ margin: "16px 0 4px", fontSize: 14 }}>Loyalty milestones (cumulative earnings)</h3>
         <table className="data" style={{ marginBottom: 8 }}>
-          <thead><tr><th>Label</th><th>Days</th><th>Reward (₹)</th></tr></thead>
+          <thead><tr><th>Label</th><th>Earned ≥ (₹)</th><th>Reward (₹)</th></tr></thead>
           <tbody>
             {ms.map((m, i) => (
               <tr key={m.key}>
@@ -249,8 +249,8 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
                     onChange={(e) => setMs((p) => p.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} />
                 </td>
                 <td style={{ width: 90 }}>
-                  <input type="number" min={1} value={m.days} disabled={!isOwner}
-                    onChange={(e) => setMs((p) => p.map((x, j) => j === i ? { ...x, days: Number(e.target.value) } : x))} />
+                  <input type="number" min={1} value={m.amount} disabled={!isOwner}
+                    onChange={(e) => setMs((p) => p.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} />
                 </td>
                 <td style={{ width: 120 }}>
                   <input type="number" min={0} value={m.reward} disabled={!isOwner}

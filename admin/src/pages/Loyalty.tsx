@@ -122,7 +122,7 @@ function HubBlock({ hub, walletOn, onPaid }: { hub: LoyaltyHub; walletOn: boolea
                 <td>{fmtTenure(d.tenure_days)}</td>
                 <td>
                   {d.next_milestone ? (
-                    <span className="muted-sm">{d.next_milestone.label} · {d.next_milestone.days_remaining}d left · {fmtINR(d.next_milestone.reward)}</span>
+                    <span className="muted-sm">{d.next_milestone.label} · {fmtINR(d.next_milestone.remaining)} to go · {fmtINR(d.next_milestone.reward)}</span>
                   ) : <span className="tag ok">all reached</span>}
                 </td>
                 {walletOn ? (

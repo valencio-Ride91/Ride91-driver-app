@@ -85,12 +85,14 @@ REWARD_TOP_CAR_WEEK = 1000
 REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver of week)
 REWARD_TOP_DRIVER_WEEK = 1000
 REWARD_DAYS_REQUIRED = 7
-# Loyalty (tenure) milestones — forfeit-if-you-leave vesting; manual payout.
+# Loyalty (earnings) milestones — a bonus when the driver's cumulative gross
+# (from the loyalty start date) crosses each threshold. Forfeit-if-you-leave
+# vesting; manual payout. `amount` is the gross threshold in ₹.
 LOYALTY_MILESTONES = [
-    {"key": "m3", "label": "3 months", "days": 90,  "reward": 2000},
-    {"key": "m6", "label": "6 months", "days": 180, "reward": 3000},
-    {"key": "y1", "label": "1 year",   "days": 365, "reward": 8000},
-    {"key": "y2", "label": "2 years",  "days": 730, "reward": 15000},
+    {"key": "e1", "label": "₹1 lakh earned",  "amount": 100000,  "reward": 2000},
+    {"key": "e3", "label": "₹3 lakh earned",  "amount": 300000,  "reward": 4000},
+    {"key": "e6", "label": "₹6 lakh earned",  "amount": 600000,  "reward": 8000},
+    {"key": "e12", "label": "₹12 lakh earned", "amount": 1200000, "reward": 15000},
 ]
 # Yearly performance, decided per hub over the calendar year to date.
 YEARLY_TOP_DRIVER = 50000             # top driver of the year, per hub (on gross)
@@ -1890,21 +1892,22 @@ async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
 
 
 def _clean_milestones(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Validate/normalise a loyalty_milestones payload from the admin."""
+    """Validate/normalise a loyalty_milestones payload (earnings-based) from the
+    admin. Each milestone is {key, label, amount (₹ gross threshold), reward}."""
     out: List[Dict[str, Any]] = []
     for i, m in enumerate(rows):
         try:
-            days = int(m["days"]); reward = int(m["reward"])
+            amount = int(m["amount"]); reward = int(m["reward"])
         except (KeyError, TypeError, ValueError):
             raise HTTPException(422, "bad_milestone")
-        if days < 1 or reward < 0:
+        if amount < 1 or reward < 0:
             raise HTTPException(422, "bad_milestone")
         out.append({
-            "key": str(m.get("key") or f"m{i}"),
-            "label": str(m.get("label") or f"{days} days"),
-            "days": days, "reward": reward,
+            "key": str(m.get("key") or f"e{i}"),
+            "label": str(m.get("label") or f"₹{amount} earned"),
+            "amount": amount, "reward": reward,
         })
-    out.sort(key=lambda m: m["days"])
+    out.sort(key=lambda m: m["amount"])
     return out
 
 
@@ -3590,9 +3593,11 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
         return hid if hid in out_hubs else UNASSIGNED
 
     # ---- Drivers: year gross + loyalty + wallet ----
+    loyalty_start = get_setting("loyalty_wallet_start_date") or "2000-01-01"
+    cum = await _cumulative_gross(loyalty_start)
     for d in drivers:
         hb = out_hubs[bucket(d)]
-        ly = _loyalty_state(d)
+        ly = _loyalty_state(d, cum.get(d["id"], 0.0))
         wallet = await _loyalty_wallet(d)
         hb["drivers"].append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
@@ -4088,40 +4093,62 @@ def _tenure_days(driver: Dict) -> Optional[int]:
     return max(0, (now_utc() - joined).days)
 
 
-def _loyalty_state(driver: Dict) -> Dict[str, Any]:
-    """A driver's loyalty standing: tenure, each milestone's reached/vested
-    state, the next milestone with days remaining, and the vested total.
-    A milestone vests only while the driver is active — leaving forfeits the
-    rest (forfeit-if-you-leave)."""
-    LOYALTY_MILESTONES = get_setting("loyalty_milestones")
-    tenure = _tenure_days(driver)
+def _loyalty_state(driver: Dict, cumulative_gross: float) -> Dict[str, Any]:
+    """A driver's loyalty standing, keyed on CUMULATIVE GROSS EARNINGS: each
+    milestone pays when total gross crosses its ₹ threshold. A milestone vests
+    only while the driver is active — leaving forfeits the rest."""
+    milestones_cfg = sorted(get_setting("loyalty_milestones"), key=lambda m: m.get("amount", 0))
     active = driver.get("active", True) and not driver.get("archived")
+    g = float(cumulative_gross or 0)
     ms: List[Dict[str, Any]] = []
     vested_total = 0
     nxt = None
-    for m in LOYALTY_MILESTONES:
-        reached = tenure is not None and tenure >= m["days"]
+    for m in milestones_cfg:
+        amount = float(m.get("amount", 0))
+        reward = m.get("reward", 0)
+        reached = amount > 0 and g >= amount
         vested = reached and active            # forfeit-if-you-leave
         if vested:
-            vested_total += m["reward"]
-        if not reached and nxt is None and tenure is not None:
+            vested_total += reward
+        if not reached and nxt is None and amount > 0:
             nxt = {
-                "key": m["key"], "label": m["label"], "reward": m["reward"],
-                "days": m["days"], "days_remaining": m["days"] - tenure,
-                "progress": round(min(1.0, tenure / m["days"]), 4) if m["days"] else 0.0,
+                "key": m["key"], "label": m["label"], "reward": reward,
+                "amount": amount, "remaining": round(amount - g, 2),
+                "progress": round(min(1.0, g / amount), 4),
             }
         ms.append({
-            "key": m["key"], "label": m["label"], "reward": m["reward"],
-            "days": m["days"], "reached": reached, "vested": vested,
+            "key": m["key"], "label": m["label"], "reward": reward,
+            "amount": amount, "reached": reached, "vested": vested,
             "forfeited": reached and not active,
         })
     return {
-        "tenure_days": tenure,
+        "tenure_days": _tenure_days(driver),   # kept for display only
+        "gross": round(g, 2),
         "active": active,
         "milestones": ms,
         "next": nxt,
         "vested_total": vested_total,
     }
+
+
+async def _cumulative_gross(start_date: str) -> Dict[str, float]:
+    """Per-driver cumulative gross from start_date onward (loyalty earnings)."""
+    out: Dict[str, float] = {}
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"business_date": {"$gte": start_date}}},
+        {"$group": {"_id": "$driver_id", "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        out[r["_id"]] = float(r.get("g") or 0)
+    return out
+
+
+async def _driver_cumulative_gross(driver_id: str, start_date: str) -> float:
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"driver_id": driver_id, "business_date": {"$gte": start_date}}},
+        {"$group": {"_id": None, "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        return float(r.get("g") or 0)
+    return 0.0
 
 
 def _year_bounds(today_bd: str) -> Tuple[str, str, str]:
@@ -4272,7 +4299,9 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     year's hub race. Loyalty vests only while active — leaving forfeits what
     hasn't been reached yet. Yearly winners are decided per hub by ops."""
     YEARLY_TOP_DRIVER = get_setting("yearly_top_driver")
-    loyalty = _loyalty_state(driver)
+    loyalty_start = get_setting("loyalty_wallet_start_date") or "2000-01-01"
+    cum_gross = await _driver_cumulative_gross(driver["id"], loyalty_start)
+    loyalty = _loyalty_state(driver, cum_gross)
     wallet = await _loyalty_wallet(driver)
 
     today_bd = business_date_now()

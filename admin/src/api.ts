@@ -382,7 +382,7 @@ export interface LoyaltyMilestone {
   key: string;
   label: string;
   reward: number;
-  days: number;
+  amount: number;
   reached: boolean;
   vested: boolean;
   forfeited: boolean;
@@ -395,7 +395,7 @@ export interface LoyaltyDriver {
   shift: string;
   year_gross: number;
   tenure_days: number | null;
-  next_milestone: { key: string; label: string; reward: number; days: number; days_remaining: number; progress: number } | null;
+  next_milestone: { key: string; label: string; reward: number; amount: number; remaining: number; progress: number } | null;
   vested_total: number;
   milestones: LoyaltyMilestone[];
   is_top_driver_year?: boolean;
@@ -423,7 +423,7 @@ export interface LoyaltyHub {
 export interface LoyaltyResponse {
   year: string;
   hubs: LoyaltyHub[];
-  milestones: Array<{ key: string; label: string; reward: number; days: number }>;
+  milestones: Array<{ key: string; label: string; reward: number; amount: number }>;
   thresholds: { top_driver_year: number; top_car_year: number };
   wallet_enabled?: boolean;
 }
@@ -481,7 +481,7 @@ export interface SettingsData {
   reward_top_driver_week: number;
   reward_days_required: number;
   // Loyalty milestones + yearly bonuses.
-  loyalty_milestones: Array<{ key: string; label: string; days: number; reward: number }>;
+  loyalty_milestones: Array<{ key: string; label: string; amount: number; reward: number }>;
   yearly_top_driver: number;
   yearly_top_car: number;
   // Loyalty wallet config.

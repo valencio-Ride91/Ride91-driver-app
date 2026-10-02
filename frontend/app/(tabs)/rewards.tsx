@@ -26,14 +26,14 @@ interface Rewards {
   top_car_week: RewardTier;
   top_driver_week: RewardTier;
 }
-interface LoyaltyMilestone { key: string; label: string; reward: number; days: number; reached: boolean; vested: boolean; forfeited: boolean; }
+interface LoyaltyMilestone { key: string; label: string; reward: number; amount: number; reached: boolean; vested: boolean; forfeited: boolean; }
 interface Loyalty {
   year: string;
   loyalty: {
     tenure_days: number | null;
     active: boolean;
     milestones: LoyaltyMilestone[];
-    next: { key: string; label: string; reward: number; days: number; days_remaining: number; progress: number } | null;
+    next: { key: string; label: string; reward: number; amount: number; remaining: number; progress: number } | null;
     vested_total: number;
   };
   wallet?: { enabled: boolean; per_day: number; qualifying_days: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
@@ -148,7 +148,7 @@ export default function RewardsTab() {
                   <View style={[styles.barFill, { width: `${Math.round(loyalty.loyalty.next.progress * 100)}%` as const, backgroundColor: colors.amber }]} />
                 </View>
                 <View style={styles.rewardFoot}>
-                  <Text style={styles.rewardProgress}>{loyalty.loyalty.next.days_remaining} days to go</Text>
+                  <Text style={styles.rewardProgress}>{formatINR(loyalty.loyalty.next.remaining)} more to go</Text>
                   <Text style={styles.rewardNote}>keep driving to unlock</Text>
                 </View>
               </View>
