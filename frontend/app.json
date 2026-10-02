@@ -30,6 +30,7 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
         "CAMERA",
@@ -68,7 +69,10 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Track your duty location for the fleet."
+          "locationAlwaysAndWhenInUsePermission": "Track your duty location for the fleet.",
+          "locationWhenInUsePermission": "Track your duty location for the fleet.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [

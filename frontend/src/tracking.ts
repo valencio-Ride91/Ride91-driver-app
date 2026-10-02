@@ -17,6 +17,7 @@ import * as Location from "expo-location";
 import NetInfo from "@react-native-community/netinfo";
 
 import { api } from "@/src/api";
+import { LOCATION_TASK } from "@/src/locationTask";
 
 export type HealthState = "synced" | "no_network" | "location_off" | "service_killed";
 
@@ -74,6 +75,15 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     const ok = status === "granted";
     setPermissionOk(ok);
     if (ok) {
+      // Ask for "Allow all the time" so tracking keeps running in the
+      // background / with the screen off. If the driver only grants
+      // while-in-use, the foreground-service tracker still works while the
+      // app's service notification is active.
+      try {
+        await Location.requestBackgroundPermissionsAsync();
+      } catch {
+        // ignore — foreground service still covers the common case
+      }
       try {
         const p = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.Balanced,
@@ -100,30 +110,54 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     }
   }, [enabled, requestPermission]);
 
-  const singlePing = useCallback(async () => {
-    if (!permissionOk) return;
+  // Start the OS-level background location service. This keeps reporting even
+  // when the app is backgrounded or the screen is off (Android foreground
+  // service). The task in locationTask.ts does the actual POST /tracking/ping.
+  const startBackground = useCallback(async () => {
+    if (Platform.OS === "web" || !permissionOk) return;
     try {
-      let coords = pos;
-      if (Platform.OS !== "web") {
-        const p = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        coords = { lat: p.coords.latitude, lng: p.coords.longitude };
-        setPos(coords);
-      }
-      if (coords.lat != null && coords.lng != null) {
-        try {
-          await api.post("/tracking/ping", {
-            recorded_at: new Date().toISOString(),
-            lat: coords.lat,
-            lng: coords.lng,
-          });
-        } catch {
-          // offline — that's fine
-        }
+      const already = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
+      if (already) return;
+      await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+        accuracy: Location.Accuracy.Balanced,
+        timeInterval: 60000,        // ~every 60s
+        distanceInterval: 40,       // or every 40m, whichever first
+        pausesUpdatesAutomatically: false,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: "Ride91 — on duty",
+          notificationBody: "Sharing your location with the fleet.",
+          notificationColor: "#10231C",
+        },
+      });
+    } catch {
+      // ignore — surfaced via the health pill
+    }
+  }, [permissionOk]);
+
+  const stopBackground = useCallback(async () => {
+    if (Platform.OS === "web") return;
+    try {
+      if (await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK)) {
+        await Location.stopLocationUpdatesAsync(LOCATION_TASK);
       }
     } catch {
       // ignore
+    }
+  }, []);
+
+  // Web preview can't run a background service: fall back to a direct ping so
+  // the dashboard still shows a position during testing.
+  const webPing = useCallback(async () => {
+    if (Platform.OS !== "web" || !permissionOk || pos.lat == null || pos.lng == null) return;
+    try {
+      await api.post("/tracking/ping", {
+        recorded_at: new Date().toISOString(),
+        lat: pos.lat,
+        lng: pos.lng,
+      });
+    } catch {
+      // offline — fine
     }
   }, [permissionOk, pos]);
 
@@ -145,17 +179,21 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
       if (beatRef.current) clearInterval(beatRef.current);
       pingRef.current = null;
       beatRef.current = null;
+      stopBackground();
       return;
     }
-    singlePing();
+    startBackground();               // native: OS background tracker
     heartbeat();
-    pingRef.current = setInterval(singlePing, PING_MS);
     beatRef.current = setInterval(heartbeat, HEARTBEAT_MS);
+    if (Platform.OS === "web") {     // web preview fallback
+      webPing();
+      pingRef.current = setInterval(webPing, PING_MS);
+    }
     return () => {
       if (pingRef.current) clearInterval(pingRef.current);
       if (beatRef.current) clearInterval(beatRef.current);
     };
-  }, [enabled, singlePing, heartbeat]);
+  }, [enabled, startBackground, stopBackground, heartbeat, webPing]);
 
   const health: HealthState = !online
     ? "no_network"

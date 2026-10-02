@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { LogBox, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import "@/src/locationTask";   // registers the background location task (headless-safe)
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { useAppFonts } from "@/src/hooks/use-app-fonts";
 import { AuthProvider, useAuth } from "@/src/auth";
