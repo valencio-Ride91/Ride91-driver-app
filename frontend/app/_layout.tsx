@@ -27,7 +27,7 @@ const Router: React.FC = () => {
     if (loading) return;
     const first = segments[0];
     const inTabs = first === "(tabs)";
-    const isAuthedRoute = inTabs || first === "inspection" || first === "alarm" || first === "go-online-capture" || (first as string) === "notifications" || (first as string) === "requests";
+    const isAuthedRoute = inTabs || first === "inspection" || first === "alarm" || (first as string) === "notifications" || (first as string) === "requests";
     if (!driver && isAuthedRoute) {
       router.replace("/login");
     } else if (driver && !isAuthedRoute) {
@@ -44,7 +44,6 @@ const Router: React.FC = () => {
               <Stack.Screen name="login" />
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="inspection" options={{ presentation: "modal" }} />
-              <Stack.Screen name="go-online-capture" options={{ presentation: "fullScreenModal", gestureEnabled: false }} />
               <Stack.Screen name="alarm" options={{ presentation: "fullScreenModal", gestureEnabled: false }} />
               <Stack.Screen name="notifications" options={{ presentation: "modal" }} />
               <Stack.Screen name="requests" options={{ presentation: "card" }} />

@@ -508,28 +508,17 @@ class VehiclePingIn(BaseModel):
     accuracy_m: float
 
 
+# Base64 size caps so a single inspection document stays well under MongoDB's
+# 16 MB limit (and bounds the request body). ~2.5 MB photo + ~10 MB video of
+# base64 ≈ 12.5 MB stored, leaving headroom. 480p/15s easily fits.
+MAX_PHOTO_B64 = 2_500_000
+MAX_VIDEO_B64 = 10_000_000
+
+
 class InspectionIn(BaseModel):
-    dashboard_photo_b64: str          # data URL or raw base64 of the JPEG
-    exterior_video_b64: str           # data URL or raw base64 of the mp4/webm
+    dashboard_photo_b64: str = Field(max_length=MAX_PHOTO_B64)   # data URL / base64 JPEG
+    exterior_video_b64: str = Field(max_length=MAX_VIDEO_B64)    # data URL / base64 mp4/webm
     exterior_video_mime: str = "video/mp4"
-    client_action_id: str
-
-
-class GoOnlineCaptureIn(BaseModel):
-    """The 20s guided walk-around video + one selfie, captured once per
-    business day before the driver picks their first platform. Includes
-    GPS at capture start and end so ops can detect fraudulent submissions
-    where the driver isn't near the vehicle.
-    """
-    walkaround_video_b64: str         # data URL or raw base64 of the mp4/webm
-    walkaround_video_mime: str = "video/mp4"
-    selfie_photo_b64: str             # data URL or raw base64 of the JPEG
-    walkaround_started_at: str        # ISO
-    walkaround_ended_at: str          # ISO
-    start_lat: float
-    start_lng: float
-    end_lat: float
-    end_lng: float
     client_action_id: str
 
 
@@ -967,102 +956,9 @@ async def inspection_today(driver: Dict = Depends(get_driver)):
     return {"completed": True, "id": row["id"], "created_at": row["created_at"], "day_key": day_key}
 
 
-# ---------------------------------------------------------------------------
-# GO-ONLINE CAPTURE (Part 7) — 20 s guided walkaround + selfie + GPS gate.
-# One capture per business day per driver. The client (Home tab) hard-gates
-# platform selection on this endpoint's status.
-# ---------------------------------------------------------------------------
-HUB_HARD_BLOCK_KM = 30.0       # Beyond this, cannot go online at all.
-HUB_WARN_KM = 3.0              # Beyond this, UI warns; still allowed.
-CAPTURE_MAX_MOVEMENT_M = 60.0  # Between start and end of the 20s recording.
-
-
-@api.post("/go-online-capture")
-async def create_go_online_capture(
-    body: GoOnlineCaptureIn, driver: Dict = Depends(get_driver)
-):
-    # Dedup on client_action_id — the sync queue may retry.
-    existing = await db.go_online_captures.find_one(
-        {"driver_id": driver["id"], "client_action_id": body.client_action_id},
-        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
-    )
-    if existing:
-        return {"completed": True, **existing}
-    day_key = _ist_day_key()
-    dup = await db.go_online_captures.find_one(
-        {"driver_id": driver["id"], "day_key": day_key},
-        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
-    )
-    if dup:
-        return {"completed": True, **dup, "already_done_today": True}
-    # Duration must be within a sane range (18–30s inclusive of jitter).
-    try:
-        started = _parse_iso(body.walkaround_started_at)
-        ended = _parse_iso(body.walkaround_ended_at)
-    except Exception:
-        raise HTTPException(400, "bad_timestamps")
-    duration_s = (ended - started).total_seconds()
-    if duration_s < 15 or duration_s > 60:
-        raise HTTPException(400, "duration_out_of_range")
-    # Movement between endpoints — anti-fraud check.
-    movement_m = _haversine_m(body.start_lat, body.start_lng, body.end_lat, body.end_lng)
-    # Distance from home hub (if known).
-    hub_lat = driver.get("hub_lat")
-    hub_lng = driver.get("hub_lng")
-    distance_from_hub_km: Optional[float] = None
-    if hub_lat is not None and hub_lng is not None:
-        distance_from_hub_km = round(
-            _haversine_km(body.start_lat, body.start_lng, hub_lat, hub_lng), 3
-        )
-        if distance_from_hub_km > HUB_HARD_BLOCK_KM:
-            raise HTTPException(
-                403,
-                {
-                    "code": "too_far_from_hub",
-                    "hub_km": distance_from_hub_km,
-                    "limit_km": HUB_HARD_BLOCK_KM,
-                },
-            )
-    row = {
-        "id": str(uuid.uuid4()),
-        "driver_id": driver["id"],
-        "vehicle_id": driver["vehicle_id"],
-        "day_key": day_key,
-        "walkaround_video_b64": body.walkaround_video_b64,
-        "walkaround_video_mime": body.walkaround_video_mime,
-        "selfie_photo_b64": body.selfie_photo_b64,
-        "walkaround_started_at": body.walkaround_started_at,
-        "walkaround_ended_at": body.walkaround_ended_at,
-        "duration_s": round(duration_s, 2),
-        "start_lat": body.start_lat,
-        "start_lng": body.start_lng,
-        "end_lat": body.end_lat,
-        "end_lng": body.end_lng,
-        "movement_m": round(movement_m, 2),
-        "distance_from_hub_km": distance_from_hub_km,
-        "hub_warn": bool(distance_from_hub_km is not None and distance_from_hub_km > HUB_WARN_KM),
-        "review_flag_movement": movement_m > CAPTURE_MAX_MOVEMENT_M,
-        "created_at": iso(now_utc()),
-        "client_action_id": body.client_action_id,
-    }
-    await db.go_online_captures.insert_one(row.copy())
-    row.pop("_id", None)
-    # Never echo the base64 back — clients only need the meta.
-    row.pop("walkaround_video_b64", None)
-    row.pop("selfie_photo_b64", None)
-    return {"completed": True, **row}
-
-
-@api.get("/go-online-capture/today")
-async def go_online_capture_today(driver: Dict = Depends(get_driver)):
-    day_key = _ist_day_key()
-    row = await db.go_online_captures.find_one(
-        {"driver_id": driver["id"], "day_key": day_key},
-        {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
-    )
-    if not row:
-        return {"completed": False, "day_key": day_key}
-    return {"completed": True, **row}
+# The driver-facing go-online capture (20s walkaround + selfie) was retired:
+# the only pre-duty car check is now the Start-duty inspection. The admin
+# "Capture reviews" endpoints below remain for viewing any historical captures.
 
 
 # ---------------------------------------------------------------------------
