@@ -4263,6 +4263,30 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     }
 
 
+@api.get("/money/collection-qr")
+async def money_collection_qr(driver: Dict = Depends(get_driver)):
+    """The driver's own collection QR, to show riders for payment. Created on
+    first open (which also assigns their R91D code). Degrades gracefully if
+    Razorpay isn't configured."""
+    row = await db.driver_collection_qrs.find_one({"driver_id": driver["id"]}, {"_id": 0})
+    if not row and _razorpay_configured():
+        try:
+            row = await _get_or_create_collection_qr(driver)
+        except HTTPException:
+            row = None
+    code = driver.get("code")
+    if not code:
+        d = await db.drivers.find_one({"id": driver["id"]}, {"_id": 0, "code": 1})
+        code = (d or {}).get("code")
+    return {
+        "qr_code_id": (row or {}).get("qr_code_id"),
+        "image_url": (row or {}).get("image_url"),
+        "short_url": (row or {}).get("short_url"),
+        "code": code,
+        "enabled": _razorpay_configured(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # RAZORPAY STANDARD CHECKOUT — driver pays cash-in-hand dues via UPI/card.
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
+import { CollectionQrCard } from "@/src/components/CollectionQrCard";
 import { DepositSheet } from "@/src/components/DepositSheet";
 import { PayDuesButton } from "@/src/components/PayDuesButton";
 import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
@@ -75,8 +76,11 @@ export default function Money() {
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
+        {/* CARD 0 — the driver's collection QR (show to riders) */}
+        <CollectionQrCard />
+
         {/* CARD 1 — Yesterday's earnings (the settled figure) */}
-        <Card testID="yesterday-earnings-card">
+        <Card testID="yesterday-earnings-card" style={{ marginTop: spacing.md }}>
           <View style={styles.heroHead}>
             <Text style={styles.cardKicker}>Yesterday's earnings</Text>
             <View style={styles.badge}>
