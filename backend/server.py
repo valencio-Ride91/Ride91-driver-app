@@ -4142,6 +4142,46 @@ async def money_yesterday(driver: Dict = Depends(get_driver)):
     }
 
 
+@api.get("/money/earnings")
+async def money_earnings(period: str = "yesterday", driver: Dict = Depends(get_driver)):
+    """Driver's earnings (their share of gross) for a period: yesterday, this
+    week (Mon-to-date), or this month (to date). Powers the earnings-card
+    period selector."""
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    today_bd = business_date_now()
+    today_d = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    tomorrow_bd = (today_d + timedelta(days=1)).strftime("%Y-%m-%d")
+    if period == "week":
+        mon_bd, _next, _d = week_bounds_for_business_date(today_bd)
+        start, end, label = mon_bd, tomorrow_bd, "This week"
+    elif period == "month":
+        start, end, label = today_bd[:7] + "-01", tomorrow_bd, "This month"
+    else:
+        period = "yesterday"
+        y_bd = (today_d - timedelta(days=1)).strftime("%Y-%m-%d")
+        start, end, label = y_bd, today_bd, "Yesterday"
+    rows = await _fetch_platform_cash(driver["id"], start, end)
+    gross = 0.0
+    days: set = set()
+    per_platform = {p: 0.0 for p in PLATFORMS}
+    for r in rows:
+        g = float(r.get("gross_amount", r.get("cash_amount", 0)) or 0)
+        gross += g
+        if g > 0:
+            days.add(r.get("business_date"))
+        p = r.get("platform")
+        if p in per_platform:
+            per_platform[p] += g
+    return {
+        "period": period, "label": label, "start": start,
+        "gross": round(gross, 2),
+        "driver_share": round(gross * rate, 2),
+        "share_rate": rate,
+        "days_operated": len(days),
+        "per_platform": {p: round(v, 2) for p, v in per_platform.items()},
+    }
+
+
 # (Reward thresholds + loyalty/yearly constants live near the top of the file,
 # above SETTINGS_DEFAULTS, so they can be overridden from the settings doc.)
 

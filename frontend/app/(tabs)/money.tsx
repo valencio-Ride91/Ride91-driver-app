@@ -41,15 +41,40 @@ function fmtDay(iso: string): string {
   }
 }
 
+type Period = "yesterday" | "week" | "month";
+interface Earnings {
+  period: Period;
+  label: string;
+  gross: number;
+  driver_share: number;
+  share_rate: number;
+  days_operated: number;
+}
+const PERIODS: { key: Period; label: string }[] = [
+  { key: "yesterday", label: "Yesterday" },
+  { key: "week", label: "This week" },
+  { key: "month", label: "This month" },
+];
+
 export default function Money() {
   const { t } = useI18n();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
+  const [period, setPeriod] = useState<Period>("yesterday");
+  const [earn, setEarn] = useState<Earnings | null>(null);
 
   const load = useCallback(async () => {
     try {
       setDay(await api.get<MoneyYesterday>("/money/yesterday"));
+    } catch {
+      // keep whatever we had
+    }
+  }, []);
+
+  const loadEarn = useCallback(async (p: Period) => {
+    try {
+      setEarn(await api.get<Earnings>(`/money/earnings?period=${p}`));
     } catch {
       // keep whatever we had
     }
@@ -61,11 +86,18 @@ export default function Money() {
     return () => clearInterval(id);
   }, [load]);
 
+  // Refetch earnings when the selected period changes, and keep it fresh.
+  useEffect(() => {
+    loadEarn(period);
+    const id = setInterval(() => loadEarn(period), 20000);
+    return () => clearInterval(id);
+  }, [period, loadEarn]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await load();
+    await Promise.all([load(), loadEarn(period)]);
     setRefreshing(false);
-  }, [load]);
+  }, [load, loadEarn, period]);
 
   const inCredit = (day?.in_credit ?? 0) > 0;
 
@@ -79,19 +111,40 @@ export default function Money() {
         {/* CARD 0 — the driver's collection QR (show to riders) */}
         <CollectionQrCard />
 
-        {/* CARD 1 — Yesterday's earnings (the settled figure) */}
-        <Card testID="yesterday-earnings-card" style={{ marginTop: spacing.md }}>
+        {/* CARD 1 — Earnings (period selector: yesterday / week / month) */}
+        <Card testID="earnings-card" style={{ marginTop: spacing.md }}>
           <View style={styles.heroHead}>
-            <Text style={styles.cardKicker}>Yesterday's earnings</Text>
-            <View style={styles.badge}>
-              <Text style={[styles.badgeText, { color: day?.settled ? colors.live : colors.amber }]}>
-                {day?.settled ? "SETTLED" : "PENDING"}
-              </Text>
-            </View>
+            <Text style={styles.cardKicker}>Earnings</Text>
+            {period === "yesterday" ? (
+              <View style={styles.badge}>
+                <Text style={[styles.badgeText, { color: day?.settled ? colors.live : colors.amber }]}>
+                  {day?.settled ? "SETTLED" : "PENDING"}
+                </Text>
+              </View>
+            ) : null}
           </View>
-          <Text style={styles.hero} testID="yesterday-share">{formatINR(day?.driver_share ?? 0)}</Text>
+
+          {/* Period selector */}
+          <View style={styles.segment} testID="earnings-period">
+            {PERIODS.map((p) => {
+              const on = period === p.key;
+              return (
+                <TouchableOpacity
+                  key={p.key}
+                  testID={`period-${p.key}`}
+                  style={[styles.segBtn, on ? styles.segBtnOn : null]}
+                  onPress={() => setPeriod(p.key)}
+                >
+                  <Text style={[styles.segText, on ? styles.segTextOn : null]}>{p.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text style={styles.hero} testID="earnings-share">{formatINR(earn?.driver_share ?? 0)}</Text>
           <Text style={styles.sub}>
-            {day ? fmtDay(day.business_date) : "—"} · your {Math.round((day?.share_rate ?? 0.3) * 100)}% of {formatINR(day?.gross ?? 0)} gross
+            {earn?.label ?? "Yesterday"} · your {Math.round((earn?.share_rate ?? 0.3) * 100)}% of {formatINR(earn?.gross ?? 0)} gross
+            {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? ` · ${earn!.days_operated} day${earn!.days_operated === 1 ? "" : "s"}` : ""}
           </Text>
         </Card>
 
@@ -200,6 +253,11 @@ const styles = StyleSheet.create({
   sub: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted, marginTop: 4 },
   badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, backgroundColor: colors.paper, borderWidth: 1, borderColor: colors.line },
   badgeText: { fontFamily: fonts.uiBold, fontSize: 10, letterSpacing: 0.5 },
+  segment: { flexDirection: "row", gap: 6, marginTop: spacing.sm },
+  segBtn: { flex: 1, paddingVertical: 7, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line, alignItems: "center", backgroundColor: colors.paper },
+  segBtnOn: { backgroundColor: colors.ink, borderColor: colors.ink },
+  segText: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.muted },
+  segTextOn: { color: colors.white, fontFamily: fonts.uiBold },
   line: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6 },
   lineLeft: { flexDirection: "row", alignItems: "center", gap: spacing.sm, flexShrink: 1 },
   lineLabel: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink },
