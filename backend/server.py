@@ -4526,6 +4526,31 @@ async def money_collection_qr(driver: Dict = Depends(get_driver)):
     }
 
 
+@api.get("/money/collections/today")
+async def money_collections_today(driver: Dict = Depends(get_driver)):
+    """Today's QR collections for this driver — running total, count, and the
+    most recent payments. The app polls this so each completed rider payment
+    shows up live."""
+    today_bd = business_date_now()
+    total = 0.0
+    count = 0
+    items: List[Dict[str, Any]] = []
+    async for r in db.collections.find(
+        {"driver_id": driver["id"], "business_date": today_bd},
+        {"_id": 0, "amount": 1, "occurred_at": 1},
+    ).sort("occurred_at", -1).limit(50):
+        amt = float(r.get("amount") or 0)
+        total += amt
+        count += 1
+        items.append({"amount": round(amt, 2), "at": r.get("occurred_at")})
+    return {
+        "business_date": today_bd,
+        "total": round(total, 2),
+        "count": count,
+        "items": items,
+    }
+
+
 # ---------------------------------------------------------------------------
 # RAZORPAY STANDARD CHECKOUT — driver pays cash-in-hand dues via UPI/card.
 # ---------------------------------------------------------------------------

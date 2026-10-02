@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { Card } from "./ui";
 import { api } from "@/src/api";
+import { formatINR } from "@/src/i18n";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 interface CollectionQr {
@@ -12,13 +13,32 @@ interface CollectionQr {
   code?: string | null;
   enabled?: boolean;
 }
+interface CollectionsToday {
+  business_date: string;
+  total: number;
+  count: number;
+  items: { amount: number; at: string }[];
+}
+
+function fmtTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata" });
+  } catch {
+    return "";
+  }
+}
 
 // Shows the driver's own collection QR so they can hold the phone up for a
-// rider to scan and pay. Tap to enlarge for easy scanning.
+// rider to scan and pay, plus today's running total that updates live as each
+// payment lands (with a "received" flash).
 export const CollectionQrCard: React.FC = () => {
   const [qr, setQr] = useState<CollectionQr | null>(null);
   const [loading, setLoading] = useState(true);
   const [full, setFull] = useState(false);
+  const [today, setToday] = useState<CollectionsToday | null>(null);
+  const [received, setReceived] = useState<number | null>(null);   // flash amount
+  const prevRef = useRef<{ count: number; total: number } | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -30,7 +50,29 @@ export const CollectionQrCard: React.FC = () => {
     }
   }, []);
 
+  const loadToday = useCallback(async () => {
+    try {
+      const d = await api.get<CollectionsToday>("/money/collections/today");
+      const prev = prevRef.current;
+      if (prev && d.count > prev.count) {
+        // One or more new payments landed since the last poll — flash the delta.
+        setReceived(Math.round((d.total - prev.total) * 100) / 100);
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setReceived(null), 6000);
+      }
+      prevRef.current = { count: d.count, total: d.total };
+      setToday(d);
+    } catch {
+      // offline — keep last
+    }
+  }, []);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    loadToday();
+    const id = setInterval(loadToday, 8000);   // live-ish: new payment shows within ~8s
+    return () => { clearInterval(id); if (flashTimer.current) clearTimeout(flashTimer.current); };
+  }, [loadToday]);
 
   if (loading) {
     return (
@@ -63,6 +105,31 @@ export const CollectionQrCard: React.FC = () => {
       {qr.code ? <Text style={styles.code}>{qr.code}</Text> : null}
       <Text style={styles.tapHint}>Tap to enlarge</Text>
 
+      {received != null ? (
+        <View style={styles.flash} testID="collection-received">
+          <Text style={styles.flashText}>✓ Received {formatINR(received)}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.todayRow}>
+        <Text style={styles.todayLabel}>Collected today</Text>
+        <Text style={styles.todayValue} testID="collections-today-total">
+          {formatINR(today?.total ?? 0)} · {today?.count ?? 0} pay{(today?.count ?? 0) === 1 ? "" : "s"}
+        </Text>
+      </View>
+      {today && today.items.length > 0 ? (
+        <View style={styles.recent}>
+          {today.items.slice(0, 5).map((it, i) => (
+            <View key={i} style={styles.recentRow}>
+              <Text style={styles.recentAmt}>{formatINR(it.amount)}</Text>
+              <Text style={styles.recentTime}>{fmtTime(it.at)}</Text>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <Text style={styles.noneYet}>No payments yet today — they appear here the moment a rider pays.</Text>
+      )}
+
       <Modal visible={full} transparent animationType="fade" onRequestClose={() => setFull(false)}>
         <Pressable style={styles.modalBg} onPress={() => setFull(false)}>
           <View style={styles.modalCard}>
@@ -88,4 +155,14 @@ const styles = StyleSheet.create({
   qrBig: { width: 300, height: 300 },
   codeBig: { fontFamily: fonts.dataMed, fontSize: 20, color: colors.ink, marginTop: spacing.md, letterSpacing: 1 },
   closeHint: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: spacing.md },
+  flash: { backgroundColor: "#dcfce7", borderRadius: radius.sm, paddingVertical: 8, paddingHorizontal: 12, marginTop: spacing.md },
+  flashText: { fontFamily: fonts.uiBold, fontSize: 15, color: "#166534", textAlign: "center" },
+  todayRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.md, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.line },
+  todayLabel: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
+  todayValue: { fontFamily: fonts.dataMed, fontSize: 16, color: colors.live },
+  recent: { marginTop: spacing.sm },
+  recentRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4 },
+  recentAmt: { fontFamily: fonts.data, fontSize: 14, color: colors.ink },
+  recentTime: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted },
+  noneYet: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: spacing.sm },
 });
