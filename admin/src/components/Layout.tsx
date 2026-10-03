@@ -10,7 +10,6 @@ import { AdminIdentity, logout } from "../auth";
 // page), so those three are reached by opening a hub rather than from the nav.
 const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?: boolean }[] = [
   { to: "/hubs", label: "Hubs", hub: true },
-  { to: "/", label: "Dashboard", end: true },
   { to: "/bookings", label: "Bookings" },
   { to: "/cash", label: "Cash" },
   { to: "/collections", label: "Collections" },

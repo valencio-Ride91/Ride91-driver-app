@@ -5,7 +5,6 @@ import { Navigate, Route, BrowserRouter, Routes } from "react-router-dom";
 
 import Layout from "./components/Layout";
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
 import Bookings from "./pages/Bookings";
 import Drivers from "./pages/Drivers";
 import LiveMap from "./pages/LiveMap";
@@ -69,7 +68,7 @@ export default function App() {
             {/* A hub_manager is scoped to their hub's drivers/cars/hubs/rewards.
                 Fleet-wide pages redirect them to /drivers (matching the backend
                 fleet_admin gate, so a typed URL can't reach fleet data). */}
-            <Route path="/" element={<Fleet admin={admin}><Dashboard /></Fleet>} />
+            <Route path="/" element={<Navigate to={homePath(admin)} replace />} />
             <Route path="/bookings" element={<Fleet admin={admin}><Bookings /></Fleet>} />
             <Route path="/drivers" element={<Drivers />} />
             <Route path="/drivers/:id" element={<DriverDetail />} />
