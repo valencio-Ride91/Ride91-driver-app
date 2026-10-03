@@ -179,7 +179,9 @@ async def load_settings() -> Dict[str, Any]:
 # Sources whose qr_payments rows may reduce a driver's cash_in_hand. The
 # driver's own app is deliberately not on this list: cash is cleared either by
 # paying through Razorpay (webhook-confirmed) or by ops recording a hand-in.
-TRUSTED_CASH_SOURCES = {"razorpay", "admin_manual"}
+# "qr_collection" = a rider paid a cash Uber trip to the fleet via the driver's
+# QR, so it settles that driver's cash-in-hand just like a deposit/hand-in.
+TRUSTED_CASH_SOURCES = {"razorpay", "admin_manual", "qr_collection"}
 # How far back the ops driver list looks for a driver's latest duty state.
 # Bounds the sort: a driver with no row in this window is not on duty now.
 STATE_LOOKBACK_DAYS = 7
@@ -5105,19 +5107,46 @@ async def razorpay_qr_status(
 async def _reconcile_collection_once(
     driver_id: str, qr_code_id: str, razorpay_payment_id: str, amount_paise: int
 ) -> None:
-    """Record one rider payment on a driver's collection QR. Idempotent on the
+    """Record one rider payment on a driver's collection QR, and credit it
+    against the driver's cash-in-hand — the money was a cash Uber trip paid to
+    the fleet instead of to the driver. Both writes are idempotent on the
     razorpay_payment_id so a replayed webhook never double-counts."""
+    amount = round(int(amount_paise) / 100, 2)
+    now = iso(now_utc())
+    bd = business_date_now()
     await db.collections.update_one(
         {"razorpay_payment_id": razorpay_payment_id},
         {"$setOnInsert": {
             "id": str(uuid.uuid4()),
             "driver_id": driver_id,
-            "amount": round(int(amount_paise) / 100, 2),
+            "amount": amount,
             "qr_code_id": qr_code_id,
             "razorpay_payment_id": razorpay_payment_id,
-            "occurred_at": iso(now_utc()),
-            "business_date": business_date_now(),
-            "created_at": iso(now_utc()),
+            "occurred_at": now,
+            "business_date": bd,
+            "created_at": now,
+        }},
+        upsert=True,
+    )
+    # Settle the driver's cash-in-hand: a trusted "deposit" the fleet received on
+    # their behalf. Keyed on (driver_id, client_action_id) — the qr_payments
+    # unique index — so it's written exactly once.
+    await db.qr_payments.update_one(
+        {"driver_id": driver_id, "client_action_id": f"qrcol:{razorpay_payment_id}"},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "type": "deposit",
+            "amount": amount,
+            "reference": qr_code_id,
+            "platform": None,
+            "occurred_at": now,
+            "business_date": bd,
+            "source": "qr_collection",
+            "razorpay_qr_code_id": qr_code_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "client_action_id": f"qrcol:{razorpay_payment_id}",
+            "created_at": now,
         }},
         upsert=True,
     )
