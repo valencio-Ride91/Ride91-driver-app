@@ -88,5 +88,5 @@ credentials.json
 .credentials
 
 # build/test artifacts
-apk_build.log
+apk_build*.log
 verify_live.py
