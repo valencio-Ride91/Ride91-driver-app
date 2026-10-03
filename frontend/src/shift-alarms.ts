@@ -32,6 +32,9 @@ export interface ShiftSchedule {
   hub_id: string | null;
   alarm_fires_at: string;
   state: "scheduled" | "responded" | "no_response";
+  // "ops" when the hub set this wake-up (shift_start_time on the driver). The
+  // app then shows it read-only — the driver can't reschedule a hub-set time.
+  source?: "ops" | "driver";
   // End-alarm fields (nullable when only start alarm is scheduled).
   shift_end?: string | null;
   end_buffer_min?: number | null;

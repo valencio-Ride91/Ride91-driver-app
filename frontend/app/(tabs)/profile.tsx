@@ -66,6 +66,9 @@ export default function Profile() {
 
   const nextAlarm = useMemo(() => (next?.alarm_fires_at ? formatIST(next.alarm_fires_at) : null), [next]);
   const nextShift = useMemo(() => (next?.shift_start ? formatIST(next.shift_start) : null), [next]);
+  // When the hub has set a wake-up time on the driver, it is authoritative:
+  // the app shows it read-only and the driver can't schedule over it.
+  const hubSet = next?.source === "ops";
   const shiftEnd = useMemo(() => (next?.shift_end ? formatIST(next.shift_end) : null), [next]);
 
   const showToast = (m: string) => {
@@ -190,6 +193,12 @@ export default function Profile() {
               : "Native alarm needs the production build. Use Preview to test the UI on web / Expo Go."}
           </Text>
 
+          {hubSet ? (
+            <View style={[styles.badge, styles.badgeOn, { alignSelf: "flex-start", marginTop: spacing.sm }]}>
+              <Text style={[styles.badgeText, styles.badgeTextOn]}>Set by your hub</Text>
+            </View>
+          ) : null}
+
           {/* Start alarm block */}
           <Text style={styles.section}>Start alarm</Text>
           <View style={styles.kv}>
@@ -248,17 +257,23 @@ export default function Profile() {
           ) : null}
 
           <View style={styles.actions}>
-            <TouchableOpacity
-              testID="alarm-schedule-btn"
-              style={styles.primary}
-              onPress={() => {
-                setPickerStep("start");
-                setChosenPreset(null);
-                setPickerOpen(true);
-              }}
-            >
-              <Text style={styles.primaryText}>Schedule shift</Text>
-            </TouchableOpacity>
+            {hubSet ? (
+              <Text style={styles.mutedNote}>
+                Your hub sets your wake-up time. The alarm arms automatically — contact your hub to change it.
+              </Text>
+            ) : (
+              <TouchableOpacity
+                testID="alarm-schedule-btn"
+                style={styles.primary}
+                onPress={() => {
+                  setPickerStep("start");
+                  setChosenPreset(null);
+                  setPickerOpen(true);
+                }}
+              >
+                <Text style={styles.primaryText}>Schedule shift</Text>
+              </TouchableOpacity>
+            )}
             <View style={styles.actionsRow}>
               <TouchableOpacity
                 testID="alarm-preview-start-btn"

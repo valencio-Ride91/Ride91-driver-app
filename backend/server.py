@@ -1267,13 +1267,77 @@ async def schedule_shift_alarm(body: ShiftScheduleIn, driver: Dict = Depends(get
     return row
 
 
+def _ops_shift_next(driver: Dict) -> Optional[Dict]:
+    """Synthesize the driver's next wake-up from the ops-set shift_start_time.
+
+    The hub sets `shift_start_time` (HH:MM, IST wall clock) on each driver via
+    hub → driver. When present, that is authoritative: the app arms its wake-up
+    alarm from this synthetic schedule instead of one the driver created. We
+    return the next future occurrence of HH:MM IST, shaped exactly like a
+    shift_schedules row so the native side needs no change. The start alarm
+    fires 1h before, matching the driver-created flow.
+
+    The id is stable per shift day (`opsshift:<driver>:<business_date>`) so
+    re-arming is idempotent and a recorded response maps back to the day.
+    Returns None when no ops time is set (caller falls back to the legacy
+    driver-created schedule).
+    """
+    raw = driver.get("shift_start_time")
+    if not raw:
+        return None
+    try:
+        hh, mm = (int(x) for x in str(raw).split(":")[:2])
+    except (ValueError, TypeError):
+        return None
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    now_ist = now_utc().astimezone(IST)
+    cand = now_ist.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if cand <= now_ist:
+        cand += timedelta(days=1)
+    shift_start = cand.astimezone(timezone.utc)
+    bd = business_date_from_dt(shift_start)
+    return {
+        "id": f"opsshift:{driver['id']}:{bd}",
+        "driver_id": driver["id"],
+        "shift_start": iso(shift_start),
+        "shift_type": driver.get("shift_type") or "day",
+        "hub_id": driver.get("hub_id"),
+        "alarm_fires_at": iso(shift_start - timedelta(hours=1)),
+        "state": "scheduled",
+        # Ops wake-up is a start-only alarm; no end-of-shift leg.
+        "shift_end": None,
+        "end_buffer_min": None,
+        "end_state": "na",
+        "source": "ops",
+    }
+
+
 @api.get("/shift-alarm/next")
 async def next_shift_alarm(driver: Dict = Depends(get_driver)):
     """Native side calls this on app open / boot to (re)schedule the alarm.
-    Returns the MOST RECENTLY created schedule that still has an active
-    phase (start or end). This mirrors the driver's mental model — the
-    latest schedule overrides an older stale one on the same day.
+
+    The hub-set shift time wins when present — that's the whole point of
+    wiring the app to the ops-set wake-up. If the driver already acknowledged
+    today's ops wake-up (a 'start' response recorded against the synthetic id),
+    we flip its state to 'responded' so the app won't re-arm. Only when no ops
+    time is set do we fall back to the legacy driver-created schedule (the most
+    recently created one still holding an active phase).
     """
+    syn = _ops_shift_next(driver)
+    if syn:
+        acked = await db.alarm_responses.find_one(
+            {
+                "driver_id": driver["id"],
+                "schedule_id": syn["id"],
+                "phase": "start",
+                "response": {"$in": ["awake", "not_coming"]},
+            },
+            {"_id": 0},
+        )
+        if acked:
+            syn["state"] = "responded"
+        return syn
     row = await db.shift_schedules.find_one(
         {
             "driver_id": driver["id"],
