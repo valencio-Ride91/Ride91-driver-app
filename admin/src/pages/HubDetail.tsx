@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, HubRoster } from "../api";
+import EarningsGrid from "../components/EarningsGrid";
 
 export default function HubDetail() {
   const { id = "" } = useParams();
@@ -12,6 +13,7 @@ export default function HubDetail() {
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [adding, setAdding] = useState<"none" | "driver" | "vehicle">("none");
+  const [tab, setTab] = useState<"roster" | "earnings">("roster");
 
   // add-driver form
   const [dName, setDName] = useState("");
@@ -102,15 +104,40 @@ export default function HubDetail() {
           <h1>{hub.name}</h1>
           <div className="sub">{hub.city ?? "—"} · {vehicles.length}/{hub.capacity} cars · {drivers.length} drivers</div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => { setAdding(adding === "vehicle" ? "none" : "vehicle"); setErr(null); }}>{adding === "vehicle" ? "Close" : "Add vehicle"}</button>
-          <button className="primary" onClick={() => { setAdding(adding === "driver" ? "none" : "driver"); setErr(null); }}>{adding === "driver" ? "Close" : "Add driver"}</button>
-        </div>
+        {tab === "roster" ? (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { setAdding(adding === "vehicle" ? "none" : "vehicle"); setErr(null); }}>{adding === "vehicle" ? "Close" : "Add vehicle"}</button>
+            <button className="primary" onClick={() => { setAdding(adding === "driver" ? "none" : "driver"); setErr(null); }}>{adding === "driver" ? "Close" : "Add driver"}</button>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Everything for this hub lives here — its cars & drivers (roster) and
+          its daily earnings — switched by these tabs. */}
+      <div className="tabs" style={{ display: "flex", gap: 8, marginBottom: 16, borderBottom: "1px solid var(--line)" }}>
+        {([["roster", "Vehicles & drivers"], ["earnings", "Earnings"]] as const).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => { setTab(key); setErr(null); }}
+            style={{
+              background: "none", border: "none", padding: "8px 12px", cursor: "pointer",
+              fontWeight: tab === key ? 700 : 500,
+              color: tab === key ? "var(--ink)" : "var(--muted)",
+              borderBottom: tab === key ? "2px solid var(--ink)" : "2px solid transparent",
+            }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {msg ? <div className="tag ok" style={{ display: "inline-block", marginBottom: 12 }}>{msg}</div> : null}
       {err ? <div className="err" style={{ marginBottom: 12 }}>{err}</div> : null}
 
+      {tab === "earnings" ? (
+        <EarningsGrid hubId={id} />
+      ) : (
+      <>
       {adding === "vehicle" ? (
         <div className="card onboard">
           <h2>Add vehicle to {hub.name}</h2>
@@ -169,6 +196,8 @@ export default function HubDetail() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 }

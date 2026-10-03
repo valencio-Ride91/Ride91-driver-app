@@ -3308,19 +3308,25 @@ class EarningsEntryIn(BaseModel):
 
 @api.get("/admin/earnings")
 async def admin_earnings_for_date(
-    date: Optional[str] = None, platform: str = "uber", admin: Dict = Depends(require_ops)
+    date: Optional[str] = None, platform: str = "uber",
+    hub_id: Optional[str] = None, admin: Dict = Depends(require_ops)
 ):
     """The hub's drivers with their earnings entry for a given date+platform, so
-    the daily-entry grid can prefill. Scoped to a hub_manager's hub."""
+    the daily-entry grid can prefill. A hub_manager is always pinned to their
+    own hub; an owner may pass ?hub_id= to scope the grid to one hub (the
+    hub-detail Earnings section does this)."""
     bd = date or business_date_now()
     scope = hub_scope(admin)
+    if scope and hub_id and hub_id != scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    target_hub = scope or hub_id          # None => whole fleet (owner, no filter)
     dq: Dict[str, Any] = {"archived": {"$ne": True}}
     drivers = [d async for d in db.drivers.find(
         dq, {"_id": 0, "id": 1, "name": 1, "phone": 1, "code": 1, "hub_id": 1,
              "vehicle_id": 1, "shift_type": 1})]
-    if scope:
-        scoped_vids = set(await _scope_vehicle_ids(scope) or [])
-        drivers = [d for d in drivers if d.get("hub_id") == scope or d.get("vehicle_id") in scoped_vids]
+    if target_hub:
+        scoped_vids = set(await _scope_vehicle_ids(target_hub) or [])
+        drivers = [d for d in drivers if d.get("hub_id") == target_hub or d.get("vehicle_id") in scoped_vids]
     ids = [d["id"] for d in drivers]
     rows = {r["driver_id"]: r async for r in db.platform_cash.find(
         {"driver_id": {"$in": ids}, "platform": platform, "business_date": bd},
