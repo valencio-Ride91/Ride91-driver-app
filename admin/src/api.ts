@@ -435,6 +435,25 @@ export interface LoyaltyResponse {
   attendance_enabled?: boolean;
 }
 
+export interface EarningsRow {
+  driver_id: string;
+  name: string | null;
+  phone: string | null;
+  code: string | null;
+  shift: string;
+  gross_amount: number | null;
+  cash_amount: number | null;
+  source: string | null;
+  locked: boolean;
+}
+
+export interface EarningsForDate {
+  date: string;
+  platform: string;
+  items: EarningsRow[];
+  count: number;
+}
+
 export interface CollectionRow {
   driver_id: string;
   name: string | null;

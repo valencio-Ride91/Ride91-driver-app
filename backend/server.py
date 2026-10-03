@@ -3141,6 +3141,94 @@ async def admin_link_uber_uuid(
 
 
 # ---------------------------------------------------------------------------
+# MANUAL DAILY EARNINGS (hub-entered) — the alternative to the CSV import.
+# One canonical row per (driver, platform, business_date). A manual entry never
+# overwrites an official settled import (precedence: settled > manual > ocr),
+# so the two sources can't double-count.
+# ---------------------------------------------------------------------------
+class EarningsEntryIn(BaseModel):
+    business_date: Optional[str] = None          # YYYY-MM-DD; default today
+    platform: Literal["uber", "rapido", "ola"] = "uber"
+    gross_amount: float = Field(ge=0)
+    cash_amount: float = Field(default=0, ge=0)  # cash the driver collected (drives dues)
+
+
+@api.get("/admin/earnings")
+async def admin_earnings_for_date(
+    date: Optional[str] = None, platform: str = "uber", admin: Dict = Depends(require_ops)
+):
+    """The hub's drivers with their earnings entry for a given date+platform, so
+    the daily-entry grid can prefill. Scoped to a hub_manager's hub."""
+    bd = date or business_date_now()
+    scope = hub_scope(admin)
+    dq: Dict[str, Any] = {"archived": {"$ne": True}}
+    drivers = [d async for d in db.drivers.find(
+        dq, {"_id": 0, "id": 1, "name": 1, "phone": 1, "code": 1, "hub_id": 1,
+             "vehicle_id": 1, "shift_type": 1})]
+    if scope:
+        scoped_vids = set(await _scope_vehicle_ids(scope) or [])
+        drivers = [d for d in drivers if d.get("hub_id") == scope or d.get("vehicle_id") in scoped_vids]
+    ids = [d["id"] for d in drivers]
+    rows = {r["driver_id"]: r async for r in db.platform_cash.find(
+        {"driver_id": {"$in": ids}, "platform": platform, "business_date": bd},
+        {"_id": 0, "driver_id": 1, "gross_amount": 1, "cash_amount": 1, "status": 1, "source": 1})} if ids else {}
+    items = []
+    for d in drivers:
+        r = rows.get(d["id"])
+        items.append({
+            "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+            "code": d.get("code"), "shift": d.get("shift_type", "day"),
+            "gross_amount": (r or {}).get("gross_amount"),
+            "cash_amount": (r or {}).get("cash_amount"),
+            "source": (r or {}).get("source"),
+            "locked": (r or {}).get("source") == "uber_report",   # official import — don't overwrite
+        })
+    items.sort(key=lambda x: (x["code"] or "", x["name"] or ""))
+    return {"date": bd, "platform": platform, "items": items, "count": len(items)}
+
+
+@api.post("/admin/drivers/{driver_id}/earnings")
+async def admin_set_driver_earnings(
+    driver_id: str, body: EarningsEntryIn, admin: Dict = Depends(require_ops)
+):
+    """Hub manually sets a driver's earnings for a day+platform. Upserts the one
+    canonical row; refuses to overwrite an official settled import."""
+    driver = await db.drivers.find_one(
+        {"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(driver, hub_scope(admin))
+    bd = body.business_date or business_date_now()
+    existing = await db.platform_cash.find_one(
+        {"driver_id": driver_id, "platform": body.platform, "business_date": bd},
+        {"_id": 0, "source": 1})
+    if existing and existing.get("source") == "uber_report":
+        raise HTTPException(409, "already_imported")   # official report wins — don't clobber
+    start, end = business_day_bounds(bd)
+    now = iso(now_utc())
+    # status "settled" so it counts toward dues/earnings/dashboard like a report;
+    # source "manual" marks it hub-entered (editable; an import may later supersede).
+    await db.platform_cash.update_one(
+        {"driver_id": driver_id, "platform": body.platform, "business_date": bd},
+        {"$set": {
+            "driver_id": driver_id, "platform": body.platform, "business_date": bd,
+            "gross_amount": round(body.gross_amount, 2),
+            "cash_amount": round(body.cash_amount, 2),
+            "status": "settled", "source": "manual",
+            "window_start": iso(start), "window_end": iso(end),
+            "entered_by": admin["username"], "updated_at": now,
+         },
+         "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+        upsert=True,
+    )
+    await _audit(admin, "set_driver_earnings", driver_id,
+                 {"date": bd, "platform": body.platform, "gross": round(body.gross_amount, 2)})
+    return {"ok": True, "driver_id": driver_id, "business_date": bd,
+            "platform": body.platform, "gross_amount": round(body.gross_amount, 2),
+            "cash_amount": round(body.cash_amount, 2)}
+
+
+# ---------------------------------------------------------------------------
 # CASH CLEARANCE
 #
 # The driver-facing POST /api/qr-payment was removed. It accepted a

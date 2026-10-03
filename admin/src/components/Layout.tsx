@@ -10,6 +10,7 @@ const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?
   { to: "/", label: "Dashboard", end: true },
   { to: "/bookings", label: "Bookings" },
   { to: "/drivers", label: "Drivers", hub: true },
+  { to: "/daily-earnings", label: "Daily earnings", hub: true },
   { to: "/vehicles", label: "Vehicles", hub: true },
   { to: "/hubs", label: "Hubs", hub: true },
   { to: "/cash", label: "Cash" },
