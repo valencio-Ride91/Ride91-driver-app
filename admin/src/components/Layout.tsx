@@ -6,13 +6,12 @@ import { AdminIdentity, logout } from "../auth";
 // `hub` marks the pages a scoped hub_manager may see (their hub's drivers,
 // cars, and reward standings). Everyone else (viewer/manager/owner) sees all
 // non-owner items; owner adds Admin accounts.
+// Hub is the home: a hub holds its drivers, vehicles and earnings (Hub detail
+// page), so those three are reached by opening a hub rather than from the nav.
 const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?: boolean }[] = [
+  { to: "/hubs", label: "Hubs", hub: true },
   { to: "/", label: "Dashboard", end: true },
   { to: "/bookings", label: "Bookings" },
-  { to: "/drivers", label: "Drivers", hub: true },
-  { to: "/daily-earnings", label: "Daily earnings", hub: true },
-  { to: "/vehicles", label: "Vehicles", hub: true },
-  { to: "/hubs", label: "Hubs", hub: true },
   { to: "/cash", label: "Cash" },
   { to: "/collections", label: "Collections" },
   { to: "/rewards", label: "Earnings & rewards", hub: true },

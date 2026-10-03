@@ -30,9 +30,16 @@ import Audit from "./pages/Audit";
 
 import { AdminIdentity, me } from "./auth";
 
-// Fleet-wide pages: a scoped hub_manager is bounced to their drivers list.
+// The hub is home. An owner lands on the hub list; a hub_manager goes straight
+// into their own hub (drivers / vehicles / earnings all live there).
+function homePath(admin: AdminIdentity): string {
+  if (admin.role === "hub_manager" && admin.hub_id) return `/hubs/${admin.hub_id}`;
+  return "/hubs";
+}
+
+// Fleet-wide pages: a scoped hub_manager is bounced to their hub.
 function Fleet({ admin, children }: { admin: AdminIdentity; children: JSX.Element }) {
-  if (admin.role === "hub_manager") return <Navigate to="/drivers" replace />;
+  if (admin.role === "hub_manager") return <Navigate to={homePath(admin)} replace />;
   return children;
 }
 
@@ -55,7 +62,7 @@ export default function App() {
       <Routes>
         <Route
           path="/login"
-          element={admin ? <Navigate to="/" replace /> : <Login onLogin={setAdmin} />}
+          element={admin ? <Navigate to={homePath(admin)} replace /> : <Login onLogin={setAdmin} />}
         />
         {admin ? (
           <Route element={<Layout admin={admin} onLogout={() => setAdmin(null)} />}>
@@ -84,7 +91,7 @@ export default function App() {
             <Route path="/audit" element={<Fleet admin={admin}><Audit /></Fleet>} />
             <Route path="/settings" element={<Fleet admin={admin}><Settings admin={admin} /></Fleet>} />
             {admin.role === "owner" ? <Route path="/users" element={<Users admin={admin} />} /> : null}
-            <Route path="*" element={<Navigate to={admin.role === "hub_manager" ? "/drivers" : "/"} replace />} />
+            <Route path="*" element={<Navigate to={homePath(admin)} replace />} />
           </Route>
         ) : (
           <Route path="*" element={<Navigate to="/login" replace />} />
