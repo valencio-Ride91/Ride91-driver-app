@@ -161,6 +161,8 @@ export interface DriverDetail {
     hub_lat: number | null;
     hub_lng: number | null;
     shift_type: string | null;
+    shift_start_time: string | null;
+    shift_end_time: string | null;
     status: string;
     active: boolean;
     archived: boolean;
@@ -186,6 +188,7 @@ export interface DriverDetail {
   payouts: Array<Record<string, any>>;
   deposits: Array<Record<string, any>>;
   notifications: NotificationRow[];
+  shift_alarms: Array<Record<string, any>>;
 }
 
 export interface NotificationRow {

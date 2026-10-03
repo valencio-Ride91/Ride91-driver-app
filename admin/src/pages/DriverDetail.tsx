@@ -25,17 +25,36 @@ export default function DriverDetail() {
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   const [sending, setSending] = useState(false);
+  const [shiftStart, setShiftStart] = useState("");
+  const [shiftEnd, setShiftEnd] = useState("");
+  const [saBusy, setSaBusy] = useState(false);
+  const [saMsg, setSaMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const d = await api.get<Detail>(`/admin/drivers/${id}`);
       setData(d);
+      setShiftStart(d.driver.shift_start_time ?? "");
+      setShiftEnd(d.driver.shift_end_time ?? "");
     } catch {
       setErr("Could not load driver.");
     } finally {
       setLoading(false);
     }
   }, [id]);
+
+  const saveShift = async () => {
+    setSaBusy(true); setErr(null); setSaMsg(null);
+    try {
+      await api.patch(`/admin/drivers/${id}`, { shift_start_time: shiftStart, shift_end_time: shiftEnd });
+      await load();
+      setSaMsg("Shift alarm saved."); setTimeout(() => setSaMsg(null), 3000);
+    } catch {
+      setErr("Could not save the shift alarm.");
+    } finally {
+      setSaBusy(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -150,6 +169,33 @@ export default function DriverDetail() {
           </button>
         </div>
       </div>
+
+      {/* Shift alarm — the driver's daily shift start (wake-up alarm + attendance on-time) */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2 style={{ marginTop: 0 }}>Shift alarm</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          The driver's daily shift start drives their wake-up alarm and the on-time check for the attendance bonus. Shift: {data.driver.shift_type ?? "—"}.
+        </div>
+        <div className="form-grid">
+          <label>Shift start (HH:MM)
+            <input type="time" value={shiftStart} onChange={(e) => setShiftStart(e.target.value)} />
+          </label>
+          <label>Shift end (HH:MM, optional)
+            <input type="time" value={shiftEnd} onChange={(e) => setShiftEnd(e.target.value)} />
+          </label>
+        </div>
+        {saMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 8 }}>{saMsg}</div> : null}
+        <div className="form-actions">
+          <button className="primary" onClick={saveShift} disabled={saBusy}>{saBusy ? "Saving…" : "Save shift alarm"}</button>
+        </div>
+      </div>
+
+      <Section title="Shift alarm history" rows={data.shift_alarms} cols={[
+        ["When", (r) => fmtWhen(r.created_at ?? r.fired_at)],
+        ["Phase", (r) => r.phase ?? "start"],
+        ["Response", (r) => <span className={`tag ${r.response === "on_my_way" || r.response === "yes" ? "live" : r.response ? "amber" : "muted"}`}>{r.response ?? "no response"}</span>],
+        ["Reason", (r) => r.reason_note ?? r.reason_code ?? "—"],
+      ]} />
 
       <Section title="Documents" rows={data.documents} cols={[
         ["Document", (r) => r.label ?? r.type],

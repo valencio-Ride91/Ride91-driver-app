@@ -460,6 +460,8 @@ class DriverUpdateIn(BaseModel):
     hub_lat: Optional[float] = None
     hub_lng: Optional[float] = None
     shift_type: Optional[str] = None
+    shift_start_time: Optional[str] = None   # HH:MM — the driver's daily shift start (wake-up alarm + attendance on-time)
+    shift_end_time: Optional[str] = None     # HH:MM — optional
     status: Optional[Literal["approved", "pending"]] = None
     active: Optional[bool] = None
 
@@ -2504,7 +2506,8 @@ async def admin_update_driver(
     await _assert_driver_in_scope(driver, scope)
     updates: Dict[str, Any] = {}
     for field in ("name", "phone", "vehicle_id", "hub_name", "hub_lat",
-                  "hub_lng", "shift_type", "status", "active"):
+                  "hub_lng", "shift_type", "shift_start_time", "shift_end_time",
+                  "status", "active"):
         val = getattr(body, field)
         if val is not None:
             updates[field] = val.strip() if isinstance(val, str) else val
@@ -2607,6 +2610,8 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
             "hub_lat": d.get("hub_lat"),
             "hub_lng": d.get("hub_lng"),
             "shift_type": d.get("shift_type"),
+            "shift_start_time": d.get("shift_start_time"),
+            "shift_end_time": d.get("shift_end_time"),
             "status": d.get("status", "approved"),
             "active": d.get("active", True),
             "archived": bool(d.get("archived")),
@@ -2623,6 +2628,8 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
         "payouts": payouts,
         "deposits": deposits,
         "notifications": notifications,
+        "shift_alarms": [r async for r in db.alarm_responses.find(
+            {"driver_id": driver_id}, {"_id": 0}).sort("created_at", -1).limit(20)],
     }
 
 
@@ -4562,7 +4569,21 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
 
     # Scheduled shift start per business day (from the shift-alarm system).
     scheduled: Dict[str, datetime] = {}
-    if require_ontime:
+    shift_time = driver.get("shift_start_time")   # HH:MM, ops-set per driver
+    if require_ontime and shift_time:
+        # Build the scheduled start for each day from the driver's own time.
+        try:
+            hh, mm = (int(x) for x in str(shift_time).split(":")[:2])
+        except Exception:
+            hh, mm = -1, 0
+        if 0 <= hh <= 23:
+            for bd in daily_gross:
+                d0 = datetime.strptime(bd, "%Y-%m-%d").date()
+                # Before 04:00 IST belongs to the next calendar day of the business day.
+                cal = d0 + timedelta(days=1) if hh < 4 else d0
+                scheduled[bd] = datetime(cal.year, cal.month, cal.day, hh, mm, tzinfo=IST)
+    elif require_ontime:
+        # Fallback: the shift-alarm schedules the driver app created.
         async for r in db.shift_schedules.find(
             {"driver_id": did}, {"_id": 0, "shift_start": 1}
         ):
