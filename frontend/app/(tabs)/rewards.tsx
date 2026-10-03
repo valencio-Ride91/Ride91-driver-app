@@ -36,7 +36,7 @@ interface Loyalty {
     next: { key: string; label: string; reward: number; amount: number; remaining: number; progress: number } | null;
     vested_total: number;
   };
-  wallet?: { enabled: boolean; per_day: number; qualifying_days: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
+  wallet?: { enabled: boolean; per_day: number; qualifying_days: number; daily_accrued: number; milestone_credit: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
   attendance?: { enabled: boolean; month: string; good_days: number; min_days: number; bonus: number; qualified: boolean; require_ontime: boolean; daily_target: number; paid: boolean };
   yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
 }
@@ -142,25 +142,21 @@ export default function RewardsTab() {
             </View>
             <Text style={[styles.hero, { color: colors.live }]}>{formatINR(loyalty.wallet.balance)}</Text>
             <Text style={styles.sub}>
-              {loyalty.wallet.qualifying_days} days × {formatINR(loyalty.wallet.per_day)}
-              {loyalty.wallet.paid > 0 ? ` · ${formatINR(loyalty.wallet.paid)} already paid` : ""}
+              {formatINR(loyalty.wallet.daily_accrued)} from {loyalty.wallet.qualifying_days} days
+              {loyalty.wallet.milestone_credit > 0 ? ` + ${formatINR(loyalty.wallet.milestone_credit)} milestones` : ""}
+              {loyalty.wallet.paid > 0 ? ` · ${formatINR(loyalty.wallet.paid)} paid` : ""}
             </Text>
-            <Text style={styles.note}>Paid out by the office. You keep it by staying — it's lost if you leave.</Text>
+            <Text style={styles.note}>Earnings milestones land here too. Paid out by the office — you keep it by staying, it's lost if you leave.</Text>
           </Card>
         ) : null}
 
         {loyalty ? (
           <Card testID="rewards-loyalty-card" style={{ marginTop: spacing.md }}>
             <View style={styles.head}>
-              <Text style={styles.cardTitle}>Loyalty 🎖️</Text>
+              <Text style={styles.cardTitle}>Loyalty milestones 🎖️</Text>
               <Text style={styles.hint}>{tenureText(loyalty.loyalty.tenure_days)} with Ride91</Text>
             </View>
-            {loyalty.loyalty.vested_total > 0 ? (
-              <View style={styles.daysRow}>
-                <Text style={styles.daysLabel}>Earned so far</Text>
-                <Text style={[styles.daysValue, { color: colors.live }]}>{formatINR(loyalty.loyalty.vested_total)}</Text>
-              </View>
-            ) : null}
+            <Text style={styles.note}>Each milestone's bonus lands in your loyalty wallet above.</Text>
             {loyalty.loyalty.next ? (
               <View style={styles.reward}>
                 <View style={styles.rewardHead}>

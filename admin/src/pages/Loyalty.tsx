@@ -73,7 +73,7 @@ export default function Loyalty() {
       )}
 
       <div className="muted-sm" style={{ marginTop: 12 }}>
-        ★ = current year leader in that hub. Vested = loyalty milestones the driver has reached while active (claimable). A driver who leaves forfeits milestones not yet reached.
+        ★ = current year leader in that hub. The loyalty wallet holds daily accrual + earnings-milestone bonuses, paid by ops; a driver who leaves forfeits the unpaid balance.
       </div>
     </div>
   );
@@ -122,9 +122,9 @@ function HubBlock({ hub, walletOn, attOn, onPaid }: { hub: LoyaltyHub; walletOn:
 
       {tab === "drivers" ? (
         <table className="data">
-          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th>{walletOn ? <th style={{ textAlign: "right" }}>Wallet</th> : null}{attOn ? <th style={{ textAlign: "center" }}>Attendance</th> : null}<th style={{ textAlign: "right" }}>Vested</th><th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
+          <thead><tr><th>Driver</th><th>Tenure</th><th>Next milestone</th>{walletOn ? <th style={{ textAlign: "right" }}>Loyalty wallet</th> : null}{attOn ? <th style={{ textAlign: "center" }}>Attendance</th> : null}<th style={{ textAlign: "right" }}>Year gross</th></tr></thead>
           <tbody>
-            {hub.drivers.length === 0 ? <tr><td colSpan={5 + (walletOn ? 1 : 0) + (attOn ? 1 : 0)} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
+            {hub.drivers.length === 0 ? <tr><td colSpan={4 + (walletOn ? 1 : 0) + (attOn ? 1 : 0)} className="empty">No drivers.</td></tr> : hub.drivers.map((d) => (
               <tr key={d.driver_id}>
                 <td>
                   <Link to={`/drivers/${d.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{d.name ?? d.driver_id.slice(0, 8)}</Link>
@@ -152,9 +152,6 @@ function HubBlock({ hub, walletOn, attOn, onPaid }: { hub: LoyaltyHub; walletOn:
                       : null}
                   </td>
                 ) : null}
-                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 600 }}>
-                  {d.vested_total > 0 ? fmtINR(d.vested_total) : <span className="muted-sm">—</span>}
-                </td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
                   {fmtINR(d.year_gross)}
                   {d.is_top_driver_year ? <span className="tag live" style={{ marginLeft: 6 }}>★YEAR</span> : null}

@@ -3628,7 +3628,7 @@ async def admin_loyalty(admin: Dict = Depends(get_admin)):
     for d in drivers:
         hb = out_hubs[bucket(d)]
         ly = _loyalty_state(d, cum.get(d["id"], 0.0))
-        wallet = await _loyalty_wallet(d)
+        wallet = await _loyalty_wallet(d, cum.get(d["id"], 0.0))
         att = await _attendance_state(d)
         hb["drivers"].append({
             "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
@@ -3710,7 +3710,9 @@ async def admin_loyalty_payout(
         {"id": driver_id}, {"_id": 0, "id": 1, "active": 1, "archived": 1})
     if not driver:
         raise HTTPException(404, "driver_not_found")
-    wallet = await _loyalty_wallet(driver)
+    loyalty_start = get_setting("loyalty_wallet_start_date") or "2000-01-01"
+    cum_gross = await _driver_cumulative_gross(driver_id, loyalty_start)
+    wallet = await _loyalty_wallet(driver, cum_gross)
     if not wallet["enabled"]:
         raise HTTPException(409, "loyalty_wallet_disabled")
     if body.amount > wallet["balance"] + 0.01:
@@ -3726,7 +3728,7 @@ async def admin_loyalty_payout(
     }
     await db.reward_payouts.insert_one(row.copy())
     await _audit(admin, "loyalty_wallet_payout", driver_id, {"amount": row["amount"]})
-    return {"ok": True, "paid": row["amount"], "wallet": await _loyalty_wallet(driver)}
+    return {"ok": True, "paid": row["amount"], "wallet": await _loyalty_wallet(driver, cum_gross)}
 
 
 @api.post("/admin/drivers/{driver_id}/attendance-payout")
@@ -4290,10 +4292,11 @@ async def _loyalty_wallet_qualifying_days(driver_id: str, start_date: str, min_g
     return 0
 
 
-async def _loyalty_wallet(driver: Dict) -> Dict[str, Any]:
-    """A driver's loyalty-wallet standing. Accrues per qualifying day worked,
-    minus what ops has already paid out. Forfeited (not payable) once the driver
-    leaves/deactivates. All parameters are live settings."""
+async def _loyalty_wallet(driver: Dict, cumulative_gross: float = 0.0) -> Dict[str, Any]:
+    """A driver's loyalty-wallet standing. The wallet holds BOTH halves of
+    loyalty: a per-qualifying-day accrual PLUS the earnings-milestone bonuses
+    credited when cumulative gross crosses each threshold. Minus what ops has
+    paid out, forfeited once the driver leaves. All parameters are live."""
     enabled = bool(get_setting("loyalty_wallet_enabled"))
     per_day = int(get_setting("loyalty_wallet_per_day") or 0)
     min_gross = float(get_setting("loyalty_wallet_min_gross") or 0)
@@ -4301,9 +4304,19 @@ async def _loyalty_wallet(driver: Dict) -> Dict[str, Any]:
     active = driver.get("active", True) and not driver.get("archived")
     if not enabled:
         return {"enabled": False, "balance": 0, "accrued": 0, "paid": 0,
-                "qualifying_days": 0, "per_day": per_day, "forfeited": 0, "active": active}
+                "qualifying_days": 0, "per_day": per_day, "daily_accrued": 0,
+                "milestone_credit": 0, "forfeited": 0, "active": active}
     days = await _loyalty_wallet_qualifying_days(driver["id"], start_date, min_gross)
-    accrued = days * per_day
+    daily_accrued = days * per_day
+    # Milestone bonuses already reached (cumulative gross >= threshold) land in
+    # the wallet too.
+    g = float(cumulative_gross or 0)
+    milestone_credit = sum(
+        int(m.get("reward", 0))
+        for m in get_setting("loyalty_milestones")
+        if float(m.get("amount", 0)) > 0 and g >= float(m["amount"])
+    )
+    accrued = daily_accrued + milestone_credit
     paid = 0.0
     async for r in db.reward_payouts.aggregate([
         {"$match": {"driver_id": driver["id"], "type": "loyalty_wallet"}},
@@ -4316,6 +4329,8 @@ async def _loyalty_wallet(driver: Dict) -> Dict[str, Any]:
         "enabled": True,
         "per_day": per_day,
         "qualifying_days": days,
+        "daily_accrued": round(daily_accrued, 2),
+        "milestone_credit": round(milestone_credit, 2),
         "accrued": round(accrued, 2),
         "paid": round(paid, 2),
         "balance": round(0.0 if not active else unpaid, 2),   # payable now
@@ -4505,7 +4520,7 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
     loyalty_start = get_setting("loyalty_wallet_start_date") or "2000-01-01"
     cum_gross = await _driver_cumulative_gross(driver["id"], loyalty_start)
     loyalty = _loyalty_state(driver, cum_gross)
-    wallet = await _loyalty_wallet(driver)
+    wallet = await _loyalty_wallet(driver, cum_gross)
     attendance = await _attendance_state(driver)
 
     today_bd = business_date_now()
