@@ -435,6 +435,28 @@ export interface LoyaltyResponse {
   attendance_enabled?: boolean;
 }
 
+export interface HubRosterVehicle {
+  id: string;
+  number: string;
+  model: string;
+  day_driver: { driver_id: string; name: string | null } | null;
+  night_driver: { driver_id: string; name: string | null } | null;
+}
+export interface HubRosterDriver {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  code: string | null;
+  shift_type: string;
+  vehicle_id: string | null;
+  active: boolean;
+}
+export interface HubRoster {
+  hub: HubRow;
+  vehicles: HubRosterVehicle[];
+  drivers: HubRosterDriver[];
+}
+
 export interface EarningsRow {
   driver_id: string;
   name: string | null;

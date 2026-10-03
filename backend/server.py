@@ -2176,6 +2176,88 @@ async def admin_delete_hub(hub_id: str, admin: Dict = Depends(require_write)):
     return {"ok": True, "id": hub_id, "deleted": True}
 
 
+@api.get("/admin/hubs/{hub_id}/roster")
+async def admin_hub_roster(hub_id: str, admin: Dict = Depends(require_ops)):
+    """A hub's full roster for the hub-detail page: its vehicles (with their
+    day/night driver) and its drivers. Hub-managers may only open their hub."""
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+
+    vehicles = [v async for v in db.vehicles.find(
+        {"hub_id": hub_id, "retired": {"$ne": True}}, {"_id": 0}).sort("number", 1)]
+    vids = [v["id"] for v in vehicles]
+    # Drivers in this hub (by hub_id) or holding one of its cars.
+    drivers = [d async for d in db.drivers.find(
+        {"archived": {"$ne": True}, "$or": [{"hub_id": hub_id}, {"vehicle_id": {"$in": vids or ['_none']}}]},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "code": 1, "shift_type": 1,
+         "vehicle_id": 1, "active": 1})]
+    by_slot: Dict[str, Dict[str, Any]] = {}
+    for d in drivers:
+        if d.get("vehicle_id"):
+            by_slot[f"{d['vehicle_id']}:{d.get('shift_type', 'day')}"] = {
+                "driver_id": d["id"], "name": d.get("name")}
+    veh_out = []
+    for v in vehicles:
+        veh_out.append({
+            "id": v["id"], "number": v.get("number"), "model": v.get("model"),
+            "day_driver": by_slot.get(f"{v['id']}:day"),
+            "night_driver": by_slot.get(f"{v['id']}:night"),
+        })
+    drv_out = [{
+        "id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+        "code": d.get("code"), "shift_type": d.get("shift_type", "day"),
+        "vehicle_id": d.get("vehicle_id"), "active": d.get("active", True),
+    } for d in sorted(drivers, key=lambda x: (x.get("code") or "", x.get("name") or ""))]
+    return {"hub": await _hub_out(hub), "vehicles": veh_out, "drivers": drv_out}
+
+
+class VehicleAssignIn(BaseModel):
+    driver_id: Optional[str] = None     # None clears the slot
+    shift: Literal["day", "night"] = "day"
+
+
+@api.post("/admin/vehicles/{vehicle_id}/assign")
+async def admin_assign_vehicle(
+    vehicle_id: str, body: VehicleAssignIn, admin: Dict = Depends(require_ops)
+):
+    """Allot a car's day/night slot to a driver (or clear it). Atomic: frees the
+    slot's current holder, moves the new driver onto this car+shift, and keeps
+    the driver in the car's hub. Hub-managers are limited to their hub."""
+    scope = hub_scope(admin)
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
+    if not veh:
+        raise HTTPException(404, "vehicle_not_found")
+    await _assert_vehicle_in_scope(veh, scope)
+    # Free whoever currently holds this car on this shift.
+    await db.drivers.update_many(
+        {"vehicle_id": vehicle_id, "shift_type": body.shift},
+        {"$set": {"vehicle_id": None}},
+    )
+    if body.driver_id:
+        drv = await db.drivers.find_one(
+            {"id": body.driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
+        if not drv:
+            raise HTTPException(404, "driver_not_found")
+        await _assert_driver_in_scope(drv, scope)
+        hub = await db.hubs.find_one({"id": veh.get("hub_id")}, {"_id": 0, "name": 1}) if veh.get("hub_id") else None
+        await db.drivers.update_one(
+            {"id": body.driver_id},
+            {"$set": {
+                "vehicle_id": vehicle_id, "shift_type": body.shift,
+                "hub_id": veh.get("hub_id"), "hub_name": hub.get("name") if hub else None,
+            }},
+        )
+        await _audit(admin, "assign_vehicle", vehicle_id,
+                     {"driver_id": body.driver_id, "shift": body.shift})
+    else:
+        await _audit(admin, "clear_vehicle_slot", vehicle_id, {"shift": body.shift})
+    return {"ok": True, "vehicle_id": vehicle_id, "shift": body.shift, "driver_id": body.driver_id}
+
+
 async def _check_shift_slot(vehicle_id: Optional[str], shift_type: str, exclude_driver_id: Optional[str]) -> None:
     """A car holds one day-shift driver and one night-shift driver. Refuse a
     second active driver on the same car for the same shift."""

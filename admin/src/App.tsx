@@ -19,6 +19,7 @@ import ShiftAlarms from "./pages/ShiftAlarms";
 import DriverDetail from "./pages/DriverDetail";
 import Vehicles from "./pages/Vehicles";
 import Hubs from "./pages/Hubs";
+import HubDetail from "./pages/HubDetail";
 import Rewards from "./pages/Rewards";
 import Loyalty from "./pages/Loyalty";
 import Collections from "./pages/Collections";
@@ -67,6 +68,7 @@ export default function App() {
             <Route path="/drivers/:id" element={<DriverDetail />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/hubs" element={<Hubs />} />
+            <Route path="/hubs/:id" element={<HubDetail />} />
             <Route path="/cash" element={<Fleet admin={admin}><Cash /></Fleet>} />
             <Route path="/collections" element={<Fleet admin={admin}><Collections /></Fleet>} />
             <Route path="/rewards" element={<Rewards />} />

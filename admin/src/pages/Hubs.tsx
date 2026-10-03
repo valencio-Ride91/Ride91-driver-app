@@ -1,6 +1,7 @@
 // Hubs: locations that hold up to `capacity` cars (default 12). Each vehicle
 // sits under a hub, and weekly rewards are decided within a hub.
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, HubRow } from "../api";
 
 interface EditState { id: string; name: string; city: string; capacity: string }
@@ -121,7 +122,7 @@ export default function Hubs() {
               <tr><td colSpan={6} className="empty">No hubs yet — create one (e.g. “Wakad Pune Hub”).</td></tr>
             ) : rows.map((h) => (
               <tr key={h.id}>
-                <td style={{ fontWeight: 600 }}>{h.name}</td>
+                <td style={{ fontWeight: 600 }}><Link to={`/hubs/${h.id}`} style={{ color: "var(--ink)" }}>{h.name}</Link></td>
                 <td>{h.city ?? "—"}</td>
                 <td>{h.car_count}</td>
                 <td>{h.capacity}</td>
