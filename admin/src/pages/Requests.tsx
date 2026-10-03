@@ -29,7 +29,7 @@ function summarise(payload: Record<string, unknown>): string {
   return parts.length ? parts.join(" · ") : "—";
 }
 
-export default function Requests() {
+export default function Requests({ hubId }: { hubId?: string }) {
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [pending, setPending] = useState(0);
   const [onlyPending, setOnlyPending] = useState(true);
@@ -39,15 +39,19 @@ export default function Requests() {
 
   const load = useCallback(async () => {
     try {
+      const qs = new URLSearchParams();
+      if (onlyPending) qs.set("state", "pending");
+      if (hubId) qs.set("hub_id", hubId);
+      const q = qs.toString();
       const r = await api.get<{ items: RequestRow[]; pending: number }>(
-        `/admin/requests${onlyPending ? "?state=pending" : ""}`,
+        `/admin/requests${q ? `?${q}` : ""}`,
       );
       setRows(r.items);
       setPending(r.pending);
     } finally {
       setLoading(false);
     }
-  }, [onlyPending]);
+  }, [onlyPending, hubId]);
 
   useEffect(() => {
     load();
@@ -77,10 +81,12 @@ export default function Requests() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Driver requests</h1>
-          <div className="sub">{pending} pending · advances, holidays, extra hours</div>
-        </div>
+        {hubId ? <div /> : (
+          <div>
+            <h1>Driver requests</h1>
+            <div className="sub">{pending} pending · advances, holidays, extra hours</div>
+          </div>
+        )}
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
           <input type="checkbox" checked={onlyPending} onChange={(e) => setOnlyPending(e.target.checked)} style={{ width: "auto" }} />
           Pending only

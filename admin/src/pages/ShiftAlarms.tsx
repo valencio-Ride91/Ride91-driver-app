@@ -25,7 +25,7 @@ function fmtWhen(iso: string | null) {
   return new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" });
 }
 
-export default function ShiftAlarms() {
+export default function ShiftAlarms({ hubId }: { hubId?: string }) {
   const [rows, setRows] = useState<AlarmRow[]>([]);
   const [notComing, setNotComing] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -33,13 +33,13 @@ export default function ShiftAlarms() {
 
   const load = useCallback(async () => {
     try {
-      const r = await api.get<{ items: AlarmRow[]; not_coming: number }>("/admin/shift-alarms");
+      const r = await api.get<{ items: AlarmRow[]; not_coming: number }>(`/admin/shift-alarms${hubId ? `?hub_id=${hubId}` : ""}`);
       setRows(r.items);
       setNotComing(r.not_coming);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hubId]);
 
   useEffect(() => {
     load();
@@ -52,13 +52,15 @@ export default function ShiftAlarms() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Shift alarms</h1>
-          <div className="sub">
-            {loading ? "Loading…" : `${rows.length} responses · `}
-            {!loading && notComing > 0 ? <span style={{ color: "var(--alert)" }}>{notComing} not coming</span> : "all clear"}
+        {hubId ? <div /> : (
+          <div>
+            <h1>Shift alarms</h1>
+            <div className="sub">
+              {loading ? "Loading…" : `${rows.length} responses · `}
+              {!loading && notComing > 0 ? <span style={{ color: "var(--alert)" }}>{notComing} not coming</span> : "all clear"}
+            </div>
           </div>
-        </div>
+        )}
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
           <input type="checkbox" checked={onlyNotComing} onChange={(e) => setOnlyNotComing(e.target.checked)} style={{ width: "auto" }} />
           "Not coming" only

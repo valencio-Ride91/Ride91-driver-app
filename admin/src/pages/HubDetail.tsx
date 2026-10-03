@@ -1,19 +1,52 @@
-// Hub detail — the hub's home base. Shows the hub's vehicles (with day/night
-// driver slots you can allot), its drivers, and add-driver / add-vehicle that
-// create them already set to this hub. Hub-managers manage their own hub here.
+// Hub detail — the hub's home base. Everything for a hub lives here as tabs:
+// its vehicles (with day/night driver slots you can allot) & drivers, plus the
+// hub-scoped Earnings, Rewards, Cash, Requests, Captures, Documents,
+// Inspections, Shift alarms and Payouts. Hub-managers see only the tabs their
+// role allows (the fleet-only ones are hidden for them).
 import { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useOutletContext } from "react-router-dom";
 import { api, HubRoster } from "../api";
+import { AdminIdentity } from "../auth";
 import EarningsGrid from "../components/EarningsGrid";
+import Rewards from "./Rewards";
+import Cash from "./Cash";
+import Requests from "./Requests";
+import Captures from "./Captures";
+import Documents from "./Documents";
+import Inspections from "./Inspections";
+import ShiftAlarms from "./ShiftAlarms";
+import Payouts from "./Payouts";
+
+type TabKey =
+  | "roster" | "earnings" | "rewards" | "cash" | "requests"
+  | "captures" | "documents" | "inspections" | "shiftalarms" | "payouts";
+
+// `fleetOnly` tabs hit endpoints a hub_manager can't reach (fleet_admin), so
+// they're hidden for that role; owner/manager/viewer see them all.
+const TABS: { key: TabKey; label: string; fleetOnly?: boolean }[] = [
+  { key: "roster", label: "Vehicles & drivers" },
+  { key: "earnings", label: "Earnings" },
+  { key: "rewards", label: "Rewards" },
+  { key: "cash", label: "Cash", fleetOnly: true },
+  { key: "requests", label: "Requests", fleetOnly: true },
+  { key: "captures", label: "Captures", fleetOnly: true },
+  { key: "documents", label: "Documents", fleetOnly: true },
+  { key: "inspections", label: "Inspections", fleetOnly: true },
+  { key: "shiftalarms", label: "Shift alarms", fleetOnly: true },
+  { key: "payouts", label: "Payouts", fleetOnly: true },
+];
 
 export default function HubDetail() {
   const { id = "" } = useParams();
+  const { admin } = useOutletContext<{ admin: AdminIdentity }>();
+  const isHubMgr = admin?.role === "hub_manager";
+  const visibleTabs = TABS.filter((t) => !t.fleetOnly || !isHubMgr);
   const [data, setData] = useState<HubRoster | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [adding, setAdding] = useState<"none" | "driver" | "vehicle">("none");
-  const [tab, setTab] = useState<"roster" | "earnings">("roster");
+  const [tab, setTab] = useState<TabKey>("roster");
 
   // add-driver form
   const [dName, setDName] = useState("");
@@ -112,10 +145,9 @@ export default function HubDetail() {
         ) : null}
       </div>
 
-      {/* Everything for this hub lives here — its cars & drivers (roster) and
-          its daily earnings — switched by these tabs. */}
-      <div className="tabs" style={{ display: "flex", gap: 8, marginBottom: 16, borderBottom: "1px solid var(--line)" }}>
-        {([["roster", "Vehicles & drivers"], ["earnings", "Earnings"]] as const).map(([key, label]) => (
+      {/* Everything for this hub lives here, switched by these tabs. */}
+      <div className="tabs" style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+        {visibleTabs.map(({ key, label }) => (
           <button
             key={key}
             onClick={() => { setTab(key); setErr(null); }}
@@ -134,9 +166,16 @@ export default function HubDetail() {
       {msg ? <div className="tag ok" style={{ display: "inline-block", marginBottom: 12 }}>{msg}</div> : null}
       {err ? <div className="err" style={{ marginBottom: 12 }}>{err}</div> : null}
 
-      {tab === "earnings" ? (
-        <EarningsGrid hubId={id} />
-      ) : (
+      {tab === "earnings" ? <EarningsGrid hubId={id} />
+      : tab === "rewards" ? <Rewards hubId={id} />
+      : tab === "cash" ? <Cash hubId={id} />
+      : tab === "requests" ? <Requests hubId={id} />
+      : tab === "captures" ? <Captures hubId={id} />
+      : tab === "documents" ? <Documents hubId={id} />
+      : tab === "inspections" ? <Inspections hubId={id} />
+      : tab === "shiftalarms" ? <ShiftAlarms hubId={id} />
+      : tab === "payouts" ? <Payouts hubId={id} />
+      : (
       <>
       {adding === "vehicle" ? (
         <div className="card onboard">

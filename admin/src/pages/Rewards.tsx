@@ -9,17 +9,17 @@ function fmtINR(n: number) {
   return `₹${(n ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }
 
-export default function Rewards() {
+export default function Rewards({ hubId }: { hubId?: string }) {
   const [data, setData] = useState<RewardsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      setData(await api.get<RewardsResponse>("/admin/rewards"));
+      setData(await api.get<RewardsResponse>(`/admin/rewards${hubId ? `?hub_id=${hubId}` : ""}`));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hubId]);
 
   useEffect(() => { load(); const id = setInterval(load, 60000); return () => clearInterval(id); }, [load]);
 
@@ -27,12 +27,14 @@ export default function Rewards() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <h1>Earnings &amp; rewards</h1>
-          <div className="sub">Week of {data?.week_start ?? "—"} · {data?.days_remaining ?? 0} days to payout · rewards decided per hub, on top of the 30% share</div>
+      {hubId ? null : (
+        <div className="page-head">
+          <div>
+            <h1>Earnings &amp; rewards</h1>
+            <div className="sub">Week of {data?.week_start ?? "—"} · {data?.days_remaining ?? 0} days to payout · rewards decided per hub, on top of the 30% share</div>
+          </div>
         </div>
-      </div>
+      )}
 
       {th ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 16 }}>

@@ -13,7 +13,7 @@ function fmtWhen(iso: string) {
   return new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" });
 }
 
-export default function Inspections() {
+export default function Inspections({ hubId }: { hubId?: string }) {
   const [rows, setRows] = useState<InspectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<InspectionRow | null>(null);
@@ -22,7 +22,7 @@ export default function Inspections() {
 
   const load = async () => {
     try {
-      const r = await api.get<{ items: InspectionRow[] }>("/admin/inspections");
+      const r = await api.get<{ items: InspectionRow[] }>(`/admin/inspections${hubId ? `?hub_id=${hubId}` : ""}`);
       setRows(r.items);
     } finally {
       setLoading(false);
@@ -49,7 +49,7 @@ export default function Inspections() {
 
   return (
     <div>
-      <h1>Inspections</h1>
+      {hubId ? null : <h1>Inspections</h1>}
       <div className="sub">{loading ? "Loading…" : `${rows.length} inspections · newest first`}</div>
 
       <div className="review-split">

@@ -8,7 +8,7 @@ interface Media {
   selfie_photo_b64: string | null;
 }
 
-export default function Captures() {
+export default function Captures({ hubId }: { hubId?: string }) {
   const [rows, setRows] = useState<CaptureRow[]>([]);
   const [includeAll, setIncludeAll] = useState(false);
   const [selected, setSelected] = useState<CaptureRow | null>(null);
@@ -20,7 +20,7 @@ export default function Captures() {
 
   const load = async () => {
     const r = await api.get<{ items: CaptureRow[] }>(
-      `/admin/captures/pending?include_all=${includeAll}`,
+      `/admin/captures/pending?include_all=${includeAll}${hubId ? `&hub_id=${hubId}` : ""}`,
     );
     setRows(r.items);
   };
@@ -64,7 +64,7 @@ export default function Captures() {
 
   return (
     <div>
-      <h1>Capture reviews</h1>
+      {hubId ? null : <h1>Capture reviews</h1>}
       <div className="sub" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span>{rows.length} to review · flagged for movement / off-hub</span>
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>

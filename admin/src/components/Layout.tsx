@@ -11,17 +11,9 @@ import { AdminIdentity, logout } from "../auth";
 const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?: boolean }[] = [
   { to: "/hubs", label: "Hubs", hub: true },
   { to: "/bookings", label: "Bookings" },
-  { to: "/cash", label: "Cash" },
   { to: "/collections", label: "Collections" },
-  { to: "/rewards", label: "Earnings & rewards", hub: true },
   { to: "/loyalty", label: "Loyalty & yearly", hub: true },
-  { to: "/requests", label: "Requests" },
   { to: "/live-map", label: "Live map" },
-  { to: "/review/captures", label: "Capture reviews" },
-  { to: "/review/documents", label: "Document reviews" },
-  { to: "/review/inspections", label: "Inspections" },
-  { to: "/shift-alarms", label: "Shift alarms" },
-  { to: "/payouts", label: "Payouts" },
   { to: "/audit", label: "Audit log" },
   { to: "/users", label: "Admin accounts", ownerOnly: true },
   { to: "/settings", label: "Settings" },
@@ -64,7 +56,7 @@ export default function Layout({ admin, onLogout }: Props) {
         </div>
       </aside>
       <main className="main">
-        <Outlet />
+        <Outlet context={{ admin }} />
       </main>
     </div>
   );

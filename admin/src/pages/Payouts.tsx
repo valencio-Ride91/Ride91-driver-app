@@ -36,7 +36,7 @@ const STATUS_TONE: Record<string, string> = {
   cancelled: "muted",
 };
 
-export default function Payouts() {
+export default function Payouts({ hubId }: { hubId?: string }) {
   const [drivers, setDrivers] = useState<DriverRow[]>([]);
   const [rows, setRows] = useState<PayoutRow[]>([]);
   const [driverId, setDriverId] = useState<string>("");
@@ -53,11 +53,12 @@ export default function Payouts() {
     [drivers],
   );
 
+  const hubQ = hubId ? `&hub_id=${hubId}` : "";
   const load = async () => {
     try {
       const [drv, py] = await Promise.all([
-        api.get<{ items: DriverRow[] }>("/admin/drivers"),
-        api.get<{ items: PayoutRow[] }>("/admin/payouts?limit=200"),
+        api.get<{ items: DriverRow[] }>(`/admin/drivers${hubId ? `?hub_id=${hubId}` : ""}`),
+        api.get<{ items: PayoutRow[] }>(`/admin/payouts?limit=200${hubQ}`),
       ]);
       setDrivers(drv.items ?? []);
       setRows(py.items ?? []);
@@ -130,7 +131,7 @@ export default function Payouts() {
 
   return (
     <div>
-      <h1>Payouts</h1>
+      {hubId ? null : <h1>Payouts</h1>}
       <div className="sub">RazorpayX driver payouts · test mode</div>
 
       <div className="card" style={{ padding: 20, marginBottom: 20 }}>

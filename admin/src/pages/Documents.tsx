@@ -11,7 +11,7 @@ const STATUS_META: Record<string, { label: string; klass: string }> = {
   missing: { label: "Missing", klass: "muted" },
 };
 
-export default function Documents() {
+export default function Documents({ hubId }: { hubId?: string }) {
   const [rows, setRows] = useState<DocumentRow[]>([]);
   const [includeAll, setIncludeAll] = useState(false);
   const [selected, setSelected] = useState<DocumentRow | null>(null);
@@ -23,7 +23,7 @@ export default function Documents() {
 
   const load = async () => {
     const r = await api.get<{ items: DocumentRow[] }>(
-      `/admin/documents/pending?include_all=${includeAll}`,
+      `/admin/documents/pending?include_all=${includeAll}${hubId ? `&hub_id=${hubId}` : ""}`,
     );
     setRows(r.items);
   };
@@ -67,7 +67,7 @@ export default function Documents() {
 
   return (
     <div>
-      <h1>Document reviews</h1>
+      {hubId ? null : <h1>Document reviews</h1>}
       <div className="sub" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span>{rows.length} to verify · drivers who uploaded but not yet approved</span>
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>

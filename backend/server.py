@@ -2069,16 +2069,17 @@ async def admin_audit_log(
 
 @api.get("/admin/drivers")
 async def admin_drivers(
-    include_archived: bool = False, admin: Dict = Depends(get_admin)
+    include_archived: bool = False, hub_id: Optional[str] = None,
+    admin: Dict = Depends(get_admin),
 ):
     """List all drivers with the ops-relevant snapshot: on-duty + platform,
     cash in hand, last GPS ping, vehicle plate, hub. Optimised for a single
     table view — never returns base64 media. Archived drivers are hidden
-    unless `include_archived=true`."""
+    unless `include_archived=true`. `?hub_id=` scopes to one hub."""
     query: Dict[str, Any] = {} if include_archived else {"archived": {"$ne": True}}
-    # A hub_manager only sees drivers in their hub (by driver.hub_id or their
-    # car's hub).
-    scope = hub_scope(admin)
+    # A hub_manager only sees drivers in their hub; an owner may pass ?hub_id=
+    # to scope to one hub (by driver.hub_id or their car's hub).
+    scope = _hub_target(admin, hub_id)
     if scope is not None:
         scoped_vids = await _scope_vehicle_ids(scope)
         query["$or"] = [{"hub_id": scope}, {"vehicle_id": {"$in": scoped_vids or []}}]
@@ -2346,6 +2347,26 @@ async def _scope_vehicle_ids(scope: Optional[str]) -> Optional[List[str]]:
     if scope is None:
         return None
     return [v["id"] async for v in db.vehicles.find({"hub_id": scope}, {"_id": 0, "id": 1})]
+
+
+async def _hub_driver_ids(hub_id: str) -> List[str]:
+    """Driver ids belonging to a hub: set by hub_id, or holding one of its cars.
+    Mirrors the roster's definition so every hub-scoped listing agrees on who
+    'belongs' to a hub."""
+    vids = [v["id"] async for v in db.vehicles.find({"hub_id": hub_id}, {"_id": 0, "id": 1})]
+    return [d["id"] async for d in db.drivers.find(
+        {"$or": [{"hub_id": hub_id}, {"vehicle_id": {"$in": vids or ['_none']}}]},
+        {"_id": 0, "id": 1})]
+
+
+def _hub_target(admin: Dict, hub_id: Optional[str]) -> Optional[str]:
+    """Which hub a listing is scoped to. A hub_manager is pinned to their own
+    hub and may not pass another's (403); an owner/manager may pass ?hub_id= to
+    scope to one hub, or omit it for the whole fleet. None => whole fleet."""
+    scope = hub_scope(admin)
+    if scope and hub_id and hub_id != scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    return scope or hub_id
 
 
 async def _assert_driver_in_scope(driver: Dict, scope: Optional[str]) -> None:
@@ -2894,17 +2915,22 @@ async def admin_dashboard(days: int = 30, admin: Dict = Depends(fleet_admin)):
 
 @api.get("/admin/captures/pending")
 async def admin_captures_pending(
-    include_all: bool = False, admin: Dict = Depends(fleet_admin)
+    include_all: bool = False, hub_id: Optional[str] = None,
+    admin: Dict = Depends(fleet_admin),
 ):
     """Captures that need ops review. By default: flagged for movement or
     beyond the hub-warn radius and not yet reviewed. `include_all=true`
-    returns every capture regardless of flags."""
+    returns every capture regardless of flags. `?hub_id=` scopes to one hub's
+    drivers."""
     query: Dict[str, Any] = {}
     if not include_all:
         query = {
             "$or": [{"review_flag_movement": True}, {"hub_warn": True}],
             "review_decision": {"$exists": False},
         }
+    target = _hub_target(admin, hub_id)
+    if target:
+        query["driver_id"] = {"$in": await _hub_driver_ids(target)}
     cursor = db.go_online_captures.find(
         query,
         {"_id": 0, "walkaround_video_b64": 0, "selfie_photo_b64": 0},
@@ -2964,14 +2990,19 @@ async def admin_capture_review(
 
 @api.get("/admin/documents/pending")
 async def admin_documents_pending(
-    include_all: bool = False, admin: Dict = Depends(fleet_admin)
+    include_all: bool = False, hub_id: Optional[str] = None,
+    admin: Dict = Depends(fleet_admin),
 ):
     """Documents where an image has been uploaded but not yet verified.
-    `include_all=true` returns every document regardless of state."""
+    `include_all=true` returns every document regardless of state. `?hub_id=`
+    scopes to one hub's drivers."""
     query: Dict[str, Any] = {} if include_all else {
         "verified": False,
         "image_b64": {"$ne": None},
     }
+    target = _hub_target(admin, hub_id)
+    if target:
+        query["driver_id"] = {"$in": await _hub_driver_ids(target)}
     cursor = db.documents.find(
         query, {"_id": 0, "image_b64": 0}
     ).sort("updated_at", -1)
@@ -3477,12 +3508,17 @@ class RequestDecisionIn(BaseModel):
 
 
 @api.get("/admin/cash")
-async def admin_cash(admin: Dict = Depends(fleet_admin)):
+async def admin_cash(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
     """Fleet cash reconciliation: per driver, settled platform cash collected
     (to yesterday) minus trusted deposits paid in. Reuses the single balance
-    rule in `_driver_balances` so this never drifts from the driver's screen."""
+    rule in `_driver_balances` so this never drifts from the driver's screen.
+    `?hub_id=` scopes it to one hub's drivers."""
+    target = _hub_target(admin, hub_id)
+    dq: Dict[str, Any] = {"active": True}
+    if target:
+        dq["id"] = {"$in": await _hub_driver_ids(target)}
     drivers = [d async for d in db.drivers.find(
-        {"active": True},
+        dq,
         {"_id": 0, "id": 1, "name": 1, "phone": 1, "hub_name": 1},
     )]
     ids = [d["id"] for d in drivers]
@@ -3518,12 +3554,18 @@ async def admin_cash(admin: Dict = Depends(fleet_admin)):
 
 
 @api.get("/admin/requests")
-async def admin_requests(state: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
+async def admin_requests(
+    state: Optional[str] = None, hub_id: Optional[str] = None,
+    admin: Dict = Depends(fleet_admin),
+):
     """Driver requests (advance / holiday / extra hours). `?state=pending`
-    filters the queue."""
+    filters the queue; `?hub_id=` scopes to one hub's drivers."""
     query: Dict[str, Any] = {}
     if state:
         query["state"] = state
+    target = _hub_target(admin, hub_id)
+    if target:
+        query["driver_id"] = {"$in": await _hub_driver_ids(target)}
     rows = [r async for r in db.requests.find(query, {"_id": 0}).sort("created_at", -1)]
     who = await _drivers_by_ids([r.get("driver_id") for r in rows])
     for r in rows:
@@ -3562,11 +3604,16 @@ async def admin_decide_request(
 
 
 @api.get("/admin/inspections")
-async def admin_inspections(admin: Dict = Depends(fleet_admin)):
+async def admin_inspections(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
     """Daily vehicle inspections (dashboard photo + walkaround video). Media
-    blobs are excluded here; fetch one via /admin/inspections/{id}/media."""
+    blobs are excluded here; fetch one via /admin/inspections/{id}/media.
+    `?hub_id=` scopes to one hub's drivers."""
+    target = _hub_target(admin, hub_id)
+    iq: Dict[str, Any] = {}
+    if target:
+        iq["driver_id"] = {"$in": await _hub_driver_ids(target)}
     rows = [r async for r in db.inspections.find(
-        {}, {"_id": 0, "dashboard_photo_b64": 0, "exterior_video_b64": 0},
+        iq, {"_id": 0, "dashboard_photo_b64": 0, "exterior_video_b64": 0},
     ).sort("created_at", -1).limit(500)]
     who = await _drivers_by_ids([r.get("driver_id") for r in rows])
     veh_ids = list({r.get("vehicle_id") for r in rows if r.get("vehicle_id")})
@@ -3599,11 +3646,16 @@ async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(fleet
 
 
 @api.get("/admin/shift-alarms")
-async def admin_shift_alarms(admin: Dict = Depends(fleet_admin)):
+async def admin_shift_alarms(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
     """Recent shift-alarm responses across the fleet — who acknowledged, who
-    said they weren't coming, and the reason given."""
+    said they weren't coming, and the reason given. `?hub_id=` scopes to one
+    hub's drivers."""
+    target = _hub_target(admin, hub_id)
+    aq: Dict[str, Any] = {}
+    if target:
+        aq["driver_id"] = {"$in": await _hub_driver_ids(target)}
     rows = [r async for r in db.alarm_responses.find(
-        {}, {"_id": 0}
+        aq, {"_id": 0}
     ).sort("created_at", -1).limit(500)]
     who = await _drivers_by_ids([r.get("driver_id") for r in rows])
     for r in rows:
@@ -3714,7 +3766,7 @@ async def _reward_gross(mon_bd: str, next_mon_bd: str, y_bd: str):
 
 
 @api.get("/admin/rewards")
-async def admin_rewards(admin: Dict = Depends(get_admin)):
+async def admin_rewards(hub_id: Optional[str] = None, admin: Dict = Depends(get_admin)):
     """Weekly reward standings, grouped by hub. Each hub has a CARS board
     (day+night gross combined → top car of day/week) and a DRIVERS board
     (individual gross → top driver of week). Winners are the ★ per hub; ops
@@ -3728,7 +3780,9 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
     mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
     dweek, ddays, dyday = await _reward_gross(mon_bd, next_mon_bd, y_bd)
 
-    scope = hub_scope(admin)
+    # A hub_manager is pinned to their hub; an owner may pass ?hub_id= to see
+    # just one hub's board (the hub-detail Rewards tab does this).
+    scope = _hub_target(admin, hub_id)
     veh_q: Dict[str, Any] = {"retired": {"$ne": True}}
     hub_q: Dict[str, Any] = {}
     if scope:
@@ -3742,7 +3796,7 @@ async def admin_rewards(admin: Dict = Depends(get_admin)):
         {"archived": {"$ne": True}},
         {"_id": 0, "id": 1, "name": 1, "phone": 1, "vehicle_id": 1, "hub_id": 1, "shift_type": 1})]
     if scope:
-        # A hub_manager sees drivers of their hub, or drivers holding one of its cars.
+        # Drivers of the scoped hub, or drivers holding one of its cars.
         drivers = [d for d in drivers if d.get("hub_id") == scope or d.get("vehicle_id") in vehicles]
 
     def dstat(did):
@@ -6029,12 +6083,17 @@ async def admin_create_payout(
 @api.get("/admin/payouts")
 async def admin_list_payouts(
     driver_id: Optional[str] = None,
+    hub_id: Optional[str] = None,
     limit: int = 100,
     admin: Dict = Depends(fleet_admin),
 ):
     q: Dict[str, Any] = {}
     if driver_id:
         q["driver_id"] = driver_id
+    else:
+        target = _hub_target(admin, hub_id)
+        if target:
+            q["driver_id"] = {"$in": await _hub_driver_ids(target)}
     cursor = db.payouts.find(q, {"_id": 0}).sort("created_at", -1).limit(min(limit, 500))
     items = [p async for p in cursor]
     return {"items": items}

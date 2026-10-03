@@ -9,7 +9,7 @@ function fmtINR(n: number) {
   return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
 
-export default function Cash() {
+export default function Cash({ hubId }: { hubId?: string }) {
   const [data, setData] = useState<CashResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -31,12 +31,12 @@ export default function Cash() {
 
   const load = useCallback(async () => {
     try {
-      const r = await api.get<CashResponse>("/admin/cash");
+      const r = await api.get<CashResponse>(`/admin/cash${hubId ? `?hub_id=${hubId}` : ""}`);
       setData(r);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hubId]);
 
   useEffect(() => {
     load();
@@ -113,13 +113,15 @@ export default function Cash() {
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1>Cash reconciliation</h1>
-          <div className="sub">
-            Collected vs paid in · as of {data?.as_of_business_date ?? "—"} · limit{" "}
-            {data ? fmtINR(data.cash_limit) : "—"}
+        {hubId ? <div /> : (
+          <div>
+            <h1>Cash reconciliation</h1>
+            <div className="sub">
+              Collected vs paid in · as of {data?.as_of_business_date ?? "—"} · limit{" "}
+              {data ? fmtINR(data.cash_limit) : "—"}
+            </div>
           </div>
-        </div>
+        )}
         <div style={{ display: "flex", gap: 8 }}>
           <input
             placeholder="Filter by driver / phone"
