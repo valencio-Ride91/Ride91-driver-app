@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, DriverDetail as Detail } from "../api";
+import DutyCard from "../components/DutyCard";
 
 function fmtINR(n: number | undefined | null) {
   return `₹${(n ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -130,7 +131,9 @@ export default function DriverDetail() {
         {driver.qr_code ? <div className="muted-sm" style={{ marginTop: 8 }}>Deposit QR: {driver.qr_code}</div> : null}
       </div>
 
-      <div className="card" style={{ marginBottom: 20 }}>
+      <DutyCard driverId={id} />
+
+      <div className="card" style={{ marginBottom: 20, marginTop: 16 }}>
         <h2 style={{ marginTop: 0 }}>
           Notifications <span className="muted-sm">({data.notifications.length})</span>
         </h2>

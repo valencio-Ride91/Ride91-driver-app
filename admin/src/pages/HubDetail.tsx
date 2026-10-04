@@ -8,6 +8,7 @@ import { Link, useParams, useOutletContext } from "react-router-dom";
 import { api, HubRoster } from "../api";
 import { AdminIdentity } from "../auth";
 import EarningsGrid from "../components/EarningsGrid";
+import HubActivity from "../components/HubActivity";
 import Rewards from "./Rewards";
 import Cash from "./Cash";
 import Requests from "./Requests";
@@ -18,13 +19,14 @@ import ShiftAlarms from "./ShiftAlarms";
 import Payouts from "./Payouts";
 
 type TabKey =
-  | "roster" | "earnings" | "rewards" | "cash" | "requests"
+  | "roster" | "activity" | "earnings" | "rewards" | "cash" | "requests"
   | "captures" | "documents" | "inspections" | "shiftalarms" | "payouts";
 
 // `fleetOnly` tabs hit endpoints a hub_manager can't reach (fleet_admin), so
 // they're hidden for that role; owner/manager/viewer see them all.
 const TABS: { key: TabKey; label: string; fleetOnly?: boolean }[] = [
   { key: "roster", label: "Vehicles & drivers" },
+  { key: "activity", label: "Activity" },
   { key: "earnings", label: "Earnings" },
   { key: "rewards", label: "Rewards" },
   { key: "cash", label: "Cash", fleetOnly: true },
@@ -166,7 +168,8 @@ export default function HubDetail() {
       {msg ? <div className="tag ok" style={{ display: "inline-block", marginBottom: 12 }}>{msg}</div> : null}
       {err ? <div className="err" style={{ marginBottom: 12 }}>{err}</div> : null}
 
-      {tab === "earnings" ? <EarningsGrid hubId={id} />
+      {tab === "activity" ? <HubActivity hubId={id} />
+      : tab === "earnings" ? <EarningsGrid hubId={id} />
       : tab === "rewards" ? <Rewards hubId={id} />
       : tab === "cash" ? <Cash hubId={id} />
       : tab === "requests" ? <Requests hubId={id} />

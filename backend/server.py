@@ -1098,12 +1098,13 @@ async def _segments_for_day(driver_id: str, day_start: datetime, day_end: dateti
     return segments
 
 
-@api.get("/duty/today")
-async def duty_today(driver: Dict = Depends(get_driver)):
-    # Business day 04:00 IST → 03:59 next day.
-    today_bd = business_date_now()
-    day_start, day_end = business_day_bounds(today_bd)
-    segs = await _segments_for_day(driver["id"], day_start, day_end)
+async def _duty_summary(
+    driver_id: str, vehicle_id: Optional[str], business_date: str
+) -> Dict[str, Any]:
+    """Full duty rollup for one driver on one business day. Shared core behind
+    the driver's /duty/today and the admin duty views, so they never drift."""
+    day_start, day_end = business_day_bounds(business_date)
+    segs = await _segments_for_day(driver_id, day_start, day_end)
     totals: Dict[str, int] = {}
     for s in segs:
         totals[s["state"]] = totals.get(s["state"], 0) + s["seconds"]
@@ -1147,7 +1148,7 @@ async def duty_today(driver: Dict = Depends(get_driver)):
                 current_platforms = list(s.get("platforms") or [])
                 break
     current_platform = current_platforms[0] if current_platforms else None
-    distance_km = await _distance_today(driver["vehicle_id"], day_start, day_end)
+    distance_km = await _distance_today(vehicle_id, day_start, day_end) if vehicle_id else 0.0
     return {
         "segments": segs,
         "totals_seconds": totals,
@@ -1160,10 +1161,16 @@ async def duty_today(driver: Dict = Depends(get_driver)):
         "charging_seconds": charging_seconds,
         "current_state": current,
         "distance_km": round(distance_km, 2),
-        "business_date": today_bd,
+        "business_date": business_date,
         "day_start": iso(day_start),
         "server_ts": iso(now_utc()),
     }
+
+
+@api.get("/duty/today")
+async def duty_today(driver: Dict = Depends(get_driver)):
+    # Business day 04:00 IST → 03:59 next day.
+    return await _duty_summary(driver["id"], driver.get("vehicle_id"), business_date_now())
 
 
 # ---------------------------------------------------------------------------
@@ -2715,6 +2722,71 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
         "notifications": notifications,
         "shift_alarms": [r async for r in db.alarm_responses.find(
             {"driver_id": driver_id}, {"_id": 0}).sort("created_at", -1).limit(20)],
+    }
+
+
+@api.get("/admin/drivers/{driver_id}/duty")
+async def admin_driver_duty(
+    driver_id: str, date: Optional[str] = None, admin: Dict = Depends(get_admin)
+):
+    """One driver's duty rollup + segment timeline for a business day (defaults
+    to today). Drives the driver page's duty/activity card. Hub-scoped."""
+    d = await db.drivers.find_one(
+        {"id": driver_id}, {"_id": 0, "id": 1, "vehicle_id": 1, "hub_id": 1})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
+    bd = date or business_date_now()
+    summary = await _duty_summary(driver_id, d.get("vehicle_id"), bd)
+    last = await _last_ping(d["vehicle_id"]) if d.get("vehicle_id") else {}
+    summary["last_ping_at"] = last.get("recorded_at")
+    summary["last_lat"] = last.get("lat")
+    summary["last_lng"] = last.get("lng")
+    return summary
+
+
+@api.get("/admin/hubs/{hub_id}/activity")
+async def admin_hub_activity(
+    hub_id: str, date: Optional[str] = None, admin: Dict = Depends(require_ops)
+):
+    """A hub's duty board for a business day: each driver's on-duty status,
+    platforms online, on-duty & working time, distance, and last GPS ping.
+    Hub-managers may only open their own hub."""
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1, "name": 1})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+    bd = date or business_date_now()
+    ids = await _hub_driver_ids(hub_id)
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids}, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "code": 1, "phone": 1,
+         "vehicle_id": 1, "shift_type": 1, "active": 1})]
+    veh = {v["id"]: v async for v in db.vehicles.find(
+        {"hub_id": hub_id}, {"_id": 0, "id": 1, "number": 1})}
+    rows: List[Dict[str, Any]] = []
+    for d in sorted(drivers, key=lambda x: (x.get("code") or "", x.get("name") or "")):
+        summ = await _duty_summary(d["id"], d.get("vehicle_id"), bd)
+        last = await _last_ping(d["vehicle_id"]) if d.get("vehicle_id") else {}
+        rows.append({
+            "driver_id": d["id"], "name": d.get("name"), "code": d.get("code"),
+            "phone": d.get("phone"), "shift_type": d.get("shift_type", "day"),
+            "active": d.get("active", True),
+            "vehicle_number": veh.get(d.get("vehicle_id"), {}).get("number"),
+            "on_duty": summ["on_duty"],
+            "current_platforms": summ["current_platforms"],
+            "on_duty_seconds": summ["on_duty_seconds"],
+            "working_seconds": summ["working_seconds"],
+            "distance_km": summ["distance_km"],
+            "last_ping_at": last.get("recorded_at"),
+        })
+    on_now = sum(1 for r in rows if r["on_duty"])
+    return {
+        "hub": {"id": hub["id"], "name": hub.get("name")},
+        "business_date": bd, "on_duty_now": on_now,
+        "items": rows, "count": len(rows),
     }
 
 

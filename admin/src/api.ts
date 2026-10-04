@@ -479,6 +479,55 @@ export interface EarningsForDate {
   count: number;
 }
 
+export interface DutySegment {
+  state: string;
+  platforms: string[];
+  from_ts: string;
+  to_ts: string;
+  seconds: number;
+}
+export interface DutySummary {
+  segments: DutySegment[];
+  totals_seconds: Record<string, number>;
+  on_duty: boolean;
+  current_platform: string | null;
+  current_platforms: string[];
+  per_platform_seconds: Record<string, number>;
+  on_duty_seconds: number;
+  working_seconds: number;
+  charging_seconds: number;
+  current_state: string | null;
+  distance_km: number;
+  business_date: string;
+  day_start: string;
+  server_ts: string;
+  last_ping_at?: string | null;
+  last_lat?: number | null;
+  last_lng?: number | null;
+}
+export interface HubActivityRow {
+  driver_id: string;
+  name: string | null;
+  code: string | null;
+  phone: string | null;
+  shift_type: string;
+  active: boolean;
+  vehicle_number: string | null;
+  on_duty: boolean;
+  current_platforms: string[];
+  on_duty_seconds: number;
+  working_seconds: number;
+  distance_km: number;
+  last_ping_at: string | null;
+}
+export interface HubActivity {
+  hub: { id: string; name: string | null };
+  business_date: string;
+  on_duty_now: number;
+  items: HubActivityRow[];
+  count: number;
+}
+
 export interface CollectionRow {
   driver_id: string;
   name: string | null;
