@@ -140,6 +140,7 @@ export default function Cash({ hubId }: { hubId?: string }) {
           <div className="muted-sm" style={{ marginBottom: 12 }}>
             Upload a single-day Uber payments report. Drivers are matched by their linked Uber id.
             Run a dry run first to preview matches before writing.
+            {hubId ? " The report is fleet-wide: it imports every matched driver in the file, not only this hub's." : ""}
           </div>
           <div className="form-grid">
             <label>Report file (.csv)
@@ -171,7 +172,7 @@ export default function Cash({ hubId }: { hubId?: string }) {
 
       {t ? (
         <div className="stat-row" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
-          <Stat label="Outstanding (fleet)" value={fmtINR(t.owed)} tone={t.owed > 0 ? "alert" : "ok"} />
+          <Stat label={hubId ? "Outstanding (this hub)" : "Outstanding (fleet)"} value={fmtINR(t.owed)} tone={t.owed > 0 ? "alert" : "ok"} />
           <Stat label="Over limit" value={String(t.over_limit)} tone={t.over_limit > 0 ? "alert" : "ok"} />
           <Stat label="Paid in today" value={fmtINR(t.paid_in_today)} />
           <Stat label="Collected (to yest.)" value={fmtINR(t.collected_to_yesterday)} />

@@ -40,7 +40,7 @@ from fastapi import (
     status,
 )
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
@@ -234,6 +234,17 @@ def business_day_bounds(business_date: str) -> tuple[datetime, datetime]:
     start_ist = d.replace(hour=BUSINESS_DAY_OFFSET_HOURS, tzinfo=IST)
     end_ist = start_ist + timedelta(days=1)
     return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+
+def _bd_or_400(date: Optional[str]) -> str:
+    """A caller-supplied ?date= as a business-date key, defaulting to today.
+    A malformed value is the caller's error (400), not a server crash."""
+    if not date:
+        return business_date_now()
+    try:
+        return datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "invalid_date")
 
 
 def week_bounds_for_business_date(business_date: str) -> tuple[str, str, int]:
@@ -464,6 +475,21 @@ class DriverUpdateIn(BaseModel):
     shift_end_time: Optional[str] = None     # HH:MM — optional
     status: Optional[Literal["approved", "pending"]] = None
     active: Optional[bool] = None
+
+    @field_validator("shift_start_time", "shift_end_time")
+    @classmethod
+    def _hhmm(cls, v: Optional[str]) -> Optional[str]:
+        # "" clears the time; anything else must be a real 24h HH:MM (a
+        # trailing :SS from a browser time input is dropped). These feed the
+        # wake-up alarm and attendance maths, so garbage is refused up front.
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return ""
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?", v):
+            raise ValueError("must be HH:MM (24-hour)")
+        return v[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1174,9 @@ async def _duty_summary(
                 current_platforms = list(s.get("platforms") or [])
                 break
     current_platform = current_platforms[0] if current_platforms else None
-    distance_km = await _distance_today(vehicle_id, day_start, day_end) if vehicle_id else 0.0
+    distance_km = (
+        await _distance_today(vehicle_id, day_start, day_end, driver_id) if vehicle_id else 0.0
+    )
     return {
         "segments": segs,
         "totals_seconds": totals,
@@ -1274,7 +1302,7 @@ async def schedule_shift_alarm(body: ShiftScheduleIn, driver: Dict = Depends(get
     return row
 
 
-def _ops_shift_next(driver: Dict) -> Optional[Dict]:
+def _ops_shift_next(driver: Dict, skip: int = 0) -> Optional[Dict]:
     """Synthesize the driver's next wake-up from the ops-set shift_start_time.
 
     The hub sets `shift_start_time` (HH:MM, IST wall clock) on each driver via
@@ -1286,8 +1314,9 @@ def _ops_shift_next(driver: Dict) -> Optional[Dict]:
 
     The id is stable per shift day (`opsshift:<driver>:<business_date>`) so
     re-arming is idempotent and a recorded response maps back to the day.
-    Returns None when no ops time is set (caller falls back to the legacy
-    driver-created schedule).
+    `skip=1` returns the occurrence after the next one (used once the next one
+    has been acknowledged). Returns None when no ops time is set (caller falls
+    back to the legacy driver-created schedule).
     """
     raw = driver.get("shift_start_time")
     if not raw:
@@ -1302,6 +1331,7 @@ def _ops_shift_next(driver: Dict) -> Optional[Dict]:
     cand = now_ist.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if cand <= now_ist:
         cand += timedelta(days=1)
+    cand += timedelta(days=max(0, skip))
     shift_start = cand.astimezone(timezone.utc)
     bd = business_date_from_dt(shift_start)
     return {
@@ -1326,10 +1356,12 @@ async def next_shift_alarm(driver: Dict = Depends(get_driver)):
 
     The hub-set shift time wins when present — that's the whole point of
     wiring the app to the ops-set wake-up. If the driver already acknowledged
-    today's ops wake-up (a 'start' response recorded against the synthetic id),
-    we flip its state to 'responded' so the app won't re-arm. Only when no ops
-    time is set do we fall back to the legacy driver-created schedule (the most
-    recently created one still holding an active phase).
+    the upcoming wake-up (a 'start' response recorded against its synthetic
+    id), we return the *following* day's instead: the app refreshes right after
+    a response, so tomorrow's alarm is armed there and then rather than waiting
+    for the app to be reopened after today's shift has started. Only when no
+    ops time is set do we fall back to the legacy driver-created schedule (the
+    most recently created one still holding an active phase).
     """
     syn = _ops_shift_next(driver)
     if syn:
@@ -1343,7 +1375,7 @@ async def next_shift_alarm(driver: Dict = Depends(get_driver)):
             {"_id": 0},
         )
         if acked:
-            syn["state"] = "responded"
+            syn = _ops_shift_next(driver, skip=1) or syn
         return syn
     row = await db.shift_schedules.find_one(
         {
@@ -2602,7 +2634,11 @@ async def admin_update_driver(
                   "status", "active"):
         val = getattr(body, field)
         if val is not None:
-            updates[field] = val.strip() if isinstance(val, str) else val
+            val = val.strip() if isinstance(val, str) else val
+            # A blank shift time clears it — back to "no hub-set wake-up".
+            if field in ("shift_start_time", "shift_end_time") and val == "":
+                val = None
+            updates[field] = val
     if "phone" in updates:
         clash = await db.drivers.find_one(
             {"phone": updates["phone"], "id": {"$ne": driver_id}}, {"_id": 0, "id": 1}
@@ -2698,6 +2734,7 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
             "name": d.get("name"),
             "phone": d.get("phone"),
             "code": d.get("code"),
+            "hub_id": d.get("hub_id"),
             "hub_name": d.get("hub_name"),
             "hub_lat": d.get("hub_lat"),
             "hub_lng": d.get("hub_lng"),
@@ -2736,9 +2773,9 @@ async def admin_driver_duty(
     if not d:
         raise HTTPException(404, "driver_not_found")
     await _assert_driver_in_scope(d, hub_scope(admin))
-    bd = date or business_date_now()
+    bd = _bd_or_400(date)
     summary = await _duty_summary(driver_id, d.get("vehicle_id"), bd)
-    last = await _last_ping(d["vehicle_id"]) if d.get("vehicle_id") else {}
+    last = await _last_ping(d.get("vehicle_id"), driver_id)
     summary["last_ping_at"] = last.get("recorded_at")
     summary["last_lat"] = last.get("lat")
     summary["last_lng"] = last.get("lng")
@@ -2758,7 +2795,7 @@ async def admin_hub_activity(
     hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1, "name": 1})
     if not hub:
         raise HTTPException(404, "hub_not_found")
-    bd = date or business_date_now()
+    bd = _bd_or_400(date)
     ids = await _hub_driver_ids(hub_id)
     drivers = [d async for d in db.drivers.find(
         {"id": {"$in": ids}, "archived": {"$ne": True}},
@@ -2769,7 +2806,7 @@ async def admin_hub_activity(
     rows: List[Dict[str, Any]] = []
     for d in sorted(drivers, key=lambda x: (x.get("code") or "", x.get("name") or "")):
         summ = await _duty_summary(d["id"], d.get("vehicle_id"), bd)
-        last = await _last_ping(d["vehicle_id"]) if d.get("vehicle_id") else {}
+        last = await _last_ping(d.get("vehicle_id"), d["id"])
         rows.append({
             "driver_id": d["id"], "name": d.get("name"), "code": d.get("code"),
             "phone": d.get("phone"), "shift_type": d.get("shift_type", "day"),
@@ -4772,7 +4809,7 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
             hh, mm = (int(x) for x in str(shift_time).split(":")[:2])
         except Exception:
             hh, mm = -1, 0
-        if 0 <= hh <= 23:
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
             for bd in daily_gross:
                 d0 = datetime.strptime(bd, "%Y-%m-%d").date()
                 # Before 04:00 IST belongs to the next calendar day of the business day.
@@ -6410,8 +6447,21 @@ async def vehicle_ping_ingest(
 # VEHICLE PING helpers
 
 
+async def _last_ping(vehicle_id: Optional[str], driver_id: Optional[str] = None) -> Dict[str, Any]:
+    """Most recent GPS ping for a car, or {} if none. With `driver_id`, only
+    that driver's own phone pings count — on a car shared by a day and a night
+    driver, the off-shift driver must not look 'live' off the other's phone."""
+    if not vehicle_id:
+        return {}
+    q: Dict[str, Any] = {"vehicle_id": vehicle_id}
+    if driver_id:
+        q["driver_id"] = driver_id
+    row = await db.vehicle_pings.find_one(q, {"_id": 0}, sort=[("recorded_at", -1)])
+    return row or {}
+
+
 async def _compute_distance(
-    vehicle_id: str, start: datetime, end: datetime
+    vehicle_id: str, start: datetime, end: datetime, driver_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Compute usable driven distance between `start` (incl) and `end` (excl).
 
@@ -6427,11 +6477,27 @@ async def _compute_distance(
          ping exceeds 5 minutes, we cannot trust the intervening path —
          reset the anchor without adding to distance.
 
+    With `driver_id`, pings recorded by a *different* driver's phone are
+    skipped, so two drivers sharing one car each get their own distance rather
+    than both being credited the car's whole day. Pings with no driver_id
+    (hardware feed) still count.
+
     Returns a diagnostics dict so callers can display / test the numbers.
     """
-    cursor = db.vehicle_pings.find({"vehicle_id": vehicle_id}, {"_id": 0}).sort(
-        "recorded_at", 1
-    )
+    # Only read pings near the window instead of the car's whole history. The
+    # ±1 day pad makes the string range a safe superset whatever the stored
+    # timestamp's suffix/offset; the exact cut is still done on parsed
+    # datetimes below. Served by the (vehicle_id, recorded_at) index.
+    cursor = db.vehicle_pings.find(
+        {
+            "vehicle_id": vehicle_id,
+            "recorded_at": {
+                "$gte": iso(start - timedelta(days=1)),
+                "$lt": iso(end + timedelta(days=1)),
+            },
+        },
+        {"_id": 0},
+    ).sort("recorded_at", 1)
     stats = {
         "points_total": 0,
         "points_kept": 0,
@@ -6450,6 +6516,8 @@ async def _compute_distance(
         except Exception:
             continue
         if ts < start or ts >= end:
+            continue
+        if driver_id and p.get("driver_id") and p["driver_id"] != driver_id:
             continue
         stats["points_total"] += 1
         # `or 0` — a stored value may be present but None (e.g. a phone-bridged
@@ -6485,8 +6553,10 @@ async def _compute_distance(
     return stats
 
 
-async def _distance_today(vehicle_id: str, start: datetime, end: datetime) -> float:
-    stats = await _compute_distance(vehicle_id, start, end)
+async def _distance_today(
+    vehicle_id: str, start: datetime, end: datetime, driver_id: Optional[str] = None
+) -> float:
+    stats = await _compute_distance(vehicle_id, start, end, driver_id)
     return float(stats["distance_km"])
 
 

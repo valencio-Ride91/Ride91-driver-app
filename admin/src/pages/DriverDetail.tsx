@@ -73,11 +73,17 @@ export default function DriverDetail() {
     }
   };
 
+  // Drivers live under their hub now, so "back" (and after a delete) returns
+  // to that hub — by the driver's own hub, else their car's, else the hub list.
+  const carHub = data?.vehicle?.hub_id;
+  const hubId = data?.driver.hub_id ?? (typeof carHub === "string" ? carHub : null);
+  const backTo = hubId ? `/hubs/${hubId}` : "/hubs";
+
   const hardDelete = async () => {
     if (!window.confirm("Permanently delete this driver? This cannot be undone, and is only allowed when there is no financial history.")) return;
     try {
       await api.del(`/admin/drivers/${id}?hard=true`);
-      nav("/drivers");
+      nav(backTo);
     } catch (e: any) {
       if (e?.body?.detail === "has_financial_history") {
         setErr("This driver has cash or payout history — archive instead of deleting to keep the audit trail.");
@@ -96,7 +102,7 @@ export default function DriverDetail() {
     <div>
       <div className="page-head">
         <div>
-          <div className="sub"><Link to="/drivers">← Drivers</Link></div>
+          <div className="sub"><Link to={backTo}>← {hubId ? (driver.hub_name ?? "Hub") : "Hubs"}</Link></div>
           <h1 style={{ marginBottom: 2 }}>
             {driver.name}
             {driver.archived ? <span className="tag muted" style={{ marginLeft: 8 }}>archived</span> : null}

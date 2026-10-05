@@ -157,6 +157,7 @@ export interface DriverDetail {
     id: string;
     name: string;
     phone: string;
+    hub_id?: string | null;
     hub_name: string | null;
     hub_lat: number | null;
     hub_lng: number | null;
