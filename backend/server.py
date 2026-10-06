@@ -900,13 +900,40 @@ async def fleet_admin(admin: Dict = Depends(get_admin)) -> Dict:
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
+def _norm_phone(raw: str) -> str:
+    """Canonical form of a driver phone: spaces/dashes/brackets dropped, and an
+    Indian mobile written as 10 digits, 0+10 or 91+10 becomes +91XXXXXXXXXX.
+    Anything else (already +CC…, or not a recognisable mobile) is kept as typed
+    so non-Indian numbers still work."""
+    typed = (raw or "").strip()
+    digits = re.sub(r"\D", "", typed)
+    if typed.startswith("+"):
+        return "+" + digits
+    if len(digits) == 10:
+        return "+91" + digits
+    if len(digits) == 11 and digits.startswith("0"):
+        return "+91" + digits[1:]
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    return typed
+
+
 @api.post("/auth/login")
 async def driver_login(body: DriverLoginIn):
     """Driver login with phone (username) + admin-set password. The generic
-    error message avoids revealing whether a phone is registered."""
-    phone = body.phone.strip()
+    error message avoids revealing whether a phone is registered.
+
+    Drivers type their number the way they say it — usually 10 digits, with no
+    +91 — while ops stores it as +91XXXXXXXXXX, so the typed number is
+    normalised before the lookup (the exact text typed is still tried, for any
+    legacy row stored differently). The lockout counter is keyed on the
+    normalised number so reformatting it doesn't earn extra attempts."""
+    typed = body.phone.strip()
+    phone = _norm_phone(typed)
     await login_guard(f"driver:{phone}")
     driver = await db.drivers.find_one({"phone": phone}, {"_id": 0})
+    if not driver and typed != phone:
+        driver = await db.drivers.find_one({"phone": typed}, {"_id": 0})
     ok = (
         bool(driver)
         and driver.get("active", True)
@@ -2574,7 +2601,7 @@ async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_o
 
 @api.post("/admin/drivers")
 async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(require_ops)):
-    phone = body.phone.strip()
+    phone = _norm_phone(body.phone)   # stored the way login looks it up
     if await db.drivers.find_one({"phone": phone}, {"_id": 0, "id": 1}):
         raise HTTPException(409, "phone_already_registered")
     scope = hub_scope(admin)
@@ -2640,6 +2667,7 @@ async def admin_update_driver(
                 val = None
             updates[field] = val
     if "phone" in updates:
+        updates["phone"] = _norm_phone(updates["phone"])
         clash = await db.drivers.find_one(
             {"phone": updates["phone"], "id": {"$ne": driver_id}}, {"_id": 0, "id": 1}
         )
