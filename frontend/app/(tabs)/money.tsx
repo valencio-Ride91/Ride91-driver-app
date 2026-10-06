@@ -5,7 +5,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { CollectionQrCard } from "@/src/components/CollectionQrCard";
-import { DepositSheet } from "@/src/components/DepositSheet";
 import { PayDuesButton } from "@/src/components/PayDuesButton";
 import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
 import { api } from "@/src/api";
@@ -60,7 +59,6 @@ export default function Money() {
   const { t } = useI18n();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [qrOpen, setQrOpen] = useState(false);
   const [period, setPeriod] = useState<Period>("yesterday");
   const [earn, setEarn] = useState<Earnings | null>(null);
 
@@ -192,10 +190,7 @@ export default function Money() {
               <Text style={styles.overLimitBannerText}>Over ₹{day.cash_limit} — deposit now</Text>
             </View>
           ) : null}
-          <TouchableOpacity testID="deposit-now-btn" style={styles.depositCta} onPress={() => setQrOpen(true)}>
-            <Text style={styles.depositCtaText}>Deposit now</Text>
-          </TouchableOpacity>
-          <PayDuesButton duesPaise={Math.round(Math.max(0, day?.you_owe ?? 0) * 100)} onPaid={load} />
+          <PayDuesButton duesPaise={Math.round(Math.max(0, day?.you_owe ?? 0) * 100)} />
         </Card>
 
         {/* CARD 4 — Payouts history (RazorpayX) */}
@@ -203,13 +198,6 @@ export default function Money() {
           <PayoutsHistoryCard />
         </Card>
       </ScrollView>
-
-      <DepositSheet
-        visible={qrOpen}
-        onClose={() => setQrOpen(false)}
-        duesPaise={Math.round(Math.max(0, day?.you_owe ?? 0) * 100)}
-        onPaid={load}
-      />
     </SafeAreaView>
   );
 }
@@ -266,12 +254,4 @@ const styles = StyleSheet.create({
   hr: { height: 1, backgroundColor: colors.line, marginVertical: 4 },
   overLimitBanner: { backgroundColor: colors.alert, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.xs, marginBottom: spacing.xs },
   overLimitBannerText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 12, textAlign: "center" },
-  depositCta: {
-    marginTop: spacing.md,
-    backgroundColor: colors.ink,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    alignItems: "center",
-  },
-  depositCtaText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 14 },
 });

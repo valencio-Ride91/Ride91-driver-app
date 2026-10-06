@@ -11,7 +11,6 @@ import { useRouter } from "expo-router";
 import { AppHeader } from "@/src/components/AppHeader";
 import { DutyStripe } from "@/src/components/DutyStripe";
 import { DriverMap } from "@/src/components/DriverMap";
-import { DepositSheet } from "@/src/components/DepositSheet";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 import { useI18n, formatDuration, formatINR } from "@/src/i18n";
 import { useDuty } from "@/src/duty";
@@ -42,7 +41,6 @@ export default function Home() {
   // provisional takings, which the driver has not been billed for yet.
   const [youOwe, setYouOwe] = useState(0);
   const [overLimit, setOverLimit] = useState(false);
-  const [qrOpen, setQrOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     const load = async () => {
@@ -152,27 +150,20 @@ export default function Home() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <AppHeader title="Ride91" />
 
+      {/* Informational only — the in-app deposit QR was removed, so these no
+          longer open anything. */}
       {overLimit ? (
-        <TouchableOpacity
-          testID="deposit-banner"
-          style={styles.depositBanner}
-          onPress={() => setQrOpen(true)}
-        >
+        <View testID="deposit-banner" style={styles.depositBanner}>
           <Text style={styles.depositTitle} testID="deposit-banner-title">
             You owe {formatINR(youOwe)} · OVER LIMIT
           </Text>
-          <Text style={styles.depositSub}>Deposit now →</Text>
-        </TouchableOpacity>
+        </View>
       ) : youOwe > 0 ? (
-        <TouchableOpacity
-          testID="you-owe-banner"
-          style={styles.depositBanner}
-          onPress={() => setQrOpen(true)}
-        >
+        <View testID="you-owe-banner" style={styles.depositBanner}>
           <Text style={styles.depositTitle}>
             You owe {formatINR(youOwe)} — deposit your cash to clear it.
           </Text>
-        </TouchableOpacity>
+        </View>
       ) : null}
 
       <View style={styles.mapWrap} testID="home-map">
@@ -388,13 +379,6 @@ export default function Home() {
         />
       </View>
 
-      {/* onPaid is omitted: the /money/today poll above already refreshes
-          youOwe every 15s, so the banner settles on its own. */}
-      <DepositSheet
-        visible={qrOpen}
-        onClose={() => setQrOpen(false)}
-        duesPaise={Math.round(Math.max(0, youOwe) * 100)}
-      />
     </SafeAreaView>
   );
 }
@@ -421,13 +405,6 @@ const styles = StyleSheet.create({
     padding: spacing.md,
   },
   depositTitle: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.white },
-  depositSub: {
-    fontFamily: fonts.uiMed,
-    fontSize: 12,
-    color: colors.white,
-    opacity: 0.9,
-    marginTop: 2,
-  },
   mapWrap: {
     flex: 1,
     backgroundColor: colors.line,
