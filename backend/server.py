@@ -135,7 +135,7 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "attendance_daily_target": 2500,       # ₹ gross for a day to count
     "attendance_require_ontime": True,     # require punctual login (vs their scheduled shift start)
     "attendance_grace_minutes": 30,        # minutes past scheduled start still "on time"
-    "attendance_monthly_min_days": 24,     # good days needed in the month
+    "attendance_monthly_min_days": 27,     # good days needed in the month
     "attendance_monthly_min_gross": 0,     # optional monthly gross floor (0 = ignore)
     "attendance_monthly_bonus": 3000,      # ₹ paid when the month qualifies
     # Razorpay credentials (owner-editable; override the env vars). Secret
