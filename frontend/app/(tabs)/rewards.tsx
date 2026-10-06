@@ -33,7 +33,6 @@ interface Loyalty {
   loyalty: LoyaltyState;
   wallet?: { enabled: boolean; per_day: number; qualifying_days: number; daily_accrued: number; milestone_credit: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
   attendance?: AttendanceState;
-  yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
 }
 
 export default function RewardsTab() {
@@ -122,32 +121,9 @@ export default function RewardsTab() {
           <LoyaltyMilestonesCard data={loyalty.loyalty} style={{ marginTop: spacing.md }} />
         ) : null}
 
-        {loyalty ? (
-          <Card testID="rewards-yearly-card" style={{ marginTop: spacing.md }}>
-            <View style={styles.head}>
-              <Text style={styles.cardTitle}>This year 🗓️</Text>
-              <Text style={styles.hint}>{loyalty.year}</Text>
-            </View>
-            <View style={styles.reward}>
-              <View style={styles.rewardHead}>
-                <Text style={styles.rewardLabel}>{loyalty.yearly.rank ? `Rank #${loyalty.yearly.rank}` : "Top driver of the year"}{loyalty.yearly.of ? ` of ${loyalty.yearly.of}` : ""}</Text>
-                <Text style={styles.rewardAmount}>+{formatINR(loyalty.yearly.reward)}</Text>
-              </View>
-              <View style={styles.bar}>
-                <View style={[styles.barFill, { width: `${loyalty.yearly.hub_leader ? Math.round(Math.min(1, loyalty.yearly.value / loyalty.yearly.hub_leader) * 100) : 0}%` as const, backgroundColor: loyalty.yearly.rank === 1 ? colors.live : colors.amber }]} />
-              </View>
-              <View style={styles.rewardFoot}>
-                <Text style={styles.rewardProgress}>{formatINR(loyalty.yearly.value)} gross</Text>
-                <Text style={styles.rewardNote}>{loyalty.yearly.rank === 1 ? "you're leading! 🏆" : `${formatINR(loyalty.yearly.gap_to_leader)} behind #1`}</Text>
-              </View>
-            </View>
-          </Card>
-        ) : null}
-
         <Card testID="rewards-tip-card" style={{ marginTop: spacing.md }}>
           <Text style={styles.cardTitle}>How to win</Text>
           <Text style={styles.tip}>• Keep the car running all 7 days.</Text>
-          <Text style={styles.tip}>• Earn at least ₹4,000 gross every day.</Text>
           <Text style={styles.tip}>• Safe driving and good service count for Top Driver.</Text>
           <Text style={styles.tip}>Rewards are paid on top of your 30% earnings.</Text>
         </Card>
