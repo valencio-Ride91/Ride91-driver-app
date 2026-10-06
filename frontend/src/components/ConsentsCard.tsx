@@ -16,6 +16,8 @@ import * as Crypto from "expo-crypto";
 import { api } from "@/src/api";
 import { useSync } from "@/src/sync";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useI18n } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 
 export interface ConsentRow {
   kind: string;
@@ -25,6 +27,8 @@ export interface ConsentRow {
 }
 
 export const ConsentsCard: React.FC = () => {
+  const { t } = useI18n();
+  const c = useCardText();
   const [items, setItems] = useState<ConsentRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -67,25 +71,25 @@ export const ConsentsCard: React.FC = () => {
       if (!next && row.granted) {
         // Withdrawing → confirm.
         Alert.alert(
-          "Withdraw consent?",
-          `You're withdrawing consent for: ${row.label}. Some features that rely on this will stop working until you grant it again.`,
+          c.consent_withdraw_q,
+          c.consent_withdraw_body(c.consent_label(row.kind, row.label)),
           [
-            { text: "Cancel", style: "cancel" },
-            { text: "Withdraw", style: "destructive", onPress: doIt },
+            { text: t.cancel, style: "cancel" },
+            { text: c.consent_withdraw, style: "destructive", onPress: doIt },
           ],
         );
       } else {
         doIt();
       }
     },
-    [enqueue, refresh],
+    [enqueue, refresh, c, t],
   );
 
   return (
     <View testID="consents-card">
-      <Text style={styles.h2}>Consents</Text>
+      <Text style={styles.h2}>{c.consents}</Text>
       <Text style={styles.sub}>
-        You can withdraw any consent at any time. Withdrawals are stored with a full audit trail.
+        {c.consents_sub}
       </Text>
       {loading ? (
         <ActivityIndicator style={{ marginVertical: spacing.md }} />
@@ -97,11 +101,11 @@ export const ConsentsCard: React.FC = () => {
             style={styles.row}
           >
             <View style={{ flex: 1 }}>
-              <Text style={styles.label}>{r.label}</Text>
+              <Text style={styles.label}>{c.consent_label(r.kind, r.label)}</Text>
               <Text style={styles.meta}>
                 {r.last_change_at
-                  ? `${r.granted ? "Granted" : "Withdrawn"} on ${r.last_change_at.slice(0, 10)}`
-                  : "Not decided yet"}
+                  ? c.consent_changed(r.granted, r.last_change_at.slice(0, 10))
+                  : c.consent_undecided}
               </Text>
             </View>
             <Switch

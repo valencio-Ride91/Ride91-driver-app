@@ -9,22 +9,26 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { colors, fonts, radius } from "@/src/theme";
+import { useCardText } from "@/src/i18n/cards";
 
 interface Props {
   duesPaise: number;
 }
 
-export const PayDuesButton: React.FC<Props> = ({ duesPaise }) => (
+export const PayDuesButton: React.FC<Props> = ({ duesPaise }) => {
+  const c = useCardText();
+  return (
   <View
     testID="pay-dues-btn"
     style={[styles.btn, styles.btnDisabled]}
     accessibilityState={{ disabled: true }}
   >
     <Text style={styles.txt}>
-      Pay ₹{(duesPaise / 100).toFixed(0)} dues via UPI / card
+      {c.pay_dues((duesPaise / 100).toFixed(0))}
     </Text>
   </View>
-);
+  );
+};
 
 const styles = StyleSheet.create({
   btn: {

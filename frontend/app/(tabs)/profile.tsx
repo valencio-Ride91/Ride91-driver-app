@@ -11,6 +11,7 @@ import { BankAccountCard } from "@/src/components/BankAccountCard";
 import { ChangePasswordCard } from "@/src/components/ChangePasswordCard";
 import { useAuth } from "@/src/auth";
 import { useI18n, formatIST } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { useShiftAlarm } from "@/src/shift-alarms";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -54,6 +55,7 @@ function resolveShiftStart(preset: (typeof SHIFT_PRESETS)[number]): Date {
 
 export default function Profile() {
   const { t } = useI18n();
+  const c = useCardText();
   const { driver, vehicle, signOut } = useAuth();
   const { next, endEta, scheduleShift, testFireNow, refresh, nativeAvailable } = useShiftAlarm();
   const router = useRouter();
@@ -99,12 +101,12 @@ export default function Profile() {
         setPickerOpen(false);
         setPickerStep("start");
         setChosenPreset(null);
-        showToast(r ? "Alarm scheduled" : "Could not schedule — try again");
+        showToast(r ? c.alarm_scheduled : c.alarm_not_scheduled);
       } finally {
         setBusy(false);
       }
     },
-    [chosenPreset, busy, scheduleShift],
+    [chosenPreset, busy, scheduleShift, c],
   );
 
   const onTestNative = useCallback(
@@ -138,7 +140,7 @@ export default function Profile() {
   const hubText =
     driver?.hub_name
       ? `${driver.hub_name} · ${driver.hub_lat?.toFixed(4)}, ${driver.hub_lng?.toFixed(4)}`
-      : "Hub not set";
+      : c.hub_not_set;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -159,107 +161,107 @@ export default function Profile() {
         </TouchableOpacity>
 
         <Card testID="profile-vehicle-card" style={{ marginTop: spacing.md }}>
-          <Text style={styles.h2}>Vehicle</Text>
+          <Text style={styles.h2}>{c.vehicle}</Text>
           <View style={styles.kv}>
-            <Text style={styles.k}>Number</Text>
+            <Text style={styles.k}>{c.veh_number}</Text>
             <Text style={styles.v}>{driver?.vehicle_number ?? "—"}</Text>
           </View>
           <View style={styles.kv}>
-            <Text style={styles.k}>Model</Text>
+            <Text style={styles.k}>{c.veh_model}</Text>
             <Text style={styles.v}>{vehicle?.model ?? "Citroën ëC3"}</Text>
           </View>
           <View style={styles.kv}>
-            <Text style={styles.k}>Battery</Text>
+            <Text style={styles.k}>{c.veh_battery}</Text>
             <Text style={styles.v}>{vehicle?.current_soc ?? "—"}%</Text>
           </View>
           <View style={styles.kv}>
-            <Text style={styles.k}>Home hub</Text>
+            <Text style={styles.k}>{c.home_hub}</Text>
             <Text style={styles.v} testID="profile-hub-info">{hubText}</Text>
           </View>
         </Card>
 
         <Card testID="profile-alarm-card" style={{ marginTop: spacing.md }}>
           <View style={styles.rowBetween}>
-            <Text style={styles.h2}>Shift alarm</Text>
+            <Text style={styles.h2}>{c.shift_alarm}</Text>
             <View style={[styles.badge, nativeAvailable ? styles.badgeOn : styles.badgeOff]}>
               <Text style={[styles.badgeText, nativeAvailable ? styles.badgeTextOn : styles.badgeTextOff]}>
-                {nativeAvailable ? "Native ready" : "Preview only"}
+                {nativeAvailable ? c.alarm_ready : c.alarm_preview_only}
               </Text>
             </View>
           </View>
           <Text style={styles.sub}>
             {nativeAvailable
-              ? "Wakes your phone 1 hour before the shift starts and again when it's time to head back to the hub."
+              ? c.alarm_sub
               : "Native alarm needs the production build. Use Preview to test the UI on web / Expo Go."}
           </Text>
 
           {hubSet ? (
             <View style={[styles.badge, styles.badgeOn, { alignSelf: "flex-start", marginTop: spacing.sm }]}>
-              <Text style={[styles.badgeText, styles.badgeTextOn]}>Set by your hub</Text>
+              <Text style={[styles.badgeText, styles.badgeTextOn]}>{c.set_by_hub}</Text>
             </View>
           ) : null}
 
           {/* Start alarm block */}
-          <Text style={styles.section}>Start alarm</Text>
+          <Text style={styles.section}>{c.start_alarm}</Text>
           <View style={styles.kv}>
-            <Text style={styles.k}>Next shift</Text>
-            <Text style={styles.v} testID="alarm-next-shift">{nextShift ?? "Not scheduled"}</Text>
+            <Text style={styles.k}>{c.next_shift}</Text>
+            <Text style={styles.v} testID="alarm-next-shift">{nextShift ?? c.not_scheduled}</Text>
           </View>
           <View style={styles.kv}>
-            <Text style={styles.k}>Fires at</Text>
+            <Text style={styles.k}>{c.fires_at}</Text>
             <Text style={styles.v} testID="alarm-fires-at">{nextAlarm ?? "—"}</Text>
           </View>
           <View style={styles.kv}>
-            <Text style={styles.k}>Status</Text>
-            <Text style={styles.v}>{next?.state ?? "—"}</Text>
+            <Text style={styles.k}>{c.status}</Text>
+            <Text style={styles.v}>{next?.state ? c.alarm_state(next.state) : "—"}</Text>
           </View>
 
           {/* End alarm block */}
-          <Text style={styles.section}>End alarm (dynamic ETA)</Text>
+          <Text style={styles.section}>{c.end_alarm}</Text>
           <View style={styles.kv}>
-            <Text style={styles.k}>Shift ends</Text>
-            <Text style={styles.v} testID="alarm-shift-end">{shiftEnd ?? "Not scheduled"}</Text>
+            <Text style={styles.k}>{c.shift_ends}</Text>
+            <Text style={styles.v} testID="alarm-shift-end">{shiftEnd ?? c.not_scheduled}</Text>
           </View>
           {endEta?.has_end_alarm && endEta?.has_hub ? (
             <>
               <View style={styles.kv}>
-                <Text style={styles.k}>Distance to hub</Text>
+                <Text style={styles.k}>{c.distance_to_hub}</Text>
                 <Text style={styles.v} testID="alarm-distance">
                   {(endEta.distance_km ?? 0).toFixed(2)} km
                 </Text>
               </View>
               <View style={styles.kv}>
-                <Text style={styles.k}>ETA</Text>
+                <Text style={styles.k}>{c.eta}</Text>
                 <Text style={styles.v} testID="alarm-eta">
-                  {Math.max(0, Math.round(endEta.eta_minutes ?? 0))} min
+                  {c.eta_min(Math.max(0, Math.round(endEta.eta_minutes ?? 0)))}
                   {typeof endEta.avg_speed_kmph === "number"
-                    ? `  ·  avg ${endEta.avg_speed_kmph.toFixed(0)} km/h`
+                    ? c.eta_avg(endEta.avg_speed_kmph.toFixed(0))
                     : ""}
                 </Text>
               </View>
               <View style={styles.kv}>
-                <Text style={styles.k}>Alarm at</Text>
+                <Text style={styles.k}>{c.alarm_at}</Text>
                 <Text style={styles.v} testID="alarm-end-fires-at">
                   {endEta.alarm_at ? formatIST(endEta.alarm_at) : "—"}
                 </Text>
               </View>
               <View style={styles.kv}>
-                <Text style={styles.k}>Status</Text>
+                <Text style={styles.k}>{c.status}</Text>
                 <Text style={styles.v}>
                   {endEta.should_alarm_now
-                    ? "🟠 fire window open"
-                    : next?.end_state ?? "—"}
+                    ? c.fire_window
+                    : next?.end_state ? c.alarm_state(next.end_state) : "—"}
                 </Text>
               </View>
             </>
           ) : next?.shift_end && !endEta?.has_hub ? (
-            <Text style={styles.mutedNote}>Set a home hub to enable dynamic ETA-to-hub alarm.</Text>
+            <Text style={styles.mutedNote}>{c.set_home_hub}</Text>
           ) : null}
 
           <View style={styles.actions}>
             {hubSet ? (
               <Text style={styles.mutedNote}>
-                Your hub sets your wake-up time. The alarm arms automatically — contact your hub to change it.
+                {c.hub_sets_time}
               </Text>
             ) : (
               <TouchableOpacity
@@ -271,7 +273,7 @@ export default function Profile() {
                   setPickerOpen(true);
                 }}
               >
-                <Text style={styles.primaryText}>Schedule shift</Text>
+                <Text style={styles.primaryText}>{c.schedule_shift}</Text>
               </TouchableOpacity>
             )}
             <View style={styles.actionsRow}>
@@ -313,7 +315,7 @@ export default function Profile() {
               style={styles.ghost}
               onPress={refresh}
             >
-              <Text style={styles.ghostText}>Refresh</Text>
+              <Text style={styles.ghostText}>{c.refresh}</Text>
             </TouchableOpacity>
           </View>
         </Card>
@@ -356,8 +358,8 @@ export default function Profile() {
             <View style={styles.sheetHandle} />
             {pickerStep === "start" ? (
               <>
-                <Text style={styles.sheetTitle}>When is your next shift?</Text>
-                {SHIFT_PRESETS.map((p) => {
+                <Text style={styles.sheetTitle}>{c.when_next_shift}</Text>
+                {SHIFT_PRESETS.map((p, i) => {
                   const s = resolveShiftStart(p);
                   return (
                     <TouchableOpacity
@@ -367,7 +369,7 @@ export default function Profile() {
                       onPress={() => onPickPreset(p)}
                     >
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.sheetRowTitle}>{p.label}</Text>
+                        <Text style={styles.sheetRowTitle}>{c.shift_presets[i] ?? p.label}</Text>
                         <Text style={styles.sheetRowSub}>{formatIST(s)}</Text>
                       </View>
                       <Text style={styles.sheetRowChevron}>›</Text>
@@ -377,9 +379,9 @@ export default function Profile() {
               </>
             ) : (
               <>
-                <Text style={styles.sheetTitle}>How long is your shift?</Text>
+                <Text style={styles.sheetTitle}>{c.how_long_shift}</Text>
                 <Text style={styles.sheetSub}>
-                  Start: {chosenPreset ? formatIST(resolveShiftStart(chosenPreset)) : "—"}
+                  {c.starts_at(chosenPreset ? formatIST(resolveShiftStart(chosenPreset)) : "—")}
                 </Text>
                 {DURATIONS.map((d) => (
                   <TouchableOpacity
@@ -390,10 +392,10 @@ export default function Profile() {
                     disabled={busy}
                   >
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.sheetRowTitle}>{d.label}</Text>
+                      <Text style={styles.sheetRowTitle}>{d.hours == null ? c.no_end_alarm : c.duration_hours(d.hours)}</Text>
                       {d.hours != null && chosenPreset ? (
                         <Text style={styles.sheetRowSub}>
-                          Ends: {formatIST(new Date(resolveShiftStart(chosenPreset).getTime() + d.hours * 3600 * 1000))}
+                          {c.ends_at(formatIST(new Date(resolveShiftStart(chosenPreset).getTime() + d.hours * 3600 * 1000)))}
                         </Text>
                       ) : null}
                     </View>
@@ -406,7 +408,7 @@ export default function Profile() {
                   onPress={() => setPickerStep("start")}
                   disabled={busy}
                 >
-                  <Text style={styles.ghostText}>Back</Text>
+                  <Text style={styles.ghostText}>{c.back}</Text>
                 </TouchableOpacity>
               </>
             )}

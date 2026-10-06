@@ -13,6 +13,7 @@ import { DutyStripe } from "@/src/components/DutyStripe";
 import { DriverMap } from "@/src/components/DriverMap";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 import { useI18n, formatDuration, formatINR } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { useDuty } from "@/src/duty";
 import { useTracking } from "@/src/tracking";
 import { useAuth } from "@/src/auth";
@@ -31,6 +32,7 @@ const CHARGE_NEXT: Record<string, { next: string; key: "go_to_charger" | "chargi
 
 export default function Home() {
   const { t } = useI18n();
+  const c = useCardText();
   const { today, switchState, setPlatforms, refresh } = useDuty();
   const { lat, lng } = useTracking();
   const { vehicle } = useAuth();
@@ -155,13 +157,13 @@ export default function Home() {
       {overLimit ? (
         <View testID="deposit-banner" style={styles.depositBanner}>
           <Text style={styles.depositTitle} testID="deposit-banner-title">
-            You owe {formatINR(youOwe)} · OVER LIMIT
+            {c.home_owe_over(formatINR(youOwe))}
           </Text>
         </View>
       ) : youOwe > 0 ? (
         <View testID="you-owe-banner" style={styles.depositBanner}>
           <Text style={styles.depositTitle}>
-            You owe {formatINR(youOwe)} — deposit your cash to clear it.
+            {c.home_owe(formatINR(youOwe))}
           </Text>
         </View>
       ) : null}
@@ -173,13 +175,13 @@ export default function Home() {
       <View style={styles.statusBar} testID="status-bar">
         {/* ROW 1 — Ride91 duty */}
         <View style={styles.rowBlock} testID="duty-row">
-          <Text style={styles.rowLabel}>Ride91 duty</Text>
+          <Text style={styles.rowLabel}>{c.duty_label}</Text>
           {onDuty ? (
             <View style={styles.dutyRow}>
               <View style={styles.dutyPill}>
                 <View style={styles.dutyDot} />
                 <Text style={styles.dutyPillText}>
-                  On duty · {formatDuration(today?.on_duty_seconds ?? 0)}
+                  {c.on_duty_for(formatDuration(today?.on_duty_seconds ?? 0))}
                 </Text>
               </View>
               <TouchableOpacity
@@ -187,7 +189,7 @@ export default function Home() {
                 style={styles.endBtn}
                 onPress={endDuty}
               >
-                <Text style={styles.endBtnText}>End duty</Text>
+                <Text style={styles.endBtnText}>{c.end_duty}</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -196,7 +198,7 @@ export default function Home() {
               style={styles.startBtn}
               onPress={startDuty}
             >
-              <Text style={styles.startBtnText}>Start duty</Text>
+              <Text style={styles.startBtnText}>{c.start_duty}</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -204,9 +206,9 @@ export default function Home() {
         {/* ROW 2 — Online on */}
         <View style={styles.rowBlock} testID="platform-row">
           <Text style={styles.rowLabel}>
-            Online on
+            {c.online_on}
             {!onDuty ? (
-              <Text style={styles.rowLabelHint}>  · start duty to enable</Text>
+              <Text style={styles.rowLabelHint}>{c.start_duty_to_enable}</Text>
             ) : null}
           </Text>
           <View style={styles.platformRow}>
@@ -261,7 +263,7 @@ export default function Home() {
                         { color: active ? colors.white : colors.muted },
                       ]}
                     >
-                      {active ? "ON" : "OFF"}
+                      {active ? c.on : c.off}
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -286,7 +288,7 @@ export default function Home() {
                 activePlatforms.length === 0 ? { color: colors.white } : null,
               ]}
             >
-              Not online on any app
+              {c.not_online}
             </Text>
           </TouchableOpacity>
 

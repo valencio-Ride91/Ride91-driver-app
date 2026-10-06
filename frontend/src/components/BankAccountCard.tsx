@@ -19,6 +19,8 @@ import {
 
 import { api } from "@/src/api";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useI18n } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 
 type Kind = "bank_account" | "vpa";
 
@@ -35,6 +37,8 @@ interface Saved {
 const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
 export const BankAccountCard: React.FC = () => {
+  const { t } = useI18n();
+  const c = useCardText();
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState<Saved | null>(null);
   const [editing, setEditing] = useState(false);
@@ -78,12 +82,12 @@ export const BankAccountCard: React.FC = () => {
 
   const validate = (): string | null => {
     if (kind === "bank_account") {
-      if (!holder.trim()) return "Enter the account-holder name.";
-      if (!/^\d{6,26}$/.test(acc)) return "Account number should be 6–26 digits.";
-      if (acc !== acc2) return "Account numbers don't match.";
-      if (!IFSC_RE.test(ifsc.toUpperCase())) return "IFSC looks wrong (e.g. HDFC0001234).";
+      if (!holder.trim()) return c.bank_err_holder;
+      if (!/^\d{6,26}$/.test(acc)) return c.bank_err_acc;
+      if (acc !== acc2) return c.bank_err_match;
+      if (!IFSC_RE.test(ifsc.toUpperCase())) return c.bank_err_ifsc;
     } else {
-      if (!/^[\w.\-]{2,}@[\w.\-]{2,}$/.test(vpa)) return "Enter a valid UPI ID (e.g. name@upi).";
+      if (!/^[\w.\-]{2,}@[\w.\-]{2,}$/.test(vpa)) return c.bank_err_upi;
     }
     return null;
   };
@@ -92,7 +96,7 @@ export const BankAccountCard: React.FC = () => {
     if (busy) return;
     const err = validate();
     if (err) {
-      Alert.alert("Check details", err);
+      Alert.alert(c.bank_check, err);
       return;
     }
     setBusy(true);
@@ -112,12 +116,12 @@ export const BankAccountCard: React.FC = () => {
     } catch (e: any) {
       const detail = e?.body?.detail;
       Alert.alert(
-        "Couldn't save",
+        c.bank_save_failed,
         detail === "invalid_ifsc"
-          ? "IFSC looks wrong. Please double-check."
+          ? c.bank_bad_ifsc
           : detail === "invalid_vpa"
-            ? "That UPI ID looks wrong."
-            : "Please try again.",
+            ? c.bank_bad_upi
+            : c.try_again,
       );
     } finally {
       setBusy(false);
@@ -137,7 +141,7 @@ export const BankAccountCard: React.FC = () => {
     return (
       <View testID="bank-account-view">
         <View style={styles.rowBetween}>
-          <Text style={styles.h2}>Payout destination</Text>
+          <Text style={styles.h2}>{c.bank_title}</Text>
           {saved?.saved ? (
             <View
               style={[
@@ -151,31 +155,30 @@ export const BankAccountCard: React.FC = () => {
                   saved.verified ? styles.badgeTextOn : styles.badgeTextPending,
                 ]}
               >
-                {saved.verified ? "Verified" : "Pending verification"}
+                {saved.verified ? c.bank_verified : c.bank_pending}
               </Text>
             </View>
           ) : null}
         </View>
         <Text style={styles.sub}>
-          Where Ride91 sends your Monday payout. Bank transfer (IMPS) or UPI —
-          your choice.
+          {c.bank_sub}
         </Text>
         {saved?.saved ? (
           <View style={styles.savedBox} testID="bank-account-saved">
             <View style={styles.kv}>
-              <Text style={styles.k}>Type</Text>
+              <Text style={styles.k}>{c.bank_type}</Text>
               <Text style={styles.v}>
-                {saved.kind === "bank_account" ? "Bank account (IMPS)" : "UPI (VPA)"}
+                {saved.kind === "bank_account" ? c.bank_kind_bank : c.bank_kind_upi}
               </Text>
             </View>
             {saved.kind === "bank_account" ? (
               <>
                 <View style={styles.kv}>
-                  <Text style={styles.k}>Holder</Text>
+                  <Text style={styles.k}>{c.bank_holder}</Text>
                   <Text style={styles.v}>{saved.account_holder}</Text>
                 </View>
                 <View style={styles.kv}>
-                  <Text style={styles.k}>Account</Text>
+                  <Text style={styles.k}>{c.bank_account}</Text>
                   <Text style={styles.v} testID="bank-account-masked">
                     {saved.masked}
                   </Text>
@@ -187,7 +190,7 @@ export const BankAccountCard: React.FC = () => {
               </>
             ) : (
               <View style={styles.kv}>
-                <Text style={styles.k}>UPI ID</Text>
+                <Text style={styles.k}>{c.bank_upi_id}</Text>
                 <Text style={styles.v} testID="bank-account-masked">
                   {saved.masked}
                 </Text>
@@ -196,7 +199,7 @@ export const BankAccountCard: React.FC = () => {
           </View>
         ) : (
           <View style={styles.emptyBox}>
-            <Text style={styles.emptyText}>No payout destination saved yet.</Text>
+            <Text style={styles.emptyText}>{c.bank_none}</Text>
           </View>
         )}
         <TouchableOpacity
@@ -205,7 +208,7 @@ export const BankAccountCard: React.FC = () => {
           onPress={startEdit}
         >
           <Text style={styles.primaryText}>
-            {saved?.saved ? "Update details" : "Add bank / UPI"}
+            {saved?.saved ? c.bank_update : c.bank_add}
           </Text>
         </TouchableOpacity>
       </View>
@@ -214,7 +217,7 @@ export const BankAccountCard: React.FC = () => {
 
   return (
     <View testID="bank-account-edit">
-      <Text style={styles.h2}>Payout destination</Text>
+      <Text style={styles.h2}>{c.bank_title}</Text>
       <View style={styles.tabRow}>
         <TouchableOpacity
           testID="bank-tab-bank"
@@ -227,7 +230,7 @@ export const BankAccountCard: React.FC = () => {
               kind === "bank_account" && styles.tabTextActive,
             ]}
           >
-            Bank (IMPS)
+            {c.bank_tab_bank}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -244,33 +247,33 @@ export const BankAccountCard: React.FC = () => {
       </View>
       {kind === "bank_account" ? (
         <>
-          <Text style={styles.label}>Account holder name</Text>
+          <Text style={styles.label}>{c.bank_holder_name}</Text>
           <TextInput
             testID="bank-holder"
             value={holder}
             onChangeText={setHolder}
-            placeholder="As on passbook"
+            placeholder={c.bank_holder_ph}
             placeholderTextColor={colors.muted}
             style={styles.input}
             autoCapitalize="words"
           />
-          <Text style={styles.label}>Account number</Text>
+          <Text style={styles.label}>{c.bank_acc_number}</Text>
           <TextInput
             testID="bank-acc"
             value={acc}
             onChangeText={(t) => setAcc(t.replace(/\s/g, ""))}
-            placeholder="6–26 digits"
+            placeholder={c.bank_acc_ph}
             placeholderTextColor={colors.muted}
             style={styles.input}
             keyboardType="number-pad"
             secureTextEntry
           />
-          <Text style={styles.label}>Confirm account number</Text>
+          <Text style={styles.label}>{c.bank_acc_confirm}</Text>
           <TextInput
             testID="bank-acc2"
             value={acc2}
             onChangeText={(t) => setAcc2(t.replace(/\s/g, ""))}
-            placeholder="Re-enter"
+            placeholder={c.bank_acc_confirm_ph}
             placeholderTextColor={colors.muted}
             style={styles.input}
             keyboardType="number-pad"
@@ -289,7 +292,7 @@ export const BankAccountCard: React.FC = () => {
         </>
       ) : (
         <>
-          <Text style={styles.label}>UPI ID (VPA)</Text>
+          <Text style={styles.label}>{c.bank_upi_field}</Text>
           <TextInput
             testID="bank-vpa"
             value={vpa}
@@ -300,7 +303,7 @@ export const BankAccountCard: React.FC = () => {
             autoCapitalize="none"
           />
           <Text style={styles.helper}>
-            You&apos;ll receive UPI payouts here. Payment reaches you within minutes.
+            {c.bank_upi_help}
           </Text>
         </>
       )}
@@ -311,7 +314,7 @@ export const BankAccountCard: React.FC = () => {
           onPress={cancel}
           disabled={busy}
         >
-          <Text style={styles.secondaryText}>Cancel</Text>
+          <Text style={styles.secondaryText}>{t.cancel}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID="bank-save"
@@ -322,7 +325,7 @@ export const BankAccountCard: React.FC = () => {
           {busy ? (
             <ActivityIndicator color={colors.white} />
           ) : (
-            <Text style={styles.primaryText}>Save</Text>
+            <Text style={styles.primaryText}>{t.save}</Text>
           )}
         </TouchableOpacity>
       </View>

@@ -7,6 +7,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { colors, fonts, platformColors, spacing } from "@/src/theme";
 import type { DutySegment } from "@/src/duty";
 import { formatDuration } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 
 interface Props {
   segments: DutySegment[];
@@ -26,11 +27,12 @@ const HatchStripe: React.FC = () => (
 );
 
 export const DutyStripe: React.FC<Props> = ({ segments, shiftSeconds, workingSeconds }) => {
+  const c = useCardText();
   const total = segments.reduce((a, s) => a + s.seconds, 0) || 1;
   return (
     <View style={styles.wrap} testID="duty-stripe">
       <View style={styles.header}>
-        <Text style={styles.label}>Shift</Text>
+        <Text style={styles.label}>{c.shift}</Text>
         <Text style={styles.value} testID="duty-stripe-working">
           {formatDuration(workingSeconds)} / {formatDuration(shiftSeconds)}
         </Text>

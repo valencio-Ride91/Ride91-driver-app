@@ -9,6 +9,7 @@ import { PayDuesButton } from "@/src/components/PayDuesButton";
 import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 
 // Ride91 settles on the PREVIOUS day: the driver's earnings and dues are the
@@ -49,14 +50,16 @@ interface Earnings {
   share_rate: number;
   days_operated: number;
 }
-const PERIODS: { key: Period; label: string }[] = [
-  { key: "yesterday", label: "Yesterday" },
-  { key: "week", label: "This week" },
-  { key: "month", label: "This month" },
+// `label` names the entry in the card dictionary, so it follows the language.
+const PERIODS: { key: Period; label: "period_yesterday" | "period_week" | "period_month" }[] = [
+  { key: "yesterday", label: "period_yesterday" },
+  { key: "week", label: "period_week" },
+  { key: "month", label: "period_month" },
 ];
 
 export default function Money() {
   const { t } = useI18n();
+  const c = useCardText();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<Period>("yesterday");
@@ -112,11 +115,11 @@ export default function Money() {
         {/* CARD 1 — Earnings (period selector: yesterday / week / month) */}
         <Card testID="earnings-card" style={{ marginTop: spacing.md }}>
           <View style={styles.heroHead}>
-            <Text style={styles.cardKicker}>Earnings</Text>
+            <Text style={styles.cardKicker}>{c.earnings}</Text>
             {period === "yesterday" ? (
               <View style={styles.badge}>
                 <Text style={[styles.badgeText, { color: day?.settled ? colors.live : colors.amber }]}>
-                  {day?.settled ? "SETTLED" : "PENDING"}
+                  {day?.settled ? c.settled : c.pending}
                 </Text>
               </View>
             ) : null}
@@ -133,7 +136,7 @@ export default function Money() {
                   style={[styles.segBtn, on ? styles.segBtnOn : null]}
                   onPress={() => setPeriod(p.key)}
                 >
-                  <Text style={[styles.segText, on ? styles.segTextOn : null]}>{p.label}</Text>
+                  <Text style={[styles.segText, on ? styles.segTextOn : null]}>{c[p.label]}</Text>
                 </TouchableOpacity>
               );
             })}
@@ -141,14 +144,14 @@ export default function Money() {
 
           <Text style={styles.hero} testID="earnings-share">{formatINR(earn?.driver_share ?? 0)}</Text>
           <Text style={styles.sub}>
-            {earn?.label ?? "Yesterday"} · your {Math.round((earn?.share_rate ?? 0.3) * 100)}% of {formatINR(earn?.gross ?? 0)} gross
-            {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? ` · ${earn!.days_operated} day${earn!.days_operated === 1 ? "" : "s"}` : ""}
+            {c.earn_sub(c[PERIODS.find((p) => p.key === period)!.label], Math.round((earn?.share_rate ?? 0.3) * 100), formatINR(earn?.gross ?? 0))}
+            {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? c.earn_days(earn!.days_operated) : ""}
           </Text>
         </Card>
 
         {/* CARD 2 — Yesterday's cash (collected vs deposited) */}
         <Card testID="yesterday-cash-card" style={{ marginTop: spacing.md }}>
-          <Text style={styles.cardTitle}>Yesterday's cash</Text>
+          <Text style={styles.cardTitle}>{c.yesterdays_cash}</Text>
           {PLATFORMS.map((p) => {
             const row = day?.per_platform?.[p];
             const has = !!row && (row.cash > 0 || row.gross > 0);
@@ -156,7 +159,7 @@ export default function Money() {
               <MoneyLine
                 key={p}
                 testID={`y-cash-${p}`}
-                label={`${platformLabels[p]} cash`}
+                label={c.platform_cash(platformLabels[p])}
                 swatch={platformColors[p]}
                 value={has ? formatINR(row!.cash) : "—"}
                 muted={!has}
@@ -164,30 +167,30 @@ export default function Money() {
             );
           })}
           <View style={styles.hr} />
-          <MoneyLine testID="y-cash-total" label="Cash collected" value={formatINR(day?.cash_collected ?? 0)} bold />
+          <MoneyLine testID="y-cash-total" label={c.cash_collected} value={formatINR(day?.cash_collected ?? 0)} bold />
           <MoneyLine
             testID="y-deposited"
-            label="Deposited"
+            label={c.deposited}
             value={`− ${formatINR(day?.deposited ?? 0)}`}
             color={(day?.deposited ?? 0) > 0 ? colors.live : colors.ink}
           />
           <View style={styles.hr} />
-          <MoneyLine testID="y-net-cash" label="Cash to settle from yesterday" value={formatINR(Math.max(0, day?.net_cash_from_day ?? 0))} bold />
+          <MoneyLine testID="y-net-cash" label={c.cash_to_settle} value={formatINR(Math.max(0, day?.net_cash_from_day ?? 0))} bold />
         </Card>
 
         {/* CARD 3 — Running balance (what you owe overall) */}
         <Card testID="balance-card" style={{ marginTop: spacing.md }}>
-          <Text style={styles.cardTitle}>Your balance</Text>
+          <Text style={styles.cardTitle}>{c.your_balance}</Text>
           <MoneyLine
             testID="balance-owed"
-            label={inCredit ? "In credit" : "You owe"}
+            label={inCredit ? c.in_credit : c.you_owe}
             value={formatINR(inCredit ? day!.in_credit : Math.max(0, day?.you_owe ?? 0))}
             bold
             color={day?.cash_over_limit ? colors.alert : inCredit ? colors.live : colors.ink}
           />
           {day?.cash_over_limit ? (
             <View style={styles.overLimitBanner} testID="over-limit-banner">
-              <Text style={styles.overLimitBannerText}>Over ₹{day.cash_limit} — deposit now</Text>
+              <Text style={styles.overLimitBannerText}>{c.over_limit_deposit(day.cash_limit)}</Text>
             </View>
           ) : null}
           <PayDuesButton duesPaise={Math.round(Math.max(0, day?.you_owe ?? 0) * 100)} />

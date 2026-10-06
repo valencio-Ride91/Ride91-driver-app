@@ -16,6 +16,7 @@ import {
 import { api } from "@/src/api";
 import { formatINR, formatIST } from "@/src/i18n";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useCardText } from "@/src/i18n/cards";
 
 interface Payout {
   id: string;
@@ -41,6 +42,7 @@ const STATUS_MAP: Record<string, { label: string; color: string; bg: string }> =
 };
 
 export const PayoutsHistoryCard: React.FC = () => {
+  const c = useCardText();
   const [items, setItems] = useState<Payout[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -64,14 +66,13 @@ export const PayoutsHistoryCard: React.FC = () => {
   return (
     <View testID="payouts-history-card">
       <View style={styles.rowBetween}>
-        <Text style={styles.h2}>Payouts</Text>
+        <Text style={styles.h2}>{c.payouts}</Text>
         <TouchableOpacity onPress={load} testID="payouts-refresh">
-          <Text style={styles.link}>Refresh</Text>
+          <Text style={styles.link}>{c.refresh}</Text>
         </TouchableOpacity>
       </View>
       <Text style={styles.sub}>
-        Fleet-to-driver bank transfers. Payouts appear here once ops releases
-        them. Save your bank / UPI in Profile first.
+        {c.payouts_sub}
       </Text>
       {loading ? (
         <View style={styles.loading}>
@@ -79,11 +80,11 @@ export const PayoutsHistoryCard: React.FC = () => {
         </View>
       ) : error ? (
         <Text style={styles.errorText}>
-          Couldn't load payouts. Pull to refresh.
+          {c.payouts_error}
         </Text>
       ) : (items?.length ?? 0) === 0 ? (
         <View style={styles.emptyBox}>
-          <Text style={styles.emptyText}>No payouts yet.</Text>
+          <Text style={styles.emptyText}>{c.no_payouts}</Text>
         </View>
       ) : (
         items!.map((p) => {
@@ -98,7 +99,7 @@ export const PayoutsHistoryCard: React.FC = () => {
                 <Text style={styles.amt}>{formatINR(p.amount_rupees)}</Text>
                 <View style={[styles.badge, { backgroundColor: s.bg }]}>
                   <Text style={[styles.badgeText, { color: s.color }]}>
-                    {s.label}
+                    {c.payout_status[p.status] ?? s.label}
                   </Text>
                 </View>
               </View>

@@ -8,6 +8,7 @@ import { StyleSheet, Text, View, ViewStyle } from "react-native";
 
 import { Card } from "@/src/components/ui";
 import { formatINR } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 export interface AttendanceState {
@@ -33,13 +34,6 @@ const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 const ALERT_TINT = "#F8E4E0";
 
-const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-function monthLabel(ym: string): string {
-  const [y, m] = (ym ?? "").split("-").map(Number);
-  return m >= 1 && m <= 12 ? `${MONTHS[m - 1]} ${y}` : ym;
-}
-
 // "06:30" (+10 min) → "6:40 AM"
 function clock(hhmm: string, addMin = 0): string | null {
   const [h, m] = hhmm.split(":").map(Number);
@@ -50,9 +44,8 @@ function clock(hhmm: string, addMin = 0): string | null {
   return `${hh % 12 === 0 ? 12 : hh % 12}:${String(mm).padStart(2, "0")} ${hh < 12 ? "AM" : "PM"}`;
 }
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
 export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle }> = ({ data, style }) => {
+  const c = useCardText();
   const need = Math.max(0, data.min_days - data.good_days);
   const pct = data.min_days ? Math.round(Math.min(1, data.good_days / data.min_days) * 100) : 0;
   const minGross = data.min_gross ?? 0;
@@ -71,40 +64,38 @@ export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle
   let status: string;
   if (data.paid) {
     tone = "done";
-    status = "Bonus paid for this month.";
+    status = c.att_paid;
   } else if (data.qualified) {
     tone = "done";
-    status = "You've qualified. The office pays this bonus after the month ends.";
+    status = c.att_qualified;
   } else if (outOfTime) {
     tone = "warn";
-    status = `Out of reach this month: ${plural(need, "more day")} needed, ${plural(daysLeft!, "day")} left. A new count starts next month.`;
+    status = c.att_out_of_reach(need, daysLeft!);
   } else if (need > 0) {
-    status =
-      `${plural(need, "more counted day")} needed` +
-      (daysLeft != null ? ` · ${plural(daysLeft, "day")} left this month` : "");
+    status = c.att_need(need) + (daysLeft != null ? c.att_left(daysLeft) : "");
   } else {
     // Enough days, but the monthly earnings floor isn't met yet.
-    status = grossShort > 0 ? `Days done. Earn ${formatINR(grossShort)} more this month to qualify.` : "Days done.";
+    status = grossShort > 0 ? c.att_days_done_gross(formatINR(grossShort)) : c.att_days_done;
   }
 
   return (
     <Card testID="rewards-attendance-card" style={style}>
       <View style={styles.head}>
-        <Text style={styles.title}>Attendance bonus 📅</Text>
-        <Text style={styles.hint}>{monthLabel(data.month)}</Text>
+        <Text style={styles.title}>{c.att_title}</Text>
+        <Text style={styles.hint}>{c.att_month(data.month)}</Text>
       </View>
 
       {/* Where the driver stands */}
       <View style={styles.summary}>
         <View style={styles.summaryCol}>
-          <Text style={styles.kicker}>COUNTED DAYS</Text>
+          <Text style={styles.kicker}>{c.att_counted_days}</Text>
           <Text style={styles.hero} testID="attendance-days">
             {data.good_days}
             <Text style={styles.heroOf}> / {data.min_days}</Text>
           </Text>
         </View>
         <View style={[styles.summaryCol, styles.summaryRight]}>
-          <Text style={styles.kicker}>BONUS</Text>
+          <Text style={styles.kicker}>{c.att_bonus}</Text>
           <Text style={[styles.hero, data.qualified ? styles.heroLive : null]} testID="attendance-bonus">
             +{formatINR(data.bonus)}
           </Text>
@@ -126,39 +117,36 @@ export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle
       </Text>
 
       {/* The rules, in plain words */}
-      <Text style={styles.section}>A DAY COUNTS WHEN YOU</Text>
-      <Rule n={1} text={`Earn ${formatINR(data.daily_target)} or more in fares that day`} />
+      <Text style={styles.section}>{c.att_day_counts}</Text>
+      <Rule n={1} text={c.att_rule_earn(formatINR(data.daily_target))} />
       {data.require_ontime ? (
         shiftMissing ? (
           <Rule
             n={2}
             warn
-            text="Start duty on time. Your hub hasn't set your shift time yet. Ask your hub to set it, or your days may not be counted."
+            text={c.att_rule_no_shift}
           />
         ) : cutoff ? (
           <Rule
             n={2}
-            text={
-              `Start duty by ${cutoff}` +
-              (grace > 0 ? ` (your ${shift} shift + ${grace} min)` : " (your shift time)")
-            }
+            text={c.att_rule_start_by(cutoff, shift, grace)}
           />
         ) : (
-          <Rule n={2} text={`Start duty on time${grace > 0 ? ` (within ${grace} min of your shift)` : ""}`} />
+          <Rule n={2} text={c.att_rule_on_time(grace)} />
         )
       ) : null}
 
-      <Text style={styles.section}>TO GET THE BONUS</Text>
-      <Rule check={data.good_days >= data.min_days} text={`Reach ${plural(data.min_days, "counted day")} this month`} />
+      <Text style={styles.section}>{c.att_to_get_bonus}</Text>
+      <Rule check={data.good_days >= data.min_days} text={c.att_rule_days(data.min_days)} />
       {minGross > 0 ? (
         <Rule
           check={monthGross >= minGross}
-          text={`Earn ${formatINR(minGross)} in fares this month (you're at ${formatINR(monthGross)})`}
+          text={c.att_rule_month_gross(formatINR(minGross), formatINR(monthGross))}
         />
       ) : null}
 
       <Text style={styles.note}>
-        Yesterday&apos;s day is added once the office enters your earnings. The bonus is on top of your share and is paid by the office.
+        {c.att_note}
       </Text>
     </Card>
   );

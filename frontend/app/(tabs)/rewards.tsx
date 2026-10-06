@@ -8,6 +8,7 @@ import { AttendanceCard, AttendanceState } from "@/src/components/AttendanceCard
 import { LoyaltyMilestonesCard, LoyaltyState } from "@/src/components/LoyaltyMilestonesCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { colors, fonts, spacing } from "@/src/theme";
 
 interface RewardTier {
@@ -37,6 +38,7 @@ interface Loyalty {
 
 export default function RewardsTab() {
   const { t } = useI18n();
+  const c = useCardText();
   const [rewards, setRewards] = useState<Rewards | null>(null);
   const [loyalty, setLoyalty] = useState<Loyalty | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -77,23 +79,23 @@ export default function RewardsTab() {
       >
         <Card testID="rewards-week-card">
           <View style={styles.head}>
-            <Text style={styles.cardTitle}>This week 🏆</Text>
-            <Text style={styles.hint}>on top of your 30%</Text>
+            <Text style={styles.cardTitle}>{c.this_week}</Text>
+            <Text style={styles.hint}>{c.on_top_30}</Text>
           </View>
           <View style={styles.daysRow} testID="reward-days">
-            <Text style={styles.daysLabel}>Days operated</Text>
+            <Text style={styles.daysLabel}>{c.days_operated}</Text>
             <Text style={[styles.daysValue, allDays ? { color: colors.live } : null]}>
               {rewards?.days_operated ?? 0} / {rewards?.days_required ?? 7}
             </Text>
           </View>
           {rewards ? (
             <>
-              <RewardRow tier={rewards.daily} note="yesterday's earnings" testID="reward-daily" />
-              <RewardRow tier={rewards.top_car_week} note={`this week · all ${rewards.days_required} days needed`} testID="reward-car-week" />
-              <RewardRow tier={rewards.top_driver_week} note="your earnings this week" testID="reward-driver-week" />
+              <RewardRow tier={rewards.daily} label={c.tier_daily} note={c.note_daily} testID="reward-daily" />
+              <RewardRow tier={rewards.top_car_week} label={c.tier_car_week} note={c.note_car_week(rewards.days_required)} testID="reward-car-week" />
+              <RewardRow tier={rewards.top_driver_week} label={c.tier_driver_week} note={c.note_driver_week} testID="reward-driver-week" />
             </>
           ) : (
-            <Text style={styles.hint}>Loading…</Text>
+            <Text style={styles.hint}>{c.loading}</Text>
           )}
         </Card>
 
@@ -104,16 +106,16 @@ export default function RewardsTab() {
         {loyalty?.wallet?.enabled ? (
           <Card testID="rewards-wallet-card" style={{ marginTop: spacing.md }}>
             <View style={styles.head}>
-              <Text style={styles.cardTitle}>Loyalty wallet 💰</Text>
-              <Text style={styles.hint}>grows every day you drive</Text>
+              <Text style={styles.cardTitle}>{c.wallet_title}</Text>
+              <Text style={styles.hint}>{c.wallet_hint}</Text>
             </View>
             <Text style={[styles.hero, { color: colors.live }]}>{formatINR(loyalty.wallet.balance)}</Text>
             <Text style={styles.sub}>
-              {formatINR(loyalty.wallet.daily_accrued)} from {loyalty.wallet.qualifying_days} days
-              {loyalty.wallet.milestone_credit > 0 ? ` + ${formatINR(loyalty.wallet.milestone_credit)} milestones` : ""}
-              {loyalty.wallet.paid > 0 ? ` · ${formatINR(loyalty.wallet.paid)} paid` : ""}
+              {c.wallet_from_days(formatINR(loyalty.wallet.daily_accrued), loyalty.wallet.qualifying_days)}
+              {loyalty.wallet.milestone_credit > 0 ? c.wallet_milestones(formatINR(loyalty.wallet.milestone_credit)) : ""}
+              {loyalty.wallet.paid > 0 ? c.wallet_paid(formatINR(loyalty.wallet.paid)) : ""}
             </Text>
-            <Text style={styles.note}>Earnings milestones land here too. Paid out by the office — you keep it by staying, it's lost if you leave.</Text>
+            <Text style={styles.note}>{c.wallet_note}</Text>
           </Card>
         ) : null}
 
@@ -122,22 +124,22 @@ export default function RewardsTab() {
         ) : null}
 
         <Card testID="rewards-tip-card" style={{ marginTop: spacing.md }}>
-          <Text style={styles.cardTitle}>How to win</Text>
-          <Text style={styles.tip}>• Keep the car running all 7 days.</Text>
-          <Text style={styles.tip}>• Safe driving and good service count for Top Driver.</Text>
-          <Text style={styles.tip}>Rewards are paid on top of your 30% earnings.</Text>
+          <Text style={styles.cardTitle}>{c.how_to_win}</Text>
+          <Text style={styles.tip}>{c.tip_all_days}</Text>
+          <Text style={styles.tip}>{c.tip_safe}</Text>
+          <Text style={styles.tip}>{c.tip_on_top}</Text>
         </Card>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-const RewardRow: React.FC<{ tier: RewardTier; note: string; testID?: string }> = ({ tier, note, testID }) => {
+const RewardRow: React.FC<{ tier: RewardTier; label: string; note: string; testID?: string }> = ({ tier, label, note, testID }) => {
   const pctW = `${Math.round((tier.progress ?? 0) * 100)}%` as const;
   return (
     <View style={styles.reward} testID={testID}>
       <View style={styles.rewardHead}>
-        <Text style={styles.rewardLabel}>{tier.qualified ? "✅ " : ""}{tier.label}</Text>
+        <Text style={styles.rewardLabel}>{tier.qualified ? "✅ " : ""}{label}</Text>
         <Text style={styles.rewardAmount}>+{formatINR(tier.reward)}</Text>
       </View>
       <View style={styles.bar}>

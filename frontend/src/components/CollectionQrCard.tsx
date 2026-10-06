@@ -5,6 +5,7 @@ import { Card } from "./ui";
 import { api } from "@/src/api";
 import { formatINR } from "@/src/i18n";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useCardText } from "@/src/i18n/cards";
 
 interface CollectionQr {
   qr_code_id: string | null;
@@ -32,6 +33,7 @@ function fmtTime(iso: string): string {
 // rider to scan and pay, plus today's running total that updates live as each
 // payment lands (with a "received" flash).
 export const CollectionQrCard: React.FC = () => {
+  const c = useCardText();
   const [qr, setQr] = useState<CollectionQr | null>(null);
   const [loading, setLoading] = useState(true);
   const [full, setFull] = useState(false);
@@ -85,11 +87,11 @@ export const CollectionQrCard: React.FC = () => {
   if (!qr || !qr.image_url) {
     return (
       <Card testID="collection-qr-card">
-        <Text style={styles.title}>Collect payment</Text>
+        <Text style={styles.title}>{c.collect_payment}</Text>
         <Text style={styles.hint}>
           {qr?.enabled === false
-            ? "Not set up yet — ask the office to enable your QR."
-            : "Your QR isn't ready yet. Pull down to refresh."}
+            ? c.qr_not_setup
+            : c.qr_not_ready}
         </Text>
       </Card>
     );
@@ -97,24 +99,24 @@ export const CollectionQrCard: React.FC = () => {
 
   return (
     <Card testID="collection-qr-card">
-      <Text style={styles.title}>Collect payment</Text>
-      <Text style={styles.hint}>Show this to the rider to pay by UPI</Text>
+      <Text style={styles.title}>{c.collect_payment}</Text>
+      <Text style={styles.hint}>{c.show_to_rider}</Text>
       <TouchableOpacity style={styles.qrWrap} onPress={() => setFull(true)} activeOpacity={0.85}>
         <Image source={{ uri: qr.image_url }} style={styles.qr} resizeMode="contain" />
       </TouchableOpacity>
       {qr.code ? <Text style={styles.code}>{qr.code}</Text> : null}
-      <Text style={styles.tapHint}>Tap to enlarge</Text>
+      <Text style={styles.tapHint}>{c.tap_enlarge}</Text>
 
       {received != null ? (
         <View style={styles.flash} testID="collection-received">
-          <Text style={styles.flashText}>✓ Received {formatINR(received)}</Text>
+          <Text style={styles.flashText}>{c.received(formatINR(received))}</Text>
         </View>
       ) : null}
 
       <View style={styles.todayRow}>
-        <Text style={styles.todayLabel}>Collected today</Text>
+        <Text style={styles.todayLabel}>{c.collected_today}</Text>
         <Text style={styles.todayValue} testID="collections-today-total">
-          {formatINR(today?.total ?? 0)} · {today?.count ?? 0} pay{(today?.count ?? 0) === 1 ? "" : "s"}
+          {formatINR(today?.total ?? 0)} · {c.pays(today?.count ?? 0)}
         </Text>
       </View>
       {today && today.items.length > 0 ? (
@@ -127,7 +129,7 @@ export const CollectionQrCard: React.FC = () => {
           ))}
         </View>
       ) : (
-        <Text style={styles.noneYet}>No payments yet today — they appear here the moment a rider pays.</Text>
+        <Text style={styles.noneYet}>{c.no_payments_today}</Text>
       )}
 
       <Modal visible={full} transparent animationType="fade" onRequestClose={() => setFull(false)}>
@@ -135,7 +137,7 @@ export const CollectionQrCard: React.FC = () => {
           <View style={styles.modalCard}>
             <Image source={{ uri: qr.image_url }} style={styles.qrBig} resizeMode="contain" />
             {qr.code ? <Text style={styles.codeBig}>{qr.code}</Text> : null}
-            <Text style={styles.closeHint}>Tap anywhere to close</Text>
+            <Text style={styles.closeHint}>{c.tap_close}</Text>
           </View>
         </Pressable>
       </Modal>

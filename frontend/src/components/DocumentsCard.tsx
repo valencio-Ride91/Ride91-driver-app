@@ -22,6 +22,8 @@ import * as Crypto from "expo-crypto";
 import { api } from "@/src/api";
 import { useSync } from "@/src/sync";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useI18n } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 
 export type DocStatus = "expired" | "expiring_soon" | "ok" | "missing";
 
@@ -55,6 +57,7 @@ function addDaysIso(base: string, days: number): string {
 }
 
 export const DocumentsCard: React.FC = () => {
+  const c = useCardText();
   const [rows, setRows] = useState<DocRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<DocRow | null>(null);
@@ -82,16 +85,16 @@ export const DocumentsCard: React.FC = () => {
   return (
     <View testID="documents-card">
       <View style={styles.rowBetween}>
-        <Text style={styles.h2}>Documents</Text>
+        <Text style={styles.h2}>{c.documents}</Text>
         {attention > 0 ? (
           <View style={[styles.badge, { backgroundColor: "#F5D4CE" }]}>
             <Text style={[styles.badgeText, { color: colors.alert }]}>
-              {attention} need attention
+              {c.docs_attention(attention)}
             </Text>
           </View>
         ) : (
           <View style={[styles.badge, { backgroundColor: "#DCEEE3" }]}>
-            <Text style={[styles.badgeText, { color: colors.live }]}>All valid</Text>
+            <Text style={[styles.badgeText, { color: colors.live }]}>{c.docs_all_valid}</Text>
           </View>
         )}
       </View>
@@ -106,10 +109,10 @@ export const DocumentsCard: React.FC = () => {
             onPress={() => setEditing(r)}
           >
             <View style={{ flex: 1 }}>
-              <Text style={styles.docLabel}>{r.label}</Text>
+              <Text style={styles.docLabel}>{c.doc_label(r.type, r.label)}</Text>
               <Text style={styles.docMeta}>
                 {r.number ? `${r.number} · ` : ""}
-                {r.expires_on ? `expires ${r.expires_on}` : "no expiry on file"}
+                {r.expires_on ? c.doc_expires(r.expires_on) : c.doc_no_expiry}
               </Text>
             </View>
             <View
@@ -117,7 +120,7 @@ export const DocumentsCard: React.FC = () => {
               style={[styles.pill, { backgroundColor: STATUS_META[r.status].bg }]}
             >
               <Text style={[styles.pillText, { color: STATUS_META[r.status].fg }]}>
-                {STATUS_META[r.status].label}
+                {c.doc_status[r.status] ?? STATUS_META[r.status].label}
               </Text>
             </View>
           </TouchableOpacity>
@@ -147,6 +150,8 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
   doc,
   onClose,
 }) => {
+  const { t } = useI18n();
+  const c = useCardText();
   const [number, setNumber] = useState<string>("");
   const [expires, setExpires] = useState<string>("");
   const [imageB64, setImageB64] = useState<string | null>(null);
@@ -165,7 +170,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert("Photo permission needed", "Allow photo library access to upload a document image.");
+        Alert.alert(c.doc_perm_title, c.doc_perm_body);
         return;
       }
       const res = await ImagePicker.launchImageLibraryAsync({
@@ -181,13 +186,13 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
     } catch (e: any) {
       setErr(e?.message ?? "picker_error");
     }
-  }, []);
+  }, [c]);
 
   const save = useCallback(async () => {
     if (!doc) return;
     // Validate YYYY-MM-DD.
     if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
-      setErr("Expiry must be YYYY-MM-DD");
+      setErr(c.doc_expiry_bad);
       return;
     }
     setSaving(true);
@@ -207,7 +212,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
     } finally {
       setSaving(false);
     }
-  }, [doc, number, expires, imageB64, enqueue, onClose]);
+  }, [doc, number, expires, imageB64, enqueue, onClose, c]);
 
   return (
     <Modal
@@ -219,10 +224,10 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
       <Pressable style={styles.sheetBackdrop} onPress={() => onClose(false)}>
         <Pressable style={styles.sheet} onPress={() => undefined}>
           <View style={styles.sheetHandle} />
-          <Text style={styles.sheetTitle}>{doc?.label ?? "Document"}</Text>
+          <Text style={styles.sheetTitle}>{doc ? c.doc_label(doc.type, doc.label) : c.doc_fallback}</Text>
           <Text style={styles.sheetSub}>{doc?.type ?? ""}</Text>
 
-          <Text style={styles.field}>Document number</Text>
+          <Text style={styles.field}>{c.doc_number}</Text>
           <TextInput
             testID="doc-input-number"
             style={styles.input}
@@ -234,7 +239,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
             autoCorrect={false}
           />
 
-          <Text style={styles.field}>Expiry (YYYY-MM-DD)</Text>
+          <Text style={styles.field}>{c.doc_expiry_field}</Text>
           <TextInput
             testID="doc-input-expires"
             style={styles.input}
@@ -265,7 +270,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
             onPress={pickImage}
           >
             <Text style={styles.imgBtnText}>
-              {imageB64 ? "Image chosen · tap to change" : "Attach photo of document"}
+              {imageB64 ? c.doc_image_chosen : c.doc_attach}
             </Text>
           </TouchableOpacity>
 
@@ -282,7 +287,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
               onPress={() => onClose(false)}
               disabled={saving}
             >
-              <Text style={styles.secondaryText}>Cancel</Text>
+              <Text style={styles.secondaryText}>{t.cancel}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               testID="doc-save"
@@ -290,7 +295,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
               onPress={save}
               disabled={saving}
             >
-              <Text style={styles.primaryText}>{saving ? "Saving…" : "Save"}</Text>
+              <Text style={styles.primaryText}>{saving ? c.saving : t.save}</Text>
             </TouchableOpacity>
           </View>
         </Pressable>

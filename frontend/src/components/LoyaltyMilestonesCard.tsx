@@ -10,6 +10,7 @@ import { StyleSheet, Text, View, ViewStyle } from "react-native";
 
 import { Card } from "@/src/components/ui";
 import { formatINR } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 export interface LoyaltyMilestone {
@@ -35,39 +36,31 @@ const LIVE_TINT = "#E3F1EA";
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 
-function tenureText(days: number | null): string | null {
-  if (days == null) return null;
-  if (days < 60) return `${days} days`;
-  if (days < 365) return `${Math.floor(days / 30)} months`;
-  const y = Math.floor(days / 365);
-  const mo = Math.floor((days % 365) / 30);
-  return mo ? `${y}y ${mo}mo` : `${y} year${y > 1 ? "s" : ""}`;
-}
-
 export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewStyle }> = ({ data, style }) => {
+  const c = useCardText();
   const ms = data.milestones ?? [];
   const next = data.next;
   const done = ms.filter((m) => m.vested).length;
   // Older servers don't send `gross`; derive it from the next milestone.
   const earned =
     data.gross ?? (next ? next.amount - next.remaining : ms.length ? ms[ms.length - 1].amount : 0);
-  const tenure = tenureText(data.tenure_days);
+  const tenure = data.tenure_days == null ? null : c.loy_tenure(data.tenure_days);
 
   return (
     <Card testID="rewards-loyalty-card" style={style}>
       <View style={styles.head}>
-        <Text style={styles.title}>Loyalty milestones 🎖️</Text>
-        {tenure ? <Text style={styles.hint}>{tenure} with Ride91</Text> : null}
+        <Text style={styles.title}>{c.loy_title}</Text>
+        {tenure ? <Text style={styles.hint}>{c.loy_with_ride91(tenure)}</Text> : null}
       </View>
 
       {/* Where the driver stands */}
       <View style={styles.summary}>
         <View style={styles.summaryCol}>
-          <Text style={styles.kicker}>TOTAL EARNED</Text>
+          <Text style={styles.kicker}>{c.loy_total_earned}</Text>
           <Text style={styles.hero} testID="loyalty-earned" numberOfLines={1} adjustsFontSizeToFit>{formatINR(earned)}</Text>
         </View>
         <View style={[styles.summaryCol, styles.summaryRight]}>
-          <Text style={styles.kicker}>BONUS UNLOCKED</Text>
+          <Text style={styles.kicker}>{c.loy_bonus_unlocked}</Text>
           <Text style={[styles.hero, styles.heroLive]} testID="loyalty-unlocked" numberOfLines={1} adjustsFontSizeToFit>
             +{formatINR(data.vested_total ?? 0)}
           </Text>
@@ -75,13 +68,13 @@ export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewS
       </View>
       {ms.length ? (
         <Text style={styles.count}>
-          {done} of {ms.length} milestone{ms.length === 1 ? "" : "s"} reached
+          {c.loy_reached(done, ms.length)}
         </Text>
       ) : null}
 
       {/* The ladder */}
       {ms.length === 0 ? (
-        <Text style={styles.empty}>No milestones have been set yet.</Text>
+        <Text style={styles.empty}>{c.loy_none}</Text>
       ) : (
         <View style={styles.ladder}>
           {ms.map((m, i) => {
@@ -121,7 +114,7 @@ export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewS
                   ]}
                 >
                   <View style={styles.rowHead}>
-                    <Text style={[styles.label, !m.reached && !isNext ? styles.labelAhead : null]}>{m.label}</Text>
+                    <Text style={[styles.label, !m.reached && !isNext ? styles.labelAhead : null]}>{c.loy_label(m.label, formatINR(m.amount))}</Text>
                     <Text
                       style={[
                         styles.reward,
@@ -135,21 +128,21 @@ export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewS
                   </View>
 
                   {m.vested ? (
-                    <Text style={[styles.status, styles.statusDone]}>Unlocked · added to your wallet</Text>
+                    <Text style={[styles.status, styles.statusDone]}>{c.loy_unlocked}</Text>
                   ) : m.forfeited ? (
-                    <Text style={[styles.status, styles.statusLost]}>Reached, but lost on leaving</Text>
+                    <Text style={[styles.status, styles.statusLost]}>{c.loy_lost}</Text>
                   ) : isNext ? (
                     <>
                       <View style={styles.bar}>
                         <View style={[styles.barFill, { width: `${pct}%` as const }]} />
                       </View>
                       <View style={styles.nextFoot}>
-                        <Text style={styles.toGo}>{formatINR(next!.remaining)} to go</Text>
+                        <Text style={styles.toGo}>{c.loy_to_go(formatINR(next!.remaining))}</Text>
                         <Text style={styles.pct}>{pct}%</Text>
                       </View>
                     </>
                   ) : (
-                    <Text style={styles.status}>Unlocks at {formatINR(m.amount)} earned</Text>
+                    <Text style={styles.status}>{c.loy_unlocks_at(formatINR(m.amount))}</Text>
                   )}
                 </View>
               </View>
@@ -159,11 +152,11 @@ export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewS
       )}
 
       {ms.length > 0 && !next && done === ms.length ? (
-        <Text style={styles.allDone}>You&apos;ve reached every milestone. Thank you!</Text>
+        <Text style={styles.allDone}>{c.loy_all_done}</Text>
       ) : null}
 
       <Text style={styles.note}>
-        Bonuses land in your loyalty wallet and are paid by the office. Milestones unlock only while you&apos;re active.
+        {c.loy_note}
       </Text>
     </Card>
   );
