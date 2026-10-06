@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
+import { LoyaltyMilestonesCard, LoyaltyState } from "@/src/components/LoyaltyMilestonesCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
 import { colors, fonts, spacing } from "@/src/theme";
@@ -26,28 +27,12 @@ interface Rewards {
   top_car_week: RewardTier;
   top_driver_week: RewardTier;
 }
-interface LoyaltyMilestone { key: string; label: string; reward: number; amount: number; reached: boolean; vested: boolean; forfeited: boolean; }
 interface Loyalty {
   year: string;
-  loyalty: {
-    tenure_days: number | null;
-    active: boolean;
-    milestones: LoyaltyMilestone[];
-    next: { key: string; label: string; reward: number; amount: number; remaining: number; progress: number } | null;
-    vested_total: number;
-  };
+  loyalty: LoyaltyState;
   wallet?: { enabled: boolean; per_day: number; qualifying_days: number; daily_accrued: number; milestone_credit: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
   attendance?: { enabled: boolean; month: string; good_days: number; min_days: number; bonus: number; qualified: boolean; require_ontime: boolean; daily_target: number; paid: boolean };
   yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
-}
-
-function tenureText(days: number | null): string {
-  if (days == null) return "—";
-  if (days < 60) return `${days} days`;
-  if (days < 365) return `${Math.floor(days / 30)} months`;
-  const y = Math.floor(days / 365);
-  const mo = Math.floor((days % 365) / 30);
-  return mo ? `${y}y ${mo}mo` : `${y} year${y > 1 ? "s" : ""}`;
 }
 
 export default function RewardsTab() {
@@ -151,38 +136,7 @@ export default function RewardsTab() {
         ) : null}
 
         {loyalty ? (
-          <Card testID="rewards-loyalty-card" style={{ marginTop: spacing.md }}>
-            <View style={styles.head}>
-              <Text style={styles.cardTitle}>Loyalty milestones 🎖️</Text>
-              <Text style={styles.hint}>{tenureText(loyalty.loyalty.tenure_days)} with Ride91</Text>
-            </View>
-            <Text style={styles.note}>Each milestone's bonus lands in your loyalty wallet above.</Text>
-            {loyalty.loyalty.next ? (
-              <View style={styles.reward}>
-                <View style={styles.rewardHead}>
-                  <Text style={styles.rewardLabel}>Next: {loyalty.loyalty.next.label}</Text>
-                  <Text style={styles.rewardAmount}>+{formatINR(loyalty.loyalty.next.reward)}</Text>
-                </View>
-                <View style={styles.bar}>
-                  <View style={[styles.barFill, { width: `${Math.round(loyalty.loyalty.next.progress * 100)}%` as const, backgroundColor: colors.amber }]} />
-                </View>
-                <View style={styles.rewardFoot}>
-                  <Text style={styles.rewardProgress}>{formatINR(loyalty.loyalty.next.remaining)} more to go</Text>
-                  <Text style={styles.rewardNote}>keep driving to unlock</Text>
-                </View>
-              </View>
-            ) : (
-              <Text style={styles.tip}>✅ You've reached every loyalty milestone. Thank you!</Text>
-            )}
-            <View style={styles.chips}>
-              {loyalty.loyalty.milestones.map((m) => (
-                <Text key={m.key} style={[styles.chip, m.vested ? styles.chipDone : m.forfeited ? styles.chipOff : styles.chipPending]}>
-                  {m.vested ? "✓ " : ""}{m.label}
-                </Text>
-              ))}
-            </View>
-            <Text style={styles.note}>Milestones unlock only while you're active — they're paid by the office.</Text>
-          </Card>
+          <LoyaltyMilestonesCard data={loyalty.loyalty} style={{ marginTop: spacing.md }} />
         ) : null}
 
         {loyalty ? (
@@ -259,10 +213,5 @@ const styles = StyleSheet.create({
   rewardProgress: { fontFamily: fonts.data, fontSize: 12, color: colors.ink },
   rewardNote: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted },
   tip: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink, paddingVertical: 3 },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: spacing.sm },
-  chip: { fontFamily: fonts.uiMed, fontSize: 12, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, overflow: "hidden" },
-  chipDone: { backgroundColor: "#dcfce7", color: "#166534" },
-  chipPending: { backgroundColor: colors.line, color: colors.muted },
-  chipOff: { backgroundColor: "#fee2e2", color: "#991b1b" },
   note: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: spacing.sm },
 });
