@@ -11,6 +11,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useAuth } from "@/src/auth";
 import { useShiftAlarm } from "@/src/shift-alarms";
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { useCardText } from "@/src/i18n/cards";
 
 const REASONS: { code: string; label: string }[] = [
   { code: "unwell", label: "Unwell" },
@@ -30,6 +31,7 @@ export default function AlarmScreen() {
   }>();
   const router = useRouter();
   const { driver } = useAuth();
+  const c = useCardText();
   const { submitAlarmResponse, refresh, endEta } = useShiftAlarm();
 
   const phase: "start" | "end" = params.phase === "end" ? "end" : "start";
@@ -40,7 +42,7 @@ export default function AlarmScreen() {
   const scheduleId = params.scheduleId ?? `local-${firedAt}`;
   const title =
     params.title ??
-    (phase === "end" ? "Shift ends soon — head back to hub" : "Shift starts in 1 hour");
+    (phase === "end" ? c.alarm_title_end : c.alarm_title_start);
 
   const [mode, setMode] = useState<"choose" | "reason">("choose");
   const [reasonPickerOpen, setReasonPickerOpen] = useState(false);
@@ -84,34 +86,34 @@ export default function AlarmScreen() {
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.body}>
         <Text style={styles.kicker}>
-          RIDE91 · {phase === "end" ? "SHIFT END ALARM" : "SHIFT ALARM"}
+          RIDE91 · {phase === "end" ? c.alarm_kicker_end : c.alarm_kicker_start}
         </Text>
         <Text style={styles.title} testID="alarm-title">
           {title}
         </Text>
-        {driver?.name ? <Text style={styles.driver}>Hi {driver.name}</Text> : null}
+        {driver?.name ? <Text style={styles.driver}>{c.alarm_hi(driver.name)}</Text> : null}
 
         {phase === "end" && endEta?.has_hub ? (
           <View style={styles.etaStrip} testID="alarm-eta-strip">
             <View style={styles.etaCol}>
-              <Text style={styles.etaLabel}>Distance</Text>
+              <Text style={styles.etaLabel}>{c.alarm_distance}</Text>
               <Text style={styles.etaValue}>
-                {(endEta.distance_km ?? 0).toFixed(1)} km
+                {c.km((endEta.distance_km ?? 0).toFixed(1))}
               </Text>
             </View>
             <View style={styles.etaCol}>
-              <Text style={styles.etaLabel}>ETA to hub</Text>
-              <Text style={styles.etaValue}>{Math.max(0, Math.round(endEta.eta_minutes ?? 0))} min</Text>
+              <Text style={styles.etaLabel}>{c.alarm_eta_to_hub}</Text>
+              <Text style={styles.etaValue}>{c.eta_min(Math.max(0, Math.round(endEta.eta_minutes ?? 0)))}</Text>
             </View>
             <View style={styles.etaCol}>
-              <Text style={styles.etaLabel}>Shift ends</Text>
-              <Text style={styles.etaValue}>{Math.max(0, Math.round(endEta.remaining_minutes ?? 0))} min</Text>
+              <Text style={styles.etaLabel}>{c.shift_ends}</Text>
+              <Text style={styles.etaValue}>{c.eta_min(Math.max(0, Math.round(endEta.remaining_minutes ?? 0)))}</Text>
             </View>
           </View>
         ) : null}
 
         {snoozed ? (
-          <Text style={styles.snoozeMsg}>Snoozed — we&apos;ll ring again in 10 minutes.</Text>
+          <Text style={styles.snoozeMsg}>{c.alarm_snoozed}</Text>
         ) : mode === "choose" ? (
           phase === "end" ? (
             <View style={styles.actions}>
@@ -121,7 +123,7 @@ export default function AlarmScreen() {
                 onPress={() => respond("heading_back")}
                 disabled={submitting}
               >
-                <Text style={styles.primaryText}>Heading back to hub now</Text>
+                <Text style={styles.primaryText}>{c.alarm_heading_back}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-delayed"
@@ -129,7 +131,7 @@ export default function AlarmScreen() {
                 onPress={() => respond("delayed")}
                 disabled={submitting}
               >
-                <Text style={styles.warnText}>Running late — inform dispatch</Text>
+                <Text style={styles.warnText}>{c.alarm_running_late}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-snooze"
@@ -137,7 +139,7 @@ export default function AlarmScreen() {
                 onPress={() => respond("snooze")}
                 disabled={submitting}
               >
-                <Text style={styles.ghostText}>Snooze 10 minutes (once)</Text>
+                <Text style={styles.ghostText}>{c.alarm_snooze}</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -148,7 +150,7 @@ export default function AlarmScreen() {
                 onPress={() => respond("awake")}
                 disabled={submitting}
               >
-                <Text style={styles.primaryText}>Awake and coming for duty</Text>
+                <Text style={styles.primaryText}>{c.alarm_awake}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-not-coming"
@@ -156,7 +158,7 @@ export default function AlarmScreen() {
                 onPress={() => setMode("reason")}
                 disabled={submitting}
               >
-                <Text style={styles.dangerText}>Not coming</Text>
+                <Text style={styles.dangerText}>{c.alarm_not_coming}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-snooze"
@@ -164,20 +166,20 @@ export default function AlarmScreen() {
                 onPress={() => respond("snooze")}
                 disabled={submitting}
               >
-                <Text style={styles.ghostText}>Snooze 10 minutes (once)</Text>
+                <Text style={styles.ghostText}>{c.alarm_snooze}</Text>
               </TouchableOpacity>
             </View>
           )
         ) : (
           <View style={styles.actions}>
-            <Text style={styles.reasonLabel}>Reason (required)</Text>
+            <Text style={styles.reasonLabel}>{c.alarm_reason_required}</Text>
             <TouchableOpacity
               testID="alarm-reason-btn"
               style={styles.select}
               onPress={() => setReasonPickerOpen(true)}
             >
               <Text style={styles.selectText}>
-                {REASONS.find((r) => r.code === reasonCode)?.label ?? "Choose reason"}
+                {c.alarm_reasons[reasonCode] ?? c.alarm_choose_reason}
               </Text>
               <Text style={styles.selectCaret}>▾</Text>
             </TouchableOpacity>
@@ -187,7 +189,7 @@ export default function AlarmScreen() {
               onPress={() => respond("not_coming", reasonCode)}
               disabled={submitting}
             >
-              <Text style={styles.primaryText}>Confirm — not coming</Text>
+              <Text style={styles.primaryText}>{c.alarm_confirm_not_coming}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               testID="alarm-back"
@@ -195,7 +197,7 @@ export default function AlarmScreen() {
               onPress={() => setMode("choose")}
               disabled={submitting}
             >
-              <Text style={styles.ghostText}>Back</Text>
+              <Text style={styles.ghostText}>{c.back}</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -209,7 +211,7 @@ export default function AlarmScreen() {
       >
         <Pressable style={styles.sheetBackdrop} onPress={() => setReasonPickerOpen(false)}>
           <Pressable style={styles.sheet} onPress={() => undefined}>
-            <Text style={styles.sheetTitle}>Choose reason</Text>
+            <Text style={styles.sheetTitle}>{c.alarm_choose_reason}</Text>
             {REASONS.map((r) => (
               <TouchableOpacity
                 key={r.code}
@@ -221,7 +223,7 @@ export default function AlarmScreen() {
                 }}
               >
                 <View style={[styles.radio, r.code === reasonCode ? styles.radioOn : null]} />
-                <Text style={styles.sheetRowText}>{r.label}</Text>
+                <Text style={styles.sheetRowText}>{c.alarm_reasons[r.code] ?? r.label}</Text>
               </TouchableOpacity>
             ))}
           </Pressable>

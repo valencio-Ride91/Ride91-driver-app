@@ -343,7 +343,7 @@ export default function Home() {
           <StatCol
             testID="stat-distance"
             label={t.distance}
-            value={`${(today?.distance_km ?? 0).toFixed(1)} km`}
+            value={c.km((today?.distance_km ?? 0).toFixed(1))}
           />
           {vehicle?.current_soc != null ? (
             <>
@@ -358,7 +358,7 @@ export default function Home() {
                 label={t.range}
                 value={
                   vehicle.current_range_km != null
-                    ? `${vehicle.current_range_km} km`
+                    ? c.km(String(vehicle.current_range_km))
                     : "—"
                 }
               />

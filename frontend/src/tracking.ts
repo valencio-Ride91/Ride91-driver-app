@@ -18,6 +18,7 @@ import NetInfo from "@react-native-community/netinfo";
 
 import { api } from "@/src/api";
 import { LOCATION_TASK } from "@/src/locationTask";
+import { getCardText } from "@/src/i18n/cards";
 
 export type HealthState = "synced" | "no_network" | "location_off" | "service_killed";
 
@@ -125,8 +126,8 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
         pausesUpdatesAutomatically: false,
         showsBackgroundLocationIndicator: true,
         foregroundService: {
-          notificationTitle: "Ride91 — on duty",
-          notificationBody: "Sharing your location with the fleet.",
+          notificationTitle: getCardText().track_title,
+          notificationBody: getCardText().track_body,
           notificationColor: "#10231C",
         },
       });

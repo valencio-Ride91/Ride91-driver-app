@@ -112,9 +112,9 @@ export default function Profile() {
   const onTestNative = useCallback(
     async (phase: "start" | "end") => {
       await testFireNow({ phase });
-      showToast(`Native ${phase} alarm fired (check lock screen)`);
+      showToast(c.alarm_test_fired(phase));
     },
-    [testFireNow],
+    [testFireNow, c],
   );
 
   const onPreviewUi = useCallback(
@@ -126,15 +126,15 @@ export default function Profile() {
           phase,
           title:
             phase === "end"
-              ? "Shift ends soon — head back to hub"
+              ? c.alarm_title_end
               : next?.shift_type === "night"
-                ? "Night shift starts in 1 hour"
-                : "Shift starts in 1 hour",
+                ? c.alarm_title_start_night
+                : c.alarm_title_start,
           firedAt: String(Date.now()),
         },
       });
     },
-    [next, router],
+    [next, router, c],
   );
 
   const hubText =
@@ -192,7 +192,7 @@ export default function Profile() {
           <Text style={styles.sub}>
             {nativeAvailable
               ? c.alarm_sub
-              : "Native alarm needs the production build. Use Preview to test the UI on web / Expo Go."}
+              : c.alarm_preview_sub}
           </Text>
 
           {hubSet ? (
@@ -227,7 +227,7 @@ export default function Profile() {
               <View style={styles.kv}>
                 <Text style={styles.k}>{c.distance_to_hub}</Text>
                 <Text style={styles.v} testID="alarm-distance">
-                  {(endEta.distance_km ?? 0).toFixed(2)} km
+                  {c.km((endEta.distance_km ?? 0).toFixed(2))}
                 </Text>
               </View>
               <View style={styles.kv}>
@@ -282,14 +282,14 @@ export default function Profile() {
                 style={styles.secondary}
                 onPress={() => onPreviewUi("start")}
               >
-                <Text style={styles.secondaryText}>Preview start UI</Text>
+                <Text style={styles.secondaryText}>{c.alarm_preview_start}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-preview-end-btn"
                 style={styles.secondary}
                 onPress={() => onPreviewUi("end")}
               >
-                <Text style={styles.secondaryText}>Preview end UI</Text>
+                <Text style={styles.secondaryText}>{c.alarm_preview_end}</Text>
               </TouchableOpacity>
             </View>
             <View style={styles.actionsRow}>
@@ -299,7 +299,7 @@ export default function Profile() {
                 onPress={() => onTestNative("start")}
                 disabled={!nativeAvailable}
               >
-                <Text style={styles.secondaryText}>Fire native · start</Text>
+                <Text style={styles.secondaryText}>{c.alarm_fire_start}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 testID="alarm-test-native-end-btn"
@@ -307,7 +307,7 @@ export default function Profile() {
                 onPress={() => onTestNative("end")}
                 disabled={!nativeAvailable}
               >
-                <Text style={styles.secondaryText}>Fire native · end</Text>
+                <Text style={styles.secondaryText}>{c.alarm_fire_end}</Text>
               </TouchableOpacity>
             </View>
             <TouchableOpacity

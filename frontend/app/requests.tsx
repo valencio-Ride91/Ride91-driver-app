@@ -16,6 +16,7 @@ import { useRouter } from "expo-router";
 import { BottomSheet, Card } from "@/src/components/ui";
 import { api } from "@/src/api";
 import { useI18n, formatINR, formatIST, formatISTDate } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { useSync } from "@/src/sync";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -38,6 +39,7 @@ const stateColor: Record<RequestRow["state"], string> = {
 
 export default function Requests() {
   const { t } = useI18n();
+  const c = useCardText();
   const router = useRouter();
   const { enqueue } = useSync();
   const [items, setItems] = useState<RequestRow[]>([]);
@@ -127,7 +129,7 @@ export default function Requests() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
         {items.length === 0 ? (
-          <Text style={styles.empty}>No requests yet.</Text>
+          <Text style={styles.empty}>{c.no_requests}</Text>
         ) : (
           items.map((r) => (
             <Card key={r.id} testID={`request-${r.id}`} style={{ marginBottom: spacing.sm }}>

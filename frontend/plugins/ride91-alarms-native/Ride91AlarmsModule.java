@@ -28,6 +28,8 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
     static final String EXTRA_SCHEDULE_ID = "scheduleId";
     static final String EXTRA_DRIVER_ID = "driverId";
     static final String EXTRA_TITLE = "title";
+    // "hi" when the driver uses the app in Hindi; the alarm screen follows it.
+    static final String EXTRA_LANG = "lang";
     static final String EVENT_RESPONSE = "Ride91AlarmResponse";
 
     private static ReactApplicationContext currentReactContext;
@@ -57,11 +59,12 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
                 .emit(EVENT_RESPONSE, m);
     }
 
-    private static PendingIntent pending(Context ctx, String scheduleId, String driverId, String title) {
+    private static PendingIntent pending(Context ctx, String scheduleId, String driverId, String title, String lang) {
         Intent i = new Intent(ctx, AlarmReceiver.class);
         i.putExtra(EXTRA_SCHEDULE_ID, scheduleId);
         i.putExtra(EXTRA_DRIVER_ID, driverId);
         i.putExtra(EXTRA_TITLE, title);
+        i.putExtra(EXTRA_LANG, lang);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags |= PendingIntent.FLAG_IMMUTABLE;
         return PendingIntent.getBroadcast(ctx, scheduleId.hashCode(), i, flags);
@@ -75,7 +78,8 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
             String scheduleId = meta.hasKey("scheduleId") ? meta.getString("scheduleId") : "default";
             String driverId = meta.hasKey("driverId") ? meta.getString("driverId") : "";
             String title = meta.hasKey("title") ? meta.getString("title") : "Shift starts in 1 hour";
-            PendingIntent pi = pending(ctx, scheduleId, driverId, title);
+            String lang = meta.hasKey("lang") ? meta.getString("lang") : "en";
+            PendingIntent pi = pending(ctx, scheduleId, driverId, title, lang);
             AlarmManager.AlarmClockInfo info = new AlarmManager.AlarmClockInfo((long) atMs, pi);
             am.setAlarmClock(info, pi);
             promise.resolve(scheduleId);
@@ -89,7 +93,7 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
         try {
             Context ctx = getReactApplicationContext();
             AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
-            am.cancel(pending(ctx, scheduleId, "", ""));
+            am.cancel(pending(ctx, scheduleId, "", "", "en"));
             promise.resolve(true);
         } catch (Throwable t) {
             promise.reject("cancel_failed", t.getMessage(), t);
@@ -104,6 +108,7 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
             i.putExtra(EXTRA_SCHEDULE_ID, meta.hasKey("scheduleId") ? meta.getString("scheduleId") : "test");
             i.putExtra(EXTRA_DRIVER_ID, meta.hasKey("driverId") ? meta.getString("driverId") : "");
             i.putExtra(EXTRA_TITLE, meta.hasKey("title") ? meta.getString("title") : "Test alarm");
+            i.putExtra(EXTRA_LANG, meta.hasKey("lang") ? meta.getString("lang") : "en");
             ctx.sendBroadcast(i);
             promise.resolve(true);
         } catch (Throwable t) {

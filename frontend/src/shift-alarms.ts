@@ -23,6 +23,7 @@ import { useAuth } from "@/src/auth";
 import { useSync } from "@/src/sync";
 import { useTracking } from "@/src/tracking";
 import { alarms, AlarmResponse, alarmsAvailable } from "@/src/alarms";
+import { getCardText } from "@/src/i18n/cards";
 
 export interface ShiftSchedule {
   id: string;
@@ -127,7 +128,7 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
         atMs,
         scheduleId: `${eta.schedule_id}-end`,
         driverId: driver?.id ?? "",
-        title: "Shift ends soon — head back to hub",
+        title: getCardText().alarm_title_end,
       });
       lastEndArmedAtRef.current = atMs;
     },
@@ -151,8 +152,8 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
               driverId: parsed.driver_id,
               title:
                 parsed.shift_type === "night"
-                  ? "Night shift starts in 1 hour"
-                  : "Shift starts in 1 hour",
+                  ? getCardText().alarm_title_start_night
+                  : getCardText().alarm_title_start,
             });
           }
         }
@@ -238,8 +239,8 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
             driverId: row.driver_id,
             title:
               row.shift_type === "night"
-                ? "Night shift starts in 1 hour"
-                : "Shift starts in 1 hour",
+                ? getCardText().alarm_title_start_night
+                : getCardText().alarm_title_start,
           });
         }
         // Kick a refresh so ETA-side gets computed and end alarm gets armed.
@@ -263,8 +264,8 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
           driverId: driver.id,
           title:
             phase === "end"
-              ? "TEST · Shift ends soon — head back to hub"
-              : "TEST · Shift starts in 1 hour",
+              ? getCardText().alarm_test_prefix + getCardText().alarm_title_end
+              : getCardText().alarm_test_prefix + getCardText().alarm_title_start,
         });
       }
     },

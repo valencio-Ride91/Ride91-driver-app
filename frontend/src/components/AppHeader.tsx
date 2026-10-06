@@ -6,6 +6,7 @@ import { useRouter } from "expo-router";
 
 import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useI18n, Lang } from "@/src/i18n";
+import { useCardText, CardText } from "@/src/i18n/cards";
 import { useSync } from "@/src/sync";
 import { useTracking } from "@/src/tracking";
 import { useAuth } from "@/src/auth";
@@ -21,14 +22,15 @@ const singleStatus = (
   permissionOk: boolean,
   unsynced: number,
   t: ReturnType<typeof useI18n>["t"],
+  c: CardText,
 ): { bg: string; fg: string; label: string; testID: string } => {
   if (!permissionOk) return { bg: colors.alert, fg: colors.white, label: t.health_location, testID: "status-gps-off" };
   if (!online && unsynced > 0)
-    return { bg: colors.muted, fg: colors.white, label: `On phone ${unsynced}`, testID: "status-on-phone" };
+    return { bg: colors.muted, fg: colors.white, label: c.on_phone(unsynced), testID: "status-on-phone" };
   if (!online)
     return { bg: colors.muted, fg: colors.white, label: t.health_offline, testID: "status-offline" };
   if (unsynced > 0)
-    return { bg: colors.amber, fg: colors.ink, label: `Saving ${unsynced}`, testID: "status-saving" };
+    return { bg: colors.amber, fg: colors.ink, label: c.saving_n(unsynced), testID: "status-saving" };
   return { bg: colors.live, fg: colors.white, label: t.health_synced, testID: "status-synced" };
 };
 
@@ -38,13 +40,14 @@ interface Props {
 
 export const AppHeader: React.FC<Props> = ({ title }) => {
   const { lang, setLang, t } = useI18n();
+  const c = useCardText();
   const { unsynced, online } = useSync();
   const { permissionOk, requestPermission } = useTracking();
   const { driver } = useAuth();
   const router = useRouter();
   const [langOpen, setLangOpen] = useState(false);
   const [unread, setUnread] = useState(0);
-  const status = singleStatus(online, permissionOk, unsynced, t);
+  const status = singleStatus(online, permissionOk, unsynced, t, c);
 
   useEffect(() => {
     if (!driver) return;

@@ -16,6 +16,9 @@
 
 import { EmitterSubscription, NativeEventEmitter, NativeModules, Platform } from "react-native";
 
+import { getLang } from "@/src/i18n";
+import { getCardText } from "@/src/i18n/cards";
+
 const RN = NativeModules.Ride91Alarms as
   | {
       schedule: (atMs: number, meta: Record<string, string>) => Promise<string>;
@@ -60,7 +63,8 @@ export const alarms = {
     return RN.schedule(meta.atMs, {
       scheduleId: meta.scheduleId,
       driverId: meta.driverId,
-      title: meta.title ?? "Shift starts in 1 hour",
+      title: meta.title ?? getCardText().alarm_title_start,
+      lang: getLang(),
     });
   },
 
@@ -79,7 +83,8 @@ export const alarms = {
       return await RN.fireNow({
         scheduleId: meta.scheduleId,
         driverId: meta.driverId,
-        title: meta.title ?? "Shift starts in 1 hour",
+        title: meta.title ?? getCardText().alarm_title_start,
+      lang: getLang(),
       });
     } catch {
       return false;

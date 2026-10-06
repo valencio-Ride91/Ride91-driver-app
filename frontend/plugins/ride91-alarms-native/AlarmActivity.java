@@ -27,6 +27,11 @@ public class AlarmActivity extends Activity {
             "Unwell", "Family emergency", "Vehicle problem",
             "Transport problem", "Personal", "Other"
     };
+    // Hindi (same order as REASON_CODES), shown when the app language is Hindi.
+    private static final String[] REASON_LABELS_HI = {
+            "\u0924\u092c\u0940\u092f\u0924 \u0920\u0940\u0915 \u0928\u0939\u0940\u0902", "\u0918\u0930 \u092e\u0947\u0902 \u0907\u092e\u0930\u091c\u0947\u0902\u0938\u0940", "\u0917\u093e\u0921\u093c\u0940 \u092e\u0947\u0902 \u0926\u093f\u0915\u093c\u094d\u0915\u093c\u0924",
+            "\u0906\u0928\u0947 \u0915\u093e \u0938\u093e\u0927\u0928 \u0928\u0939\u0940\u0902", "\u0928\u093f\u091c\u0940 \u0915\u093e\u0930\u0923", "\u0905\u0928\u094d\u092f"
+    };
     private static final long SNOOZE_MS = 10 * 60 * 1000L;
 
     private String scheduleId;
@@ -57,12 +62,13 @@ public class AlarmActivity extends Activity {
         int titleId = getResources().getIdentifier("alarm_title", "id", getPackageName());
         TextView title = findViewById(titleId);
         String t = getIntent().getStringExtra(Ride91AlarmsModule.EXTRA_TITLE);
-        title.setText(t != null ? t : "Shift starts in 1 hour");
+        boolean hi = "hi".equals(getIntent().getStringExtra(Ride91AlarmsModule.EXTRA_LANG));
+        title.setText(t != null ? t : (hi ? "1 \u0918\u0902\u091f\u0947 \u092e\u0947\u0902 \u0936\u093f\u092b\u093c\u094d\u091f \u0936\u0941\u0930\u0942 \u0939\u094b\u0917\u0940" : "Shift starts in 1 hour"));
 
         int spinnerId = getResources().getIdentifier("reason_spinner", "id", getPackageName());
         Spinner spinner = findViewById(spinnerId);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, REASON_LABELS);
+                android.R.layout.simple_spinner_dropdown_item, hi ? REASON_LABELS_HI : REASON_LABELS);
         spinner.setAdapter(adapter);
         spinner.setVisibility(View.GONE);
 
@@ -76,6 +82,17 @@ public class AlarmActivity extends Activity {
         Button confirm = findViewById(confirmId);
         Button snooze = findViewById(snoozeId);
         confirm.setVisibility(View.GONE);
+
+        // The layout's built-in texts are English; swap them for Hindi.
+        if (hi) {
+            int kickerId = getResources().getIdentifier("alarm_kicker", "id", getPackageName());
+            TextView kicker = findViewById(kickerId);
+            if (kicker != null) kicker.setText("RIDE91 \u00b7 \u0936\u093f\u092b\u093c\u094d\u091f \u0905\u0932\u093e\u0930\u094d\u092e");
+            awake.setText("\u091c\u093e\u0917 \u0917\u092f\u093e \u0939\u0942\u0901, \u0921\u094d\u092f\u0942\u091f\u0940 \u092a\u0930 \u0906 \u0930\u0939\u093e \u0939\u0942\u0901");
+            notComing.setText("\u0928\u0939\u0940\u0902 \u0906 \u0930\u0939\u093e");
+            confirm.setText("\u092a\u0915\u094d\u0915\u093e \u0915\u0930\u0947\u0902");
+            snooze.setText("10 \u092e\u093f\u0928\u091f \u092c\u093e\u0926 \u092b\u093f\u0930 \u092c\u091c\u093e\u090f\u0901 (\u090f\u0915 \u092c\u093e\u0930)");
+        }
 
         awake.setOnClickListener(v -> respond("awake", null));
         notComing.setOnClickListener(v -> {

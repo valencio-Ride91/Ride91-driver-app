@@ -233,7 +233,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
             style={styles.input}
             value={number}
             onChangeText={setNumber}
-            placeholder="e.g. KA01 2020 0001234"
+            placeholder={c.doc_number_ph}
             placeholderTextColor={colors.muted}
             autoCapitalize="characters"
             autoCorrect={false}
@@ -259,7 +259,7 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
                 style={styles.helper}
                 onPress={() => setExpires(addDaysIso(todayIso(), d))}
               >
-                <Text style={styles.helperText}>+{d}d</Text>
+                <Text style={styles.helperText}>{c.doc_plus_days(d)}</Text>
               </TouchableOpacity>
             ))}
           </View>

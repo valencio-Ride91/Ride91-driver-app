@@ -27,6 +27,7 @@ import * as Crypto from "expo-crypto";
 
 import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useI18n } from "@/src/i18n";
+import { useCardText } from "@/src/i18n/cards";
 import { api } from "@/src/api";
 
 type Step = "dashboard" | "exterior" | "review" | "submitting" | "done";
@@ -35,6 +36,7 @@ const MAX_VIDEO_S = 15;
 
 export default function Inspection() {
   const { t } = useI18n();
+  const c = useCardText();
   const router = useRouter();
   const cameraRef = useRef<CameraView>(null);
 
@@ -92,11 +94,11 @@ export default function Inspection() {
       const b64 = shot?.base64 ? `data:image/jpeg;base64,${shot.base64}` : null;
       setDashPhotoUri(b64 ?? uri);
     } catch (e: any) {
-      setErr("Could not take photo. Try again.");
+      setErr(c.insp_photo_fail);
     } finally {
       setBusy(false);
     }
-  }, []);
+  },[c]);
 
   // ---- Step 2: exterior video --------------------------------------------
   // Handles three failure modes seen in the wild:
@@ -119,7 +121,7 @@ export default function Inspection() {
       released = true;
       setRecording(false);
       setErr(
-        "Recording didn't complete. Please try again — hold the camera steady for the full 15s.",
+        c.insp_rec_incomplete(MAX_VIDEO_S),
       );
     }, (MAX_VIDEO_S + 3) * 1000);
 
@@ -132,23 +134,23 @@ export default function Inspection() {
         // Web preview or unsupported platform: expo-camera returned nothing.
         if (Platform.OS === "web") {
           setErr(
-            "Video recording isn't available in the web preview. Open the app in Expo Go on your Android device to record the walk-around video.",
+            c.insp_web_unavailable,
           );
         } else {
-          setErr("Could not save the recording. Try again.");
+          setErr(c.insp_save_fail);
         }
         return;
       }
       const b64 = await fileToBase64(v.uri);
       setVideoUri(b64);
     } catch (e: any) {
-      setErr(`Could not record video: ${e?.message ?? "unknown error"}`);
+      setErr(c.insp_rec_fail(e?.message ?? c.insp_unknown_error));
     } finally {
       released = true;
       clearTimeout(safety);
       setRecording(false);
     }
-  }, [recording]);
+  }, [recording, c]);
 
   const stopRecording = useCallback(() => {
     if (!cameraRef.current) return;
@@ -187,19 +189,20 @@ export default function Inspection() {
       // Small delay so the driver sees the tick before we bounce back
       setTimeout(() => router.replace("/(tabs)"), 900);
     } catch (e: any) {
-      setErr("Could not submit. Check your connection and try again.");
+      setErr(c.insp_submit_fail);
     } finally {
       setBusy(false);
     }
-  }, [dashPhotoUri, videoUri, router]);
+  }, [dashPhotoUri, videoUri, router, c]);
 
   // ---- Render -------------------------------------------------------------
   if (!canUseCamera) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
         <PermissionGate
-          title="Camera permission needed"
-          body="To confirm the vehicle is fit for duty, we need to take one dashboard photo and one short walk-around video."
+          title={c.insp_cam_perm_title}
+          body={c.insp_cam_perm_body}
+          allow={c.insp_allow}
           onGrant={openSettings}
           testID="camera-perm-gate"
         />
@@ -210,17 +213,17 @@ export default function Inspection() {
   if (step === "dashboard" && dashPhotoUri) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
-        <StepHeader step={1} title="Dashboard photo" />
+        <StepHeader step={1} label={c.insp_step(1)} title={c.insp_dash_photo} />
         <Image source={{ uri: dashPhotoUri }} style={styles.preview} />
         <View style={styles.actions}>
           <Button
-            label="Retake"
+            label={c.insp_retake}
             onPress={() => setDashPhotoUri(null)}
             variant="secondary"
             testID="dash-retake"
           />
           <Button
-            label="Looks good →"
+            label={c.insp_looks_good}
             onPress={() => setStep("exterior")}
             testID="dash-confirm"
           />
@@ -232,7 +235,7 @@ export default function Inspection() {
   if (step === "dashboard") {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
-        <StepHeader step={1} title="Dashboard photo" />
+        <StepHeader step={1} label={c.insp_step(1)} title={c.insp_dash_photo} />
         <View style={styles.cameraWrap}>
           <CameraView
             ref={cameraRef}
@@ -242,19 +245,19 @@ export default function Inspection() {
           />
           <View style={styles.reticle} pointerEvents="none">
             <Text style={styles.reticleText}>
-              Frame the whole dashboard cluster
+              {c.insp_frame_dash}
             </Text>
           </View>
         </View>
         <View style={styles.actions}>
           <Button
-            label={facing === "back" ? "Front cam" : "Back cam"}
+            label={facing === "back" ? c.insp_front_cam : c.insp_back_cam}
             onPress={() => setFacing((f) => (f === "back" ? "front" : "back"))}
             variant="secondary"
             testID="dash-flip"
           />
           <Button
-            label={busy ? "…" : "Capture"}
+            label={busy ? "…" : c.insp_capture}
             onPress={takeDashboardPhoto}
             disabled={busy}
             testID="dash-capture"
@@ -268,20 +271,20 @@ export default function Inspection() {
   if (step === "exterior" && videoUri) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
-        <StepHeader step={2} title="Exterior video" />
+        <StepHeader step={2} label={c.insp_step(2)} title={c.insp_ext_video} />
         <View style={styles.videoDone} testID="video-done-block">
           <Text style={styles.videoDoneIcon}>✓</Text>
-          <Text style={styles.videoDoneText}>Walk-around video captured</Text>
+          <Text style={styles.videoDoneText}>{c.insp_video_done}</Text>
         </View>
         <View style={styles.actions}>
           <Button
-            label="Retake"
+            label={c.insp_retake}
             onPress={() => setVideoUri(null)}
             variant="secondary"
             testID="video-retake"
           />
           <Button
-            label={busy ? "Sending…" : "Submit inspection"}
+            label={busy ? c.insp_sending : c.insp_submit}
             onPress={submit}
             disabled={busy}
             testID="inspection-submit"
@@ -295,11 +298,12 @@ export default function Inspection() {
   if (step === "exterior") {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
-        <StepHeader step={2} title="Exterior video" />
+        <StepHeader step={2} label={c.insp_step(2)} title={c.insp_ext_video} />
         {!canRecordVideo ? (
           <PermissionGate
-            title="Microphone permission needed"
-            body="Video needs the mic so ops can hear the walk-around commentary."
+            title={c.insp_mic_perm_title}
+            body={c.insp_mic_perm_body}
+            allow={c.insp_allow}
             onGrant={openSettings}
             testID="mic-perm-gate"
           />
@@ -317,13 +321,13 @@ export default function Inspection() {
               />
               <View style={styles.reticle} pointerEvents="none">
                 <Text style={styles.reticleText}>
-                  Walk once around the car: front → right → back → left
+                  {c.insp_walk_once}
                 </Text>
               </View>
               {recording ? (
                 <View style={styles.recBadge}>
                   <View style={styles.recDot} />
-                  <Text style={styles.recText}>REC · {countdown}s</Text>
+                  <Text style={styles.recText}>{c.insp_rec(countdown)}</Text>
                 </View>
               ) : null}
             </View>
@@ -332,8 +336,8 @@ export default function Inspection() {
                 <Button
                   label={
                     cameraReady
-                      ? `Start recording · ${MAX_VIDEO_S}s max`
-                      : "Preparing camera…"
+                      ? c.insp_start_rec(MAX_VIDEO_S)
+                      : c.insp_preparing
                   }
                   onPress={startRecording}
                   disabled={!cameraReady}
@@ -341,7 +345,7 @@ export default function Inspection() {
                 />
               ) : (
                 <Button
-                  label="Stop"
+                  label={c.insp_stop}
                   onPress={stopRecording}
                   variant="danger"
                   testID="video-stop"
@@ -373,8 +377,8 @@ export default function Inspection() {
           <View style={styles.doneCircle}>
             <Text style={styles.doneTick}>✓</Text>
           </View>
-          <Text style={styles.doneTitle}>All set.</Text>
-          <Text style={styles.doneBody}>You can start your shift now.</Text>
+          <Text style={styles.doneTitle}>{c.insp_all_set}</Text>
+          <Text style={styles.doneBody}>{c.insp_can_start}</Text>
           <ActivityIndicator color={colors.live} style={{ marginTop: spacing.md }} />
         </View>
       </SafeAreaView>
@@ -418,9 +422,9 @@ const guessMime = (dataUrl: string): string => {
   return m ? m[1] : "video/mp4";
 };
 
-const StepHeader: React.FC<{ step: 1 | 2; title: string }> = ({ step, title }) => (
+const StepHeader: React.FC<{ step: 1 | 2; label: string; title: string }> = ({ step, label, title }) => (
   <View style={styles.stepHeader}>
-    <Text style={styles.stepPill}>Step {step} / 2</Text>
+    <Text style={styles.stepPill}>{label}</Text>
     <Text style={styles.stepTitle} testID={`step-title-${step}`}>{title}</Text>
   </View>
 );
@@ -453,14 +457,15 @@ const Button: React.FC<{
 const PermissionGate: React.FC<{
   title: string;
   body: string;
+  allow: string;
   onGrant: () => void;
   testID?: string;
-}> = ({ title, body, onGrant, testID }) => (
+}> = ({ title, body, allow, onGrant, testID }) => (
   <View style={styles.gateWrap} testID={testID}>
     <Text style={styles.gateTitle}>{title}</Text>
     <Text style={styles.gateBody}>{body}</Text>
     <TouchableOpacity style={styles.gateBtn} onPress={onGrant} testID={`${testID}-grant`}>
-      <Text style={styles.gateBtnText}>Allow</Text>
+      <Text style={styles.gateBtnText}>{allow}</Text>
     </TouchableOpacity>
   </View>
 );

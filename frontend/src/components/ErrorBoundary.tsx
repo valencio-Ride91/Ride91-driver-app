@@ -6,6 +6,7 @@ import React from "react";
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { colors, fonts, radius, spacing } from "@/src/theme";
+import { getCardText } from "@/src/i18n/cards";
 
 interface State {
   error: Error | null;
@@ -26,17 +27,18 @@ export class RootErrorBoundary extends React.Component<{ children: React.ReactNo
   render() {
     const { error } = this.state;
     if (!error) return this.props.children;
+    const c = getCardText();
     return (
       <View style={styles.wrap}>
         <ScrollView contentContainerStyle={styles.scroll}>
-          <Text style={styles.title}>Something went wrong</Text>
-          <Text style={styles.sub}>The app hit an error while starting. Please share this screen with support.</Text>
+          <Text style={styles.title}>{c.err_title}</Text>
+          <Text style={styles.sub}>{c.err_sub}</Text>
           <View style={styles.box}>
             <Text style={styles.msg}>{error.message || String(error)}</Text>
             {error.stack ? <Text style={styles.stack}>{error.stack.slice(0, 1200)}</Text> : null}
           </View>
           <TouchableOpacity style={styles.btn} onPress={() => this.setState({ error: null })}>
-            <Text style={styles.btnText}>Try again</Text>
+            <Text style={styles.btnText}>{c.err_retry}</Text>
           </TouchableOpacity>
         </ScrollView>
       </View>

@@ -3,7 +3,7 @@ import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, Touchable
 
 import { Card } from "./ui";
 import { api } from "@/src/api";
-import { formatINR } from "@/src/i18n";
+import { formatINR, formatISTTime } from "@/src/i18n";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useCardText } from "@/src/i18n/cards";
 
@@ -19,14 +19,6 @@ interface CollectionsToday {
   total: number;
   count: number;
   items: { amount: number; at: string }[];
-}
-
-function fmtTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata" });
-  } catch {
-    return "";
-  }
 }
 
 // Shows the driver's own collection QR so they can hold the phone up for a
@@ -124,7 +116,7 @@ export const CollectionQrCard: React.FC = () => {
           {today.items.slice(0, 5).map((it, i) => (
             <View key={i} style={styles.recentRow}>
               <Text style={styles.recentAmt}>{formatINR(it.amount)}</Text>
-              <Text style={styles.recentTime}>{fmtTime(it.at)}</Text>
+              <Text style={styles.recentTime}>{formatISTTime(it.at)}</Text>
             </View>
           ))}
         </View>

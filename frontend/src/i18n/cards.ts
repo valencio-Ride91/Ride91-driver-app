@@ -9,7 +9,7 @@
 // (ड्यूटी, शिफ़्ट, बोनस, हब, QR, UPI). Amounts, times and car numbers stay in
 // Latin digits.
 
-import { useI18n } from "@/src/i18n";
+import { getLang, hindiClock, useI18n } from "@/src/i18n";
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -265,6 +265,97 @@ const en = {
   consent_withdraw_body: (label: string) =>
     `You're withdrawing consent for: ${label}. Some features that rely on this will stop working until you grant it again.`,
   consent_withdraw: "Withdraw",
+
+  // ---- units and clock times ----
+  km: (v: string) => `${v} km`,
+  clock: (h24: number, m: number) => `${h24 % 12 === 0 ? 12 : h24 % 12}:${String(m).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`,
+
+  // ---- header status ----
+  on_phone: (n: number) => `On phone ${n}`,
+  saving_n: (n: number) => `Saving ${n}`,
+
+  // ---- wake-up / head-back alarm ----
+  alarm_title_start: "Shift starts in 1 hour",
+  alarm_title_start_night: "Night shift starts in 1 hour",
+  alarm_title_end: "Shift ends soon — head back to hub",
+  alarm_test_prefix: "TEST · ",
+  alarm_kicker_start: "SHIFT ALARM",
+  alarm_kicker_end: "SHIFT END ALARM",
+  alarm_hi: (name: string) => `Hi ${name}`,
+  alarm_distance: "Distance",
+  alarm_eta_to_hub: "ETA to hub",
+  alarm_snoozed: "Snoozed — we'll ring again in 10 minutes.",
+  alarm_heading_back: "Heading back to hub now",
+  alarm_running_late: "Running late — inform dispatch",
+  alarm_snooze: "Snooze 10 minutes (once)",
+  alarm_awake: "Awake and coming for duty",
+  alarm_not_coming: "Not coming",
+  alarm_reason_required: "Reason (required)",
+  alarm_choose_reason: "Choose reason",
+  alarm_confirm_not_coming: "Confirm — not coming",
+  alarm_reasons: {
+    unwell: "Unwell",
+    family_emergency: "Family emergency",
+    vehicle_problem: "Vehicle problem",
+    transport_problem: "Transport problem",
+    personal: "Personal",
+    other: "Other",
+  } as Record<string, string>,
+  alarm_preview_sub: "Native alarm needs the production build. Use Preview to test the UI on web / Expo Go.",
+  alarm_preview_start: "Preview start UI",
+  alarm_preview_end: "Preview end UI",
+  alarm_fire_start: "Fire native · start",
+  alarm_fire_end: "Fire native · end",
+  alarm_test_fired: (phase: string) => `Native ${phase} alarm fired (check lock screen)`,
+
+  // ---- daily inspection ----
+  insp_photo_fail: "Could not take photo. Try again.",
+  insp_rec_incomplete: (s: number) => `Recording didn't complete. Please try again — hold the camera steady for the full ${s}s.`,
+  insp_web_unavailable: "Video recording isn't available in the web preview. Open the app in Expo Go on your Android device to record the walk-around video.",
+  insp_save_fail: "Could not save the recording. Try again.",
+  insp_rec_fail: (msg: string) => `Could not record video: ${msg}`,
+  insp_unknown_error: "unknown error",
+  insp_submit_fail: "Could not submit. Check your connection and try again.",
+  insp_cam_perm_title: "Camera permission needed",
+  insp_cam_perm_body: "To confirm the vehicle is fit for duty, we need to take one dashboard photo and one short walk-around video.",
+  insp_mic_perm_title: "Microphone permission needed",
+  insp_mic_perm_body: "Video needs the mic so ops can hear the walk-around commentary.",
+  insp_allow: "Allow",
+  insp_step: (n: number) => `Step ${n} / 2`,
+  insp_dash_photo: "Dashboard photo",
+  insp_retake: "Retake",
+  insp_looks_good: "Looks good →",
+  insp_frame_dash: "Frame the whole dashboard cluster",
+  insp_front_cam: "Front cam",
+  insp_back_cam: "Back cam",
+  insp_capture: "Capture",
+  insp_ext_video: "Exterior video",
+  insp_video_done: "Walk-around video captured",
+  insp_sending: "Sending…",
+  insp_submit: "Submit inspection",
+  insp_walk_once: "Walk once around the car: front → right → back → left",
+  insp_rec: (s: number) => `REC · ${s}s`,
+  insp_start_rec: (s: number) => `Start recording · ${s}s max`,
+  insp_preparing: "Preparing camera…",
+  insp_stop: "Stop",
+  insp_all_set: "All set.",
+  insp_can_start: "You can start your shift now.",
+
+  // ---- requests ----
+  no_requests: "No requests yet.",
+
+  // ---- documents (extra) ----
+  doc_number_ph: "e.g. KA01 2020 0001234",
+  doc_plus_days: (d: number) => `+${d}d`,
+
+  // ---- on-duty location notice (Android notification) ----
+  track_title: "Ride91 — on duty",
+  track_body: "Sharing your location with the fleet.",
+
+  // ---- crash screen ----
+  err_title: "Something went wrong",
+  err_sub: "The app hit an error while starting. Please share this screen with support.",
+  err_retry: "Try again",
 };
 
 export type CardText = typeof en;
@@ -536,6 +627,97 @@ const hi: CardText = {
   consent_withdraw_body: (label) =>
     `आप यह सहमति वापस ले रहे हैं: ${label}। इस पर चलने वाली कुछ सुविधाएँ तब तक बंद रहेंगी जब तक आप दोबारा सहमति नहीं देते।`,
   consent_withdraw: "वापस लें",
+
+  // ---- units and clock times ----
+  km: (v) => `${v} किमी`,
+  clock: (h24, m) => hindiClock(h24, m),
+
+  // ---- header status ----
+  on_phone: (n) => `फ़ोन पर ${n}`,
+  saving_n: (n) => `भेज रहे हैं ${n}`,
+
+  // ---- wake-up / head-back alarm ----
+  alarm_title_start: "1 घंटे में शिफ़्ट शुरू होगी",
+  alarm_title_start_night: "1 घंटे में रात की शिफ़्ट शुरू होगी",
+  alarm_title_end: "शिफ़्ट ख़त्म होने वाली है — हब लौटें",
+  alarm_test_prefix: "टेस्ट · ",
+  alarm_kicker_start: "शिफ़्ट अलार्म",
+  alarm_kicker_end: "शिफ़्ट ख़त्म का अलार्म",
+  alarm_hi: (name) => `नमस्ते ${name}`,
+  alarm_distance: "दूरी",
+  alarm_eta_to_hub: "हब पहुँचने में",
+  alarm_snoozed: "अभी रोक दिया — 10 मिनट में फिर बजेगा।",
+  alarm_heading_back: "अभी हब लौट रहा हूँ",
+  alarm_running_late: "देर हो रही है — ऑफ़िस को बताएँ",
+  alarm_snooze: "10 मिनट बाद फिर बजाएँ (एक बार)",
+  alarm_awake: "जाग गया हूँ, ड्यूटी पर आ रहा हूँ",
+  alarm_not_coming: "नहीं आ रहा",
+  alarm_reason_required: "कारण (ज़रूरी)",
+  alarm_choose_reason: "कारण चुनें",
+  alarm_confirm_not_coming: "पक्का करें — नहीं आ रहा",
+  alarm_reasons: {
+    unwell: "तबीयत ठीक नहीं",
+    family_emergency: "घर में इमरजेंसी",
+    vehicle_problem: "गाड़ी में दिक़्क़त",
+    transport_problem: "आने का साधन नहीं",
+    personal: "निजी कारण",
+    other: "अन्य",
+  },
+  alarm_preview_sub: "असली अलार्म सिर्फ़ इंस्टॉल किए गए ऐप में चलता है। यहाँ प्रीव्यू से स्क्रीन देख सकते हैं।",
+  alarm_preview_start: "शुरू का अलार्म देखें",
+  alarm_preview_end: "वापसी का अलार्म देखें",
+  alarm_fire_start: "टेस्ट अलार्म · शुरू",
+  alarm_fire_end: "टेस्ट अलार्म · वापसी",
+  alarm_test_fired: () => "टेस्ट अलार्म बजा दिया (लॉक स्क्रीन देखें)",
+
+  // ---- daily inspection ----
+  insp_photo_fail: "फ़ोटो नहीं ली जा सकी। फिर कोशिश करें।",
+  insp_rec_incomplete: (s) => `रिकॉर्डिंग पूरी नहीं हुई। फिर कोशिश करें — पूरे ${s} सेकंड कैमरा स्थिर रखें।`,
+  insp_web_unavailable: "वेब प्रीव्यू में वीडियो रिकॉर्ड नहीं हो सकता। वीडियो के लिए ऐप अपने Android फ़ोन पर खोलें।",
+  insp_save_fail: "रिकॉर्डिंग सहेजी नहीं जा सकी। फिर कोशिश करें।",
+  insp_rec_fail: (msg) => `वीडियो रिकॉर्ड नहीं हो सका: ${msg}`,
+  insp_unknown_error: "अनजान गड़बड़ी",
+  insp_submit_fail: "जमा नहीं हो सका। नेटवर्क देखें और फिर कोशिश करें।",
+  insp_cam_perm_title: "कैमरे की अनुमति चाहिए",
+  insp_cam_perm_body: "गाड़ी ड्यूटी के लिए ठीक है, यह पक्का करने के लिए हमें डैशबोर्ड की एक फ़ोटो और गाड़ी के चारों ओर का एक छोटा वीडियो लेना होता है।",
+  insp_mic_perm_title: "माइक की अनुमति चाहिए",
+  insp_mic_perm_body: "वीडियो के लिए माइक चाहिए, ताकि ऑफ़िस आपकी बताई बात सुन सके।",
+  insp_allow: "अनुमति दें",
+  insp_step: (n) => `चरण ${n} / 2`,
+  insp_dash_photo: "डैशबोर्ड की फ़ोटो",
+  insp_retake: "दोबारा लें",
+  insp_looks_good: "ठीक है →",
+  insp_frame_dash: "पूरा डैशबोर्ड मीटर फ़्रेम में लें",
+  insp_front_cam: "आगे का कैमरा",
+  insp_back_cam: "पीछे का कैमरा",
+  insp_capture: "फ़ोटो लें",
+  insp_ext_video: "गाड़ी के बाहर का वीडियो",
+  insp_video_done: "गाड़ी के चारों ओर का वीडियो बन गया",
+  insp_sending: "भेज रहे हैं…",
+  insp_submit: "जाँच जमा करें",
+  insp_walk_once: "गाड़ी के चारों ओर एक चक्कर लगाएँ: आगे → दाएँ → पीछे → बाएँ",
+  insp_rec: (s) => `रिकॉर्डिंग · ${s} से`,
+  insp_start_rec: (s) => `रिकॉर्डिंग शुरू करें · ज़्यादा से ज़्यादा ${s} सेकंड`,
+  insp_preparing: "कैमरा तैयार हो रहा है…",
+  insp_stop: "रोकें",
+  insp_all_set: "सब तैयार है।",
+  insp_can_start: "अब आप अपनी शिफ़्ट शुरू कर सकते हैं।",
+
+  // ---- requests ----
+  no_requests: "अभी कोई अनुरोध नहीं।",
+
+  // ---- documents (extra) ----
+  doc_number_ph: "जैसे KA01 2020 0001234",
+  doc_plus_days: (d) => `+${d} दिन`,
+
+  // ---- on-duty location notice (Android notification) ----
+  track_title: "Ride91 — ड्यूटी पर",
+  track_body: "आपकी लोकेशन फ़्लीट के साथ साझा हो रही है।",
+
+  // ---- crash screen ----
+  err_title: "कुछ गड़बड़ हो गई",
+  err_sub: "ऐप शुरू होते समय रुक गया। यह स्क्रीन सपोर्ट को दिखाएँ।",
+  err_retry: "फिर कोशिश करें",
 };
 
 /** Card copy in the driver's language — Hindi when selected, English otherwise. */
@@ -543,3 +725,6 @@ export const useCardText = (): CardText => {
   const { lang } = useI18n();
   return lang === "hi" ? hi : en;
 };
+
+/** Same copy for code that runs outside React (alarms, notifications, the crash screen). */
+export const getCardText = (): CardText => (getLang() === "hi" ? hi : en);

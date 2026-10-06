@@ -310,15 +310,25 @@ interface I18nCtx {
 
 const Ctx = createContext<I18nCtx | null>(null);
 
+// The chosen language, mirrored outside React so plain functions (date and
+// duration formatting, alarm titles, the Android on-duty notice, the crash
+// screen) can follow it too. Kept in step with the provider's state below.
+let activeLang: Lang = "en";
+export const getLang = (): Lang => activeLang;
+
 export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [lang, setLangState] = useState<Lang>("en");
   useEffect(() => {
     (async () => {
       const stored = await storage.getItem<Lang>(STORAGE_KEY, "en");
-      if (stored) setLangState(stored);
+      if (stored) {
+        activeLang = stored;
+        setLangState(stored);
+      }
     })();
   }, []);
   const setLang = useCallback((l: Lang) => {
+    activeLang = l;
     setLangState(l);
     storage.setItem(STORAGE_KEY, l);
   }, []);
@@ -341,7 +351,53 @@ export const formatINR = (n: number): string => {
 export const formatDuration = (seconds: number): string => {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
+  if (activeLang === "hi") return `${h} घं ${m.toString().padStart(2, "0")} मि`;
   return `${h}h ${m.toString().padStart(2, "0")}m`;
+};
+
+// ---- Hindi dates and times -------------------------------------------------
+// Written by hand rather than through Intl's hi-IN, whose output (am/pm words,
+// month abbreviations) differs between Android versions. Times read the way
+// they are spoken: "सुबह 6:30", "दोपहर 1:15", "शाम 6:30", "रात 10:00".
+const HI_WEEKDAYS = ["रवि", "सोम", "मंगल", "बुध", "गुरु", "शुक्र", "शनि"];
+const HI_MONTHS = ["जन", "फ़र", "मार्च", "अप्रैल", "मई", "जून", "जुलाई", "अग", "सित", "अक्टू", "नवं", "दिसं"];
+
+export const hindiClock = (h24: number, m: number): string => {
+  const part = h24 >= 4 && h24 < 12 ? "सुबह" : h24 >= 12 && h24 < 16 ? "दोपहर" : h24 >= 16 && h24 < 20 ? "शाम" : "रात";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${part} ${h12}:${String(m).padStart(2, "0")}`;
+};
+
+// Wall-clock parts of an instant in India (UTC+5:30, no daylight saving).
+const istParts = (d: Date) => {
+  const x = new Date(d.getTime() + 330 * 60 * 1000);
+  return {
+    y: x.getUTCFullYear(), mo: x.getUTCMonth(), day: x.getUTCDate(),
+    wd: x.getUTCDay(), h: x.getUTCHours(), mi: x.getUTCMinutes(),
+  };
+};
+
+const hindiDateTime = (d: Date, withTime: boolean): string => {
+  const p = istParts(d);
+  const n = istParts(new Date());
+  const time = hindiClock(p.h, p.mi);
+  if (withTime && p.y === n.y && p.mo === n.mo && p.day === n.day) return `आज ${time}`;
+  const date = p.y === n.y
+    ? `${HI_WEEKDAYS[p.wd]} ${p.day} ${HI_MONTHS[p.mo]}`
+    : `${p.day} ${HI_MONTHS[p.mo]} ${p.y}`;
+  return withTime ? `${date}, ${time}` : date;
+};
+
+// Time of day only ("6:30 pm" / "शाम 6:30").
+export const formatISTTime = (input: string | number | Date | undefined | null): string => {
+  if (!input) return "";
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return "";
+  if (activeLang === "hi") {
+    const p = istParts(d);
+    return hindiClock(p.h, p.mi);
+  }
+  return d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata" });
 };
 
 // All timestamps rendered in the app pass through this. Asia/Kolkata, human
@@ -350,6 +406,7 @@ export const formatIST = (input: string | number | Date | undefined | null): str
   if (!input) return "—";
   const d = input instanceof Date ? input : new Date(input);
   if (isNaN(d.getTime())) return "—";
+  if (activeLang === "hi") return hindiDateTime(d, true);
   const now = new Date();
   const optsTime: Intl.DateTimeFormatOptions = {
     hour: "numeric",
@@ -386,6 +443,7 @@ export const formatISTDate = (input: string | number | Date | undefined | null):
   if (!input) return "—";
   const d = input instanceof Date ? input : new Date(input);
   if (isNaN(d.getTime())) return "—";
+  if (activeLang === "hi") return hindiDateTime(d, false);
   const now = new Date();
   const sameYear = d.getUTCFullYear() === now.getUTCFullYear();
   return d.toLocaleDateString("en-IN", {

@@ -24,6 +24,8 @@ public class AlarmReceiver extends BroadcastReceiver {
         String scheduleId = intent.getStringExtra(Ride91AlarmsModule.EXTRA_SCHEDULE_ID);
         String driverId = intent.getStringExtra(Ride91AlarmsModule.EXTRA_DRIVER_ID);
         String title = intent.getStringExtra(Ride91AlarmsModule.EXTRA_TITLE);
+        String lang = intent.getStringExtra(Ride91AlarmsModule.EXTRA_LANG);
+        boolean hi = "hi".equals(lang);
         long firedAt = System.currentTimeMillis();
 
         // Full-screen intent to the alarm UI.
@@ -31,6 +33,7 @@ public class AlarmReceiver extends BroadcastReceiver {
         full.putExtra(Ride91AlarmsModule.EXTRA_SCHEDULE_ID, scheduleId);
         full.putExtra(Ride91AlarmsModule.EXTRA_DRIVER_ID, driverId);
         full.putExtra(Ride91AlarmsModule.EXTRA_TITLE, title);
+        full.putExtra(Ride91AlarmsModule.EXTRA_LANG, lang);
         full.putExtra("firedAt", firedAt);
         full.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
@@ -41,15 +44,15 @@ public class AlarmReceiver extends BroadcastReceiver {
         NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "Shift alarms", NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription("Mandatory 1-hour-before-shift alarm");
+                    CHANNEL_ID, hi ? "\u0936\u093f\u092b\u093c\u094d\u091f \u0905\u0932\u093e\u0930\u094d\u092e" : "Shift alarms", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription(hi ? "\u0936\u093f\u092b\u093c\u094d\u091f \u0938\u0947 1 \u0918\u0902\u091f\u093e \u092a\u0939\u0932\u0947 \u0915\u093e \u091c\u093c\u0930\u0942\u0930\u0940 \u0905\u0932\u093e\u0930\u094d\u092e" : "Mandatory 1-hour-before-shift alarm");
             ch.enableVibration(true);
             nm.createNotificationChannel(ch);
         }
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CHANNEL_ID)
-                .setContentTitle(title != null ? title : "Shift starts in 1 hour")
-                .setContentText("Tap to respond")
+                .setContentTitle(title != null ? title : (hi ? "1 \u0918\u0902\u091f\u0947 \u092e\u0947\u0902 \u0936\u093f\u092b\u093c\u094d\u091f \u0936\u0941\u0930\u0942 \u0939\u094b\u0917\u0940" : "Shift starts in 1 hour"))
+                .setContentText(hi ? "\u091c\u0935\u093e\u092c \u0926\u0947\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f \u0926\u092c\u093e\u090f\u0901" : "Tap to respond")
                 .setSmallIcon(ctx.getApplicationInfo().icon)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)

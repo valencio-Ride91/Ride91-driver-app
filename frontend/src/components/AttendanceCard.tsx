@@ -34,14 +34,14 @@ const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 const ALERT_TINT = "#F8E4E0";
 
-// "06:30" (+10 min) → "6:40 AM"
-function clock(hhmm: string, addMin = 0): string | null {
+// "06:30" (+10 min) → "6:40 AM" / "सुबह 6:40", via the language's own clock format.
+function clock(hhmm: string, addMin: number, fmt: (h24: number, m: number) => string): string | null {
   const [h, m] = hhmm.split(":").map(Number);
   if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
   const t = (((h * 60 + m + addMin) % 1440) + 1440) % 1440;
   const hh = Math.floor(t / 60);
   const mm = t % 60;
-  return `${hh % 12 === 0 ? 12 : hh % 12}:${String(mm).padStart(2, "0")} ${hh < 12 ? "AM" : "PM"}`;
+  return fmt(hh, mm);
 }
 
 export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle }> = ({ data, style }) => {
@@ -55,8 +55,8 @@ export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle
   const outOfTime = !data.qualified && daysLeft != null && need > daysLeft;
 
   const grace = data.grace_minutes ?? 0;
-  const shift = data.shift_start_time ? clock(data.shift_start_time) : null;
-  const cutoff = data.shift_start_time ? clock(data.shift_start_time, grace) : null;
+  const shift = data.shift_start_time ? clock(data.shift_start_time, 0, c.clock) : null;
+  const cutoff = data.shift_start_time ? clock(data.shift_start_time, grace, c.clock) : null;
   const shiftMissing = data.require_ontime && data.shift_start_time === null;
 
   // One line that says where the driver stands right now.
