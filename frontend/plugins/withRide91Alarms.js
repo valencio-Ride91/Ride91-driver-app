@@ -117,11 +117,27 @@ const withPackageRegistration = (config) => {
         (m) => `${m}\nimport ${PACKAGE}.Ride91AlarmsPackage\n`,
       );
     }
-    // add(Ride91AlarmsPackage())  — inserted in getPackages()
+    // Register the package. The template has changed shape over Expo SDKs:
+    //   current:  PackageList(this).packages.apply { ... }
+    //   older:    val packages = PackageList(this).packages
     if (!contents.includes("Ride91AlarmsPackage()")) {
-      contents = contents.replace(
-        /(val packages = PackageList\(this\)\.packages[^\n]*\n)/,
-        `$1        packages.add(Ride91AlarmsPackage())\n`,
+      if (/PackageList\(this\)\.packages\.apply\s*\{[^\n]*\n/.test(contents)) {
+        contents = contents.replace(
+          /(PackageList\(this\)\.packages\.apply\s*\{[^\n]*\n)/,
+          `$1          add(Ride91AlarmsPackage())\n`,
+        );
+      } else {
+        contents = contents.replace(
+          /(val packages = PackageList\(this\)\.packages[^\n]*\n)/,
+          `$1        packages.add(Ride91AlarmsPackage())\n`,
+        );
+      }
+    }
+    // Fail the build rather than ship an app whose wake-up alarm silently
+    // isn't there (which is what an unmatched template used to produce).
+    if (!contents.includes("Ride91AlarmsPackage()")) {
+      throw new Error(
+        "withRide91Alarms: could not register Ride91AlarmsPackage in MainApplication — the template changed; update plugins/withRide91Alarms.js.",
       );
     }
     cfg.modResults.contents = contents;

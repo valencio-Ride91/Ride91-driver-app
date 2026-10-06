@@ -15,7 +15,7 @@
 // UI preview and the same submitAlarmResponse path posts to the backend.
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { AppState } from "react-native";
+import { AppState, PermissionsAndroid, Platform } from "react-native";
 import * as Crypto from "expo-crypto";
 
 import { api } from "@/src/api";
@@ -177,15 +177,39 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
     }
   }, [enabled, driver, lat, lng, armEndAlarm]);
 
+  // Collect the answers the driver gave on the native alarm screen and queue
+  // them for the server. Runs on start-up and on returning to the foreground
+  // (the alarm normally rings while the app is closed) and when the native
+  // side signals a new answer.
+  const drainResponses = useCallback(async () => {
+    const pending = await alarms.drainPending();
+    for (const r of pending) {
+      if (!r?.scheduleId || !r.response) continue;
+      // The end-of-shift alarm is scheduled under "<id>-end".
+      const phase: "start" | "end" = r.scheduleId.endsWith("-end") ? "end" : "start";
+      const cleanedId = phase === "end" ? r.scheduleId.slice(0, -4) : r.scheduleId;
+      await submitAlarmResponse({ ...r, scheduleId: cleanedId }, phase);
+    }
+    return pending.length;
+  }, [submitAlarmResponse]);
+
+  // Android 13+ shows nothing — including the alarm's full-screen notice —
+  // until the driver allows notifications, so ask once the driver is signed in.
+  useEffect(() => {
+    if (!enabled || !alarmsAvailable) return;
+    if (Platform.OS !== "android" || Number(Platform.Version) < 33) return;
+    PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => {});
+  }, [enabled]);
+
   // Foreground + boot refresh.
   useEffect(() => {
     if (!enabled) return;
-    refresh();
+    drainResponses().finally(refresh);
     const sub = AppState.addEventListener("change", (s) => {
-      if (s === "active") refresh();
+      if (s === "active") drainResponses().finally(refresh);
     });
     return () => sub.remove();
-  }, [enabled, refresh]);
+  }, [enabled, refresh, drainResponses]);
 
   // Poll while end alarm is armed — recompute ETA every 60s using latest GPS.
   useEffect(() => {
@@ -201,20 +225,15 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
   useEffect(() => {
     if (!enabled) return;
     listenerRef.current?.remove();
-    const sub = alarms.addResponseListener(async (r) => {
-      // Distinguish end-phase by the `-end` suffix the native module receives
-      // via the second scheduled alarm.
-      const phase: "start" | "end" = r.scheduleId?.endsWith("-end") ? "end" : "start";
-      const cleanedId = phase === "end" ? r.scheduleId.slice(0, -4) : r.scheduleId;
-      await submitAlarmResponse({ ...r, scheduleId: cleanedId }, phase);
-      setTimeout(refresh, 500);
+    const sub = alarms.addResponseListener(async () => {
+      if (await drainResponses()) setTimeout(refresh, 500);
     });
     listenerRef.current = sub ?? null;
     return () => {
       listenerRef.current?.remove();
       listenerRef.current = null;
     };
-  }, [enabled, submitAlarmResponse, refresh]);
+  }, [enabled, drainResponses, refresh]);
 
   const scheduleShift = useCallback<Ctx["scheduleShift"]>(
     async (input) => {

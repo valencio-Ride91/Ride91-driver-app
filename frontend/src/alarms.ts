@@ -24,6 +24,7 @@ const RN = NativeModules.Ride91Alarms as
       schedule: (atMs: number, meta: Record<string, string>) => Promise<string>;
       cancel: (scheduleId: string) => Promise<boolean>;
       fireNow: (meta: Record<string, string>) => Promise<boolean>;
+      drainPending?: () => Promise<string>;
       addListener: (name: string) => void;
       removeListeners: (n: number) => void;
     }
@@ -38,7 +39,8 @@ export interface AlarmMeta {
 
 export interface AlarmResponse {
   scheduleId: string;
-  response: "awake" | "not_coming" | "snooze";
+  // start alarm: awake / not_coming · end alarm: heading_back / delayed · both: snooze
+  response: "awake" | "not_coming" | "snooze" | "heading_back" | "delayed";
   reasonCode?: string | null;
   reasonNote?: string | null;
   backBy?: string | null;
@@ -84,16 +86,30 @@ export const alarms = {
         scheduleId: meta.scheduleId,
         driverId: meta.driverId,
         title: meta.title ?? getCardText().alarm_title_start,
-      lang: getLang(),
+        lang: getLang(),
       });
     } catch {
       return false;
     }
   },
 
-  addResponseListener(cb: (r: AlarmResponse) => void): EmitterSubscription | null {
+  // Every answer the driver has given on the alarm screen since we last asked.
+  // The native side stores them because the alarm usually fires while the app
+  // is closed; reading them also clears them, so each is returned once.
+  async drainPending(): Promise<AlarmResponse[]> {
+    if (!RN?.drainPending) return [];
+    try {
+      const list = JSON.parse(await RN.drainPending());
+      return Array.isArray(list) ? (list as AlarmResponse[]) : [];
+    } catch {
+      return [];
+    }
+  },
+
+  // Fires when an answer has just been stored — a cue to call drainPending().
+  addResponseListener(cb: () => void): EmitterSubscription | null {
     const e = getEmitter();
     if (!e) return null;
-    return e.addListener("Ride91AlarmResponse", cb as (r: unknown) => void);
+    return e.addListener("Ride91AlarmResponse", cb);
   },
 };

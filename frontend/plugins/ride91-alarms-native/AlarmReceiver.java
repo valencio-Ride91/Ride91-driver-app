@@ -12,7 +12,7 @@ import androidx.core.app.NotificationCompat;
 
 /**
  * Fires when the AlarmManager wakes us. Builds a high-priority notification
- * with a full-screen intent that launches AlarmActivity — this is how Android
+ * with a full-screen intent that launches AlarmActivity - this is how Android
  * lifts the app over the lock screen without a push.
  */
 public class AlarmReceiver extends BroadcastReceiver {
@@ -35,6 +35,7 @@ public class AlarmReceiver extends BroadcastReceiver {
         full.putExtra(Ride91AlarmsModule.EXTRA_TITLE, title);
         full.putExtra(Ride91AlarmsModule.EXTRA_LANG, lang);
         full.putExtra("firedAt", firedAt);
+        full.putExtra("snoozes", intent.getIntExtra("snoozes", 0));
         full.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags |= PendingIntent.FLAG_IMMUTABLE;
@@ -61,7 +62,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                 .setFullScreenIntent(fsi, true);
 
         nm.notify(NOTIF_ID, b.build());
-        // Also start the activity directly — safe fallback when the phone is
+        // Also start the activity directly - safe fallback when the phone is
         // unlocked and awake (full-screen intent won't kick in there).
         try { ctx.startActivity(full); } catch (Throwable ignored) {}
     }
