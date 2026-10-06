@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import random
+import calendar
 import re
 import secrets
 import uuid
@@ -4799,10 +4800,20 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
     today_bd = business_date_now()
     month_start = _month_start_bd(today_bd)
     month = today_bd[:7]
+    # What the driver's card needs to explain the rules in plain words: their
+    # own hub-set shift time, the grace allowed, and how many days (today
+    # included) are still left to earn counted days this month.
+    _td = datetime.strptime(today_bd, "%Y-%m-%d").date()
+    explain = {
+        "grace_minutes": grace_min,
+        "shift_start_time": driver.get("shift_start_time") or None,
+        "days_left": calendar.monthrange(_td.year, _td.month)[1] - _td.day + 1,
+    }
     if not enabled:
         return {"enabled": False, "month": month, "good_days": 0, "min_days": min_days,
                 "month_gross": 0, "min_gross": min_gross, "bonus": bonus, "qualified": False,
-                "require_ontime": require_ontime, "daily_target": daily_target, "active": active, "paid": False}
+                "require_ontime": require_ontime, "daily_target": daily_target, "active": active,
+                "paid": False, **explain}
 
     did = driver["id"]
     # Daily gross for the month.
@@ -4885,7 +4896,7 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
         "month_gross": round(month_gross, 2), "min_gross": min_gross,
         "bonus": bonus, "qualified": qualified and active,
         "require_ontime": require_ontime, "daily_target": daily_target,
-        "active": active, "paid": paid,
+        "active": active, "paid": paid, **explain,
     }
 
 

@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
+import { AttendanceCard, AttendanceState } from "@/src/components/AttendanceCard";
 import { LoyaltyMilestonesCard, LoyaltyState } from "@/src/components/LoyaltyMilestonesCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
@@ -31,7 +32,7 @@ interface Loyalty {
   year: string;
   loyalty: LoyaltyState;
   wallet?: { enabled: boolean; per_day: number; qualifying_days: number; daily_accrued: number; milestone_credit: number; accrued: number; paid: number; balance: number; forfeited: number; active: boolean };
-  attendance?: { enabled: boolean; month: string; good_days: number; min_days: number; bonus: number; qualified: boolean; require_ontime: boolean; daily_target: number; paid: boolean };
+  attendance?: AttendanceState;
   yearly: { label: string; value: number; hub_leader: number; rank: number | null; of: number; gap_to_leader: number; reward: number };
 }
 
@@ -98,25 +99,7 @@ export default function RewardsTab() {
         </Card>
 
         {loyalty?.attendance?.enabled ? (
-          <Card testID="rewards-attendance-card" style={{ marginTop: spacing.md }}>
-            <View style={styles.head}>
-              <Text style={styles.cardTitle}>Attendance 📅</Text>
-              <Text style={styles.hint}>{loyalty.attendance.month}</Text>
-            </View>
-            <View style={styles.reward}>
-              <View style={styles.rewardHead}>
-                <Text style={styles.rewardLabel}>{loyalty.attendance.qualified ? "✅ Qualified" : "Good days this month"}</Text>
-                <Text style={styles.rewardAmount}>+{formatINR(loyalty.attendance.bonus)}</Text>
-              </View>
-              <View style={styles.bar}>
-                <View style={[styles.barFill, { width: `${loyalty.attendance.min_days ? Math.round(Math.min(1, loyalty.attendance.good_days / loyalty.attendance.min_days) * 100) : 0}%` as const, backgroundColor: loyalty.attendance.qualified ? colors.live : colors.amber }]} />
-              </View>
-              <View style={styles.rewardFoot}>
-                <Text style={styles.rewardProgress}>{loyalty.attendance.good_days} / {loyalty.attendance.min_days} days</Text>
-                <Text style={styles.rewardNote}>{loyalty.attendance.paid ? "paid 🎉" : `≥ ${formatINR(loyalty.attendance.daily_target)}/day${loyalty.attendance.require_ontime ? ", on time" : ""}`}</Text>
-              </View>
-            </View>
-          </Card>
+          <AttendanceCard data={loyalty.attendance} style={{ marginTop: spacing.md }} />
         ) : null}
 
         {loyalty?.wallet?.enabled ? (
