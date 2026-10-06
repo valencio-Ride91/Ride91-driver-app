@@ -278,7 +278,9 @@ class DriverOut(BaseModel):
     id: str
     name: str
     phone: str
-    vehicle_id: str
+    # None while the driver has no car allotted (new driver, or between
+    # allotments) — they must still be able to sign in.
+    vehicle_id: Optional[str] = None
     vehicle_number: str
     qr_code: str
     hub_name: Optional[str] = None
@@ -661,7 +663,7 @@ def _driver_out(driver: Dict, vehicle: Optional[Dict]) -> Dict:
         id=driver["id"],
         name=driver["name"],
         phone=driver["phone"],
-        vehicle_id=driver["vehicle_id"],
+        vehicle_id=driver.get("vehicle_id"),
         vehicle_number=vehicle["number"] if vehicle else "",
         qr_code=driver.get("qr_code", ""),
         hub_name=driver.get("hub_name"),
@@ -973,7 +975,7 @@ async def auth_logout(driver: Dict = Depends(get_driver), authorization: Optiona
 
 @api.get("/auth/me")
 async def me(driver: Dict = Depends(get_driver)):
-    vehicle = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0})
+    vehicle = await db.vehicles.find_one({"id": driver.get("vehicle_id")}, {"_id": 0})
     return {
         "driver": _driver_out(driver, vehicle),
         "vehicle": {k: v for k, v in (vehicle or {}).items()},
@@ -1023,7 +1025,7 @@ async def create_inspection(body: InspectionIn, driver: Dict = Depends(get_drive
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
-        "vehicle_id": driver["vehicle_id"],
+        "vehicle_id": driver.get("vehicle_id"),
         "day_key": day_key,
         "dashboard_photo_b64": body.dashboard_photo_b64,
         "exterior_video_b64": body.exterior_video_b64,
@@ -1083,7 +1085,7 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
-        "vehicle_id": driver["vehicle_id"],
+        "vehicle_id": driver.get("vehicle_id"),
         "state": body.state,
         "platforms": platforms,
         "started_at": body.started_at,
@@ -1487,7 +1489,7 @@ async def shift_end_eta(
     cur_lng = lng
     if cur_lat is None or cur_lng is None:
         last = await db.vehicle_pings.find_one(
-            {"vehicle_id": driver["vehicle_id"]},
+            {"vehicle_id": driver.get("vehicle_id")},
             {"_id": 0},
             sort=[("recorded_at", -1)],
         )
@@ -1498,7 +1500,7 @@ async def shift_end_eta(
         cur_lat = hub_lat
         cur_lng = hub_lng
     distance_km = _haversine_km(cur_lat, cur_lng, hub_lat, hub_lng)
-    avg_speed = await _avg_speed_from_pings(driver["vehicle_id"])
+    avg_speed = await _avg_speed_from_pings(driver.get("vehicle_id"))
     eta_min = (distance_km / avg_speed) * 60 if avg_speed > 0 else 0
     buffer_min = row.get("end_buffer_min") or 10
     shift_end_dt = _parse_iso(row["shift_end"])
@@ -4918,7 +4920,7 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
     car_y, car_week, car_days = driver_y, driver_week, set(driver_days)
     if driver.get("vehicle_id"):
         async for p in db.drivers.find(
-            {"vehicle_id": driver["vehicle_id"], "id": {"$ne": driver["id"]}, "archived": {"$ne": True}},
+            {"vehicle_id": driver.get("vehicle_id"), "id": {"$ne": driver["id"]}, "archived": {"$ne": True}},
             {"_id": 0, "id": 1},
         ):
             py, pw, pd = await _one(p["id"])
@@ -6621,7 +6623,7 @@ async def vehicle_distance(
     day when nothing is passed. Restricted to the caller's own vehicle to
     avoid leaking one driver's mileage to another.
     """
-    if vehicle_id != driver["vehicle_id"]:
+    if vehicle_id != driver.get("vehicle_id"):
         raise HTTPException(403, "not_your_vehicle")
     if business_date:
         start, end = business_day_bounds(business_date)
