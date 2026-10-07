@@ -149,6 +149,13 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "razorpay_key_id": "",
     "razorpay_key_secret": "",
     "razorpay_webhook_secret": "",
+    # RazorpayX (payouts to drivers). Same rules: owner-editable, override the
+    # env vars, secrets never returned. A blank key ID / secret falls back to
+    # the Razorpay pair above, since one Razorpay account uses one set of keys.
+    "razorpayx_key_id": "",
+    "razorpayx_key_secret": "",
+    "razorpayx_account_number": "",        # the RazorpayX account the payouts are debited from
+    "razorpayx_webhook_secret": "",
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -842,6 +849,10 @@ class SettingsIn(BaseModel):
     razorpay_key_id: Optional[str] = None
     razorpay_key_secret: Optional[str] = None
     razorpay_webhook_secret: Optional[str] = None
+    razorpayx_key_id: Optional[str] = None
+    razorpayx_key_secret: Optional[str] = None
+    razorpayx_account_number: Optional[str] = None
+    razorpayx_webhook_secret: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -2049,6 +2060,24 @@ def _payments_status() -> Dict[str, Any]:
         "razorpay_webhook_secret_set": bool(_rzp_webhook_secret()),
         "source": "settings" if from_settings else ("env" if RAZORPAY_KEY_ID else "none"),
         "webhook_url": "/api/webhooks/razorpay",
+        **_payouts_status(),
+    }
+
+
+def _payouts_status() -> Dict[str, Any]:
+    """RazorpayX (driver payouts) credential STATUS — never the secret values.
+    The account number is shown by its last four digits only."""
+    acct = _rzpx_account_number()
+    own_keys = _rzpx_own_keys()
+    return {
+        "razorpayx_enabled": _razorpayx_configured(),
+        "razorpayx_key_id": _rzpx_key_id() or None,        # Key ID is public
+        "razorpayx_key_secret_set": bool(_rzpx_key_secret()),
+        "razorpayx_account_masked": ("•••• " + acct[-4:]) if acct else None,
+        "razorpayx_webhook_secret_set": bool(_rzpx_webhook_secret()),
+        # Where the key pair comes from: its own, or shared with Razorpay above.
+        "razorpayx_keys": "own" if own_keys else ("shared" if _rzpx_key_id() else "none"),
+        "razorpayx_webhook_url": "/api/webhooks/razorpayx",
     }
 
 
@@ -2118,11 +2147,13 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
     # so blank fields don't wipe existing keys. These are SECRET: redacted from
     # the audit trail below.
     secret_keys = set()
-    for k in ("razorpay_key_id", "razorpay_key_secret", "razorpay_webhook_secret"):
+    for k in ("razorpay_key_id", "razorpay_key_secret", "razorpay_webhook_secret",
+              "razorpayx_key_id", "razorpayx_key_secret", "razorpayx_account_number",
+              "razorpayx_webhook_secret"):
         v = getattr(body, k)
         if v is not None and v.strip() != "":
             updates[k] = v.strip()
-            if k != "razorpay_key_id":
+            if k not in ("razorpay_key_id", "razorpayx_key_id"):
                 secret_keys.add(k)
     if updates:
         updates["updated_at"] = iso(now_utc())
@@ -2134,6 +2165,21 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
         await _audit(admin, "update_settings", "", meta)
     return {"ok": True, **_settings_out(), "payments": _payments_status(),
             "razorpayx_ready": _razorpayx_configured()}
+
+
+@api.post("/admin/settings/razorpayx/test")
+async def admin_test_razorpayx(admin: Dict = Depends(require_owner)):
+    """Check the saved RazorpayX keys and account number by asking RazorpayX
+    for the account's latest payout. Reads only; sends no money."""
+    if not _razorpayx_configured():
+        return {"ok": False, "error": "RazorpayX is not set up yet: a key ID, key secret and account number are all needed."}
+    try:
+        await _rzpx_request("GET", "/payouts", params={"account_number": _rzpx_account_number(), "count": 1})
+    except HTTPException as e:
+        return {"ok": False, "error": str(e.detail)}
+    except Exception as e:
+        return {"ok": False, "error": f"Could not reach RazorpayX ({type(e).__name__})."}
+    return {"ok": True}
 
 
 # ---- Audit log (manager+) --------------------------------------------------
@@ -5976,10 +6022,34 @@ RAZORPAYX_WEBHOOK_SECRET = os.environ.get("RAZORPAYX_WEBHOOK_SECRET", "")
 RAZORPAYX_BASE = "https://api.razorpay.com/v1"
 
 
+# Admin Settings win over the env vars. The key pair falls back to the Razorpay
+# one, but only as a pair, so a RazorpayX key ID is never matched with a
+# Razorpay secret. The account number has no fallback: payouts stay off until
+# someone enters it.
+def _rzpx_own_keys() -> bool:
+    return bool(get_setting("razorpayx_key_id") or RAZORPAYX_KEY_ID)
+
+
+def _rzpx_key_id() -> str:
+    return get_setting("razorpayx_key_id") or RAZORPAYX_KEY_ID or _rzp_key_id()
+
+
+def _rzpx_key_secret() -> str:
+    if _rzpx_own_keys():
+        return get_setting("razorpayx_key_secret") or RAZORPAYX_KEY_SECRET
+    return _rzp_key_secret()
+
+
+def _rzpx_account_number() -> str:
+    return get_setting("razorpayx_account_number") or RAZORPAYX_ACCOUNT_NUMBER
+
+
+def _rzpx_webhook_secret() -> str:
+    return get_setting("razorpayx_webhook_secret") or RAZORPAYX_WEBHOOK_SECRET
+
+
 def _razorpayx_configured() -> bool:
-    return bool(
-        RAZORPAYX_KEY_ID and RAZORPAYX_KEY_SECRET and RAZORPAYX_ACCOUNT_NUMBER
-    )
+    return bool(_rzpx_key_id() and _rzpx_key_secret() and _rzpx_account_number())
 
 
 async def _rzpx_request(method: str, path: str, **kw) -> Dict[str, Any]:
@@ -5990,7 +6060,7 @@ async def _rzpx_request(method: str, path: str, **kw) -> Dict[str, Any]:
         r = await c.request(
             method,
             RAZORPAYX_BASE + path,
-            auth=(RAZORPAYX_KEY_ID, RAZORPAYX_KEY_SECRET),
+            auth=(_rzpx_key_id(), _rzpx_key_secret()),
             **kw,
         )
     if r.status_code >= 400:
@@ -6222,7 +6292,7 @@ async def admin_create_payout(
     ref_id = body.reference_id or f"ride91-{action[:20]}"
     idem = body.idempotency_key or str(uuid.uuid4())
     payload = {
-        "account_number": RAZORPAYX_ACCOUNT_NUMBER,
+        "account_number": _rzpx_account_number(),
         "fund_account_id": fa["fund_account_id"],
         "amount": amount_paise,
         "currency": "INR",
@@ -6723,10 +6793,11 @@ async def razorpayx_webhook(req: Request):
     raw = await req.body()
     got = req.headers.get("X-Razorpay-Signature", "")
     event_hdr = req.headers.get("X-Razorpay-Event-Id", "")
-    if not RAZORPAYX_WEBHOOK_SECRET:
+    secret = _rzpx_webhook_secret()
+    if not secret:
         raise HTTPException(503, "webhook_not_configured")
     want = hmac.new(
-        RAZORPAYX_WEBHOOK_SECRET.encode(), raw, hashlib.sha256
+        secret.encode(), raw, hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(got, want):
         raise HTTPException(400, "bad_signature")

@@ -645,6 +645,14 @@ export interface PaymentsStatus {
   razorpay_webhook_secret_set: boolean;
   source: "settings" | "env" | "none" | string;
   webhook_url: string;
+  // RazorpayX (driver payouts). Absent on older servers.
+  razorpayx_enabled?: boolean;
+  razorpayx_key_id?: string | null;
+  razorpayx_key_secret_set?: boolean;
+  razorpayx_account_masked?: string | null;
+  razorpayx_webhook_secret_set?: boolean;
+  razorpayx_keys?: "own" | "shared" | "none";
+  razorpayx_webhook_url?: string;
 }
 
 export interface AuditRow {

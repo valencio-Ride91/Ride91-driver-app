@@ -32,6 +32,15 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [payMsg, setPayMsg] = useState<string | null>(null);
   const [payErr, setPayErr] = useState<string | null>(null);
 
+  // payout credentials (RazorpayX)
+  const [xKeyId, setXKeyId] = useState("");
+  const [xKeySecret, setXKeySecret] = useState("");
+  const [xAccount, setXAccount] = useState("");
+  const [xWebhook, setXWebhook] = useState("");
+  const [xBusy, setXBusy] = useState(false);
+  const [xMsg, setXMsg] = useState<string | null>(null);
+  const [xErr, setXErr] = useState<string | null>(null);
+
   // loyalty wallet
   const [wEnabled, setWEnabled] = useState(true);
   const [wPerDay, setWPerDay] = useState("");
@@ -176,6 +185,46 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setPayErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
     } finally {
       setPayBusy(false);
+    }
+  };
+
+  const savePayouts = async () => {
+    setXErr(null); setXMsg(null);
+    const body: Record<string, string> = {};
+    if (xKeyId.trim()) body.razorpayx_key_id = xKeyId.trim();
+    if (xKeySecret.trim()) body.razorpayx_key_secret = xKeySecret.trim();
+    if (xAccount.trim()) body.razorpayx_account_number = xAccount.trim();
+    if (xWebhook.trim()) body.razorpayx_webhook_secret = xWebhook.trim();
+    if (Object.keys(body).length === 0) return setXErr("Enter at least one value to update.");
+    // A key ID and its secret only work as a pair.
+    if (!!body.razorpayx_key_id !== !!body.razorpayx_key_secret && data?.payments?.razorpayx_keys !== "own") {
+      return setXErr("Enter the Key ID and the Key Secret together, or leave both blank to use the Razorpay keys above.");
+    }
+    setXBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", body);
+      setData(s);
+      setXKeyId(""); setXKeySecret(""); setXAccount(""); setXWebhook("");   // never keep secrets in the form
+      setXMsg("Payout credentials updated.");
+      setTimeout(() => setXMsg(null), 4000);
+    } catch (e: any) {
+      setXErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setXBusy(false);
+    }
+  };
+
+  const testPayouts = async () => {
+    setXErr(null); setXMsg(null);
+    setXBusy(true);
+    try {
+      const r = await api.post<{ ok: boolean; error?: string }>("/admin/settings/razorpayx/test");
+      if (r.ok) setXMsg("Connected: RazorpayX accepted the keys and the account number.");
+      else setXErr(r.error || "RazorpayX did not accept these details.");
+    } catch {
+      setXErr("Could not run the test.");
+    } finally {
+      setXBusy(false);
     }
   };
 
@@ -493,6 +542,71 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
             {payMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{payMsg}</div> : null}
             <div className="form-actions">
               <button className="primary" onClick={savePayments} disabled={payBusy}>{payBusy ? "Saving…" : "Update credentials"}</button>
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Payout credentials — RazorpayX {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          RazorpayX sends salary to drivers' banks. It powers direct withdrawal and the hub's "Pay now" button.{" "}
+          Status:{" "}
+          <span className={`tag ${data?.payments?.razorpayx_enabled ? "live" : "muted"}`} data-testid="rzpx-status">
+            {data?.payments?.razorpayx_enabled ? "ready" : "not set up"}
+          </span>
+        </div>
+        <table className="data" style={{ marginBottom: 12 }}>
+          <tbody>
+            <tr><td>Account number</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.payments?.razorpayx_account_masked ?? <span className="muted-sm">not set</span>}</td></tr>
+            <tr>
+              <td>Key ID</td>
+              <td style={{ fontFamily: "ui-monospace, monospace" }}>
+                {data?.payments?.razorpayx_key_id ?? <span className="muted-sm">—</span>}
+                {data?.payments?.razorpayx_keys === "shared" ? <span className="muted-sm" style={{ fontFamily: "inherit", marginLeft: 6 }}>(same as Razorpay above)</span> : null}
+              </td>
+            </tr>
+            <tr><td>Key Secret</td><td>{data?.payments?.razorpayx_key_secret_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+            <tr><td>Webhook Secret</td><td>{data?.payments?.razorpayx_webhook_secret_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+          </tbody>
+        </table>
+
+        {isOwner ? (
+          <>
+            <div className="muted-sm" style={{ marginBottom: 6 }}>
+              The account number is the RazorpayX account the money leaves from (RazorpayX → My Account &amp; Settings → Banking). Leave the Key ID and Key Secret blank to use the Razorpay keys above. Leave any field blank to keep its current value. Secrets are never shown back.
+            </div>
+            <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+              <label>RazorpayX account number
+                <input value={xAccount} onChange={(e) => setXAccount(e.target.value.replace(/\s/g, ""))} placeholder="leave blank to keep" autoComplete="off" inputMode="numeric" />
+              </label>
+              <label>Key ID (optional)
+                <input value={xKeyId} onChange={(e) => setXKeyId(e.target.value)} placeholder="rzp_live_…" autoComplete="off" />
+              </label>
+              <label>Key Secret (optional)
+                <input type="password" value={xKeySecret} onChange={(e) => setXKeySecret(e.target.value)} placeholder="•••••••• (leave blank to keep)" autoComplete="new-password" />
+              </label>
+              <label>Webhook Secret
+                <input type="password" value={xWebhook} onChange={(e) => setXWebhook(e.target.value)} placeholder="•••••••• (leave blank to keep)" autoComplete="new-password" />
+              </label>
+            </div>
+            <div className="muted-sm" style={{ marginTop: 6 }}>
+              The webhook tells Ride91 when a payout reaches the bank or fails. Add it in RazorpayX → Developer Controls → Webhooks with the same secret (URL: the API address followed by <code>{data?.payments?.razorpayx_webhook_url ?? "/api/webhooks/razorpayx"}</code>).
+            </div>
+            {data?.payments?.razorpayx_enabled && data.withdraw_direct ? (
+              <div className="muted-sm" style={{ marginTop: 6, color: "var(--alert)" }} data-testid="rzpx-live-note">
+                Direct withdrawal is on: drivers' withdrawals are now sent from this account without hub approval.
+              </div>
+            ) : null}
+            {xErr ? <div className="err">{xErr}</div> : null}
+            {xMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{xMsg}</div> : null}
+            <div className="form-actions">
+              <button className="primary" onClick={savePayouts} disabled={xBusy}>{xBusy ? "Working…" : "Update credentials"}</button>
+              <button className="ghost" onClick={testPayouts} disabled={xBusy || !data?.payments?.razorpayx_enabled}
+                title={data?.payments?.razorpayx_enabled ? "Reads only; sends no money" : "Save the account number and keys first"}>
+                Test connection
+              </button>
             </div>
           </>
         ) : null}
