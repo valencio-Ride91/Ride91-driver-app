@@ -156,6 +156,11 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "razorpayx_key_secret": "",
     "razorpayx_account_number": "",        # the RazorpayX account the payouts are debited from
     "razorpayx_webhook_secret": "",
+    # Google Maps key for the ADMIN PANEL's maps (Maps JavaScript API, locked
+    # to the panel's web address). Not a secret in the usual sense: any browser
+    # key is visible to whoever loads the page, which is why it must be
+    # referrer-restricted. Blank = the panel uses OpenStreetMap.
+    "google_maps_web_key": "",
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -854,6 +859,8 @@ class SettingsIn(BaseModel):
     razorpayx_key_secret: Optional[str] = None
     razorpayx_account_number: Optional[str] = None
     razorpayx_webhook_secret: Optional[str] = None
+    # Send "" to remove the key and go back to OpenStreetMap.
+    google_maps_web_key: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -2150,7 +2157,19 @@ async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
         "business_day_cutoff_ist": "04:00",   # cutoff is read-only
         "payments": _payments_status(),
         "razorpayx_ready": _razorpayx_configured(),   # direct withdrawal needs this
+        "google_maps_web_key": _maps_web_key() or None,
     }
+
+
+def _maps_web_key() -> str:
+    return (get_setting("google_maps_web_key") or os.environ.get("GOOGLE_MAPS_WEB_KEY", "")).strip()
+
+
+@api.get("/admin/map-config")
+async def admin_map_config(admin: Dict = Depends(get_admin)):
+    """What the admin panel's maps need. Open to every signed-in admin (hub
+    managers see maps too), unlike the rest of Settings."""
+    return {"google_maps_key": _maps_web_key() or None}
 
 
 def _clean_milestones(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2217,6 +2236,8 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
             updates[k] = v.strip()
             if k not in ("razorpay_key_id", "razorpayx_key_id"):
                 secret_keys.add(k)
+    if body.google_maps_web_key is not None:
+        updates["google_maps_web_key"] = body.google_maps_web_key.strip()
     if updates:
         updates["updated_at"] = iso(now_utc())
         updates["updated_by"] = admin["username"]
@@ -2226,7 +2247,8 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
                 for k, v in updates.items() if k not in ("updated_at", "updated_by")}
         await _audit(admin, "update_settings", "", meta)
     return {"ok": True, **_settings_out(), "payments": _payments_status(),
-            "razorpayx_ready": _razorpayx_configured()}
+            "razorpayx_ready": _razorpayx_configured(),
+            "google_maps_web_key": _maps_web_key() or None}
 
 
 @api.post("/admin/settings/razorpayx/test")

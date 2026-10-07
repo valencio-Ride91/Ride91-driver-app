@@ -654,6 +654,7 @@ export interface SettingsData {
   withdraw_direct: boolean;
   withdraw_direct_daily_max: number;
   razorpayx_ready?: boolean;       // RazorpayX payouts are set up on the server
+  google_maps_web_key?: string | null;   // admin panel maps; null = OpenStreetMap
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
 }

@@ -63,6 +63,12 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [aMsg, setAMsg] = useState<string | null>(null);
   const [aErr, setAErr] = useState<string | null>(null);
 
+  // admin panel maps (Google Maps key)
+  const [mKey, setMKey] = useState("");
+  const [mBusy, setMBusy] = useState(false);
+  const [mMsg, setMMsg] = useState<string | null>(null);
+  const [mErr, setMErr] = useState<string | null>(null);
+
   // salary withdrawal
   const [sDirect, setSDirect] = useState(true);
   const [sDailyMax, setSDailyMax] = useState("");
@@ -274,6 +280,22 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setAErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
     } finally {
       setABusy(false);
+    }
+  };
+
+  const saveMapsKey = async (value: string) => {
+    setMErr(null); setMMsg(null);
+    if (value && !/^AIza[\w-]{20,}$/.test(value)) return setMErr("That does not look like a Google Maps key (they start with AIza).");
+    setMBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", { google_maps_web_key: value });
+      setData(s);
+      setMKey("");
+      setMMsg(value ? "Saved. Reload the page to see Google Maps." : "Removed. Reload the page to go back to OpenStreetMap.");
+    } catch (e: any) {
+      setMErr(e?.body?.detail === "owner_only" ? "Only an owner can change this." : "Could not save.");
+    } finally {
+      setMBusy(false);
     }
   };
 
@@ -607,6 +629,39 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
                 title={data?.payments?.razorpayx_enabled ? "Reads only; sends no money" : "Save the account number and keys first"}>
                 Test connection
               </button>
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Maps in this panel {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          The Live map and each driver's Activity log map use{" "}
+          <span className={`tag ${data?.google_maps_web_key ? "live" : "muted"}`} data-testid="maps-engine">
+            {data?.google_maps_web_key ? "Google Maps" : "OpenStreetMap"}
+          </span>
+          {data?.google_maps_web_key
+            ? <span style={{ marginLeft: 6, fontFamily: "ui-monospace, monospace" }}>key {data.google_maps_web_key.slice(0, 8)}…{data.google_maps_web_key.slice(-4)}</span>
+            : null}
+        </div>
+        {isOwner ? (
+          <>
+            <div className="muted-sm" style={{ marginBottom: 6 }}>
+              To use Google Maps, paste a key for the <b>Maps JavaScript API</b> that is restricted to this panel's web address. The key for the driver app will not work here. If Google refuses the key, the maps fall back to OpenStreetMap by themselves.
+            </div>
+            <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+              <label>Google Maps key for this panel
+                <input value={mKey} onChange={(e) => setMKey(e.target.value.trim())} placeholder="AIza…" autoComplete="off" />
+              </label>
+            </div>
+            {mErr ? <div className="err">{mErr}</div> : null}
+            {mMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{mMsg}</div> : null}
+            <div className="form-actions">
+              <button className="primary" onClick={() => saveMapsKey(mKey)} disabled={mBusy || !mKey}>{mBusy ? "Saving…" : "Save key"}</button>
+              {data?.google_maps_web_key ? (
+                <button className="ghost" onClick={() => saveMapsKey("")} disabled={mBusy}>Remove key (use OpenStreetMap)</button>
+              ) : null}
             </div>
           </>
         ) : null}
