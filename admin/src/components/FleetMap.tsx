@@ -140,6 +140,14 @@ export default function FleetMap({ pins, fit }: Props) {
 
 const positionsKey = (pins: MapPin[]) => pins.map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join("|");
 
+// The pins the view is fitted to. Faded pins (stale positions) are left out
+// when there are fresh ones: one car last heard from weeks ago in another
+// city would otherwise zoom the map out to the whole country.
+const pinsToFit = (pins: MapPin[]) => {
+  const fresh = pins.filter((p) => !p.faded);
+  return fresh.length ? fresh : pins;
+};
+
 // ---- Google Maps -----------------------------------------------------------
 
 function googleIcon(g: any, p: MapPin) {
@@ -225,16 +233,17 @@ function GoogleView({ g, pins, fit }: { g: any; pins: MapPin[]; fit: Props["fit"
       }
     }
 
-    const key = positionsKey(pins);
-    const due = pins.length > 0 && (fit === "always" ? fitted.current !== key : fitted.current === null);
+    const view = pinsToFit(pins);
+    const key = positionsKey(view);
+    const due = view.length > 0 && (fit === "always" ? fitted.current !== key : fitted.current === null);
     if (due) {
       fitted.current = key;
-      if (pins.length === 1) {
-        map.current.setCenter({ lat: pins[0].lat, lng: pins[0].lng });
+      if (view.length === 1) {
+        map.current.setCenter({ lat: view[0].lat, lng: view[0].lng });
         map.current.setZoom(15);
       } else {
         const b = new g.LatLngBounds();
-        pins.forEach((p) => b.extend({ lat: p.lat, lng: p.lng }));
+        view.forEach((p) => b.extend({ lat: p.lat, lng: p.lng }));
         map.current.fitBounds(b, 40);
         // A cluster of presses at one spot would zoom in to the doorstep.
         g.event.addListenerOnce(map.current, "idle", () => {
@@ -274,14 +283,15 @@ const leafletIcon = (p: MapPin) =>
 function LeafletFit({ pins, fit }: { pins: MapPin[]; fit: Props["fit"] }) {
   const map = useMap();
   const fitted = useRef<string | null>(null);
-  const key = positionsKey(pins);
+  const view = pinsToFit(pins);
+  const key = positionsKey(view);
   useEffect(() => {
-    const due = pins.length > 0 && (fit === "always" ? fitted.current !== key : fitted.current === null);
+    const due = view.length > 0 && (fit === "always" ? fitted.current !== key : fitted.current === null);
     if (!due) return;
     fitted.current = key;
-    if (pins.length === 1) map.setView([pins[0].lat, pins[0].lng], 15);
-    else map.fitBounds(L.latLngBounds(pins.map((p) => [p.lat, p.lng] as [number, number])), { padding: [30, 30], maxZoom: 17 });
-    // `key` stands in for `pins`, which is a new array on every render
+    if (view.length === 1) map.setView([view[0].lat, view[0].lng], 15);
+    else map.fitBounds(L.latLngBounds(view.map((p) => [p.lat, p.lng] as [number, number])), { padding: [30, 30], maxZoom: 17 });
+    // `key` stands in for `view`, which is a new array on every render
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, fit, map]);
   return null;
