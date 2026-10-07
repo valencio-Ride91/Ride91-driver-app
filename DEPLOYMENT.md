@@ -15,7 +15,7 @@ for Play App Signing.
 | Decision | Status | Notes |
 |---|---|---|
 | **Application ID** | `com.ride91.driver` (set in `app.json`) | **Immutable once uploaded to Play.** Was the Emergent placeholder `com.emergent.fleetmobile.uefjzz`. Confirm you're happy with `com.ride91.driver` before the first upload. |
-| **Google Maps API key** | ❌ placeholder | `app.json → android.config.googleMaps.apiKey` is `REPLACE_WITH_GOOGLE_MAPS_API_KEY`. The Home map is blank until a real key is set, restricted to this package + the release signing SHA-1. |
+| **Google Maps API key** | ✅ created, kept out of git | Key "Ride91 driver app maps" in the Ride91 Google Cloud project, restricted to `com.ride91.driver` + the signing SHA-1 and to Maps SDK for Android. `app.json` keeps the placeholder; `app.config.js` reads the real key from the `GOOGLE_MAPS_API_KEY` environment variable at `expo prebuild`. If the app is re-signed (e.g. for Play), add the new SHA-1 to the key. |
 | **Privacy policy URL** | ❌ needed | Play requires one for an app that collects location + camera. Host a page and enter it in the Play data-safety form. |
 | **Backend deployed** | ❌ not live | `fleet-mobile-16` does not yet have the bookings / dashboard / QR-deposit / cash-model / charging endpoints. Deploy the backend (separate task) or the app will hit 404s. |
 
