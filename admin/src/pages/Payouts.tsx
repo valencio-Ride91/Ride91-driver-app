@@ -11,6 +11,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, DriverRow, PayoutRow, downloadCsv } from "../api";
+import WithdrawalRequests from "../components/WithdrawalRequests";
 
 function fmtINR(n: number) {
   return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -132,7 +133,10 @@ export default function Payouts({ hubId }: { hubId?: string }) {
   return (
     <div>
       {hubId ? null : <h1>Payouts</h1>}
-      <div className="sub">RazorpayX driver payouts · test mode</div>
+      <div className="sub" style={{ marginBottom: 12 }}>Salary withdrawal requests from drivers, and RazorpayX payouts · test mode</div>
+
+      {/* Drivers ask to withdraw salary from the app; pay or reject them here. */}
+      <WithdrawalRequests hubId={hubId} onPaid={load} />
 
       <div className="card" style={{ padding: 20, marginBottom: 20 }}>
         <h2 style={{ margin: 0, marginBottom: 12, fontSize: 16 }}>New payout</h2>

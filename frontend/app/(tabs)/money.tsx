@@ -7,6 +7,7 @@ import { Card } from "@/src/components/ui";
 import { CollectionQrCard } from "@/src/components/CollectionQrCard";
 import { PayDuesButton } from "@/src/components/PayDuesButton";
 import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
+import { SalaryCard } from "@/src/components/SalaryCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
@@ -148,6 +149,9 @@ export default function Money() {
             {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? c.earn_days(earn!.days_operated) : ""}
           </Text>
         </Card>
+
+        {/* Salary cash-out — what the driver can withdraw, and the button to ask for it */}
+        <SalaryCard style={{ marginTop: spacing.md }} />
 
         {/* CARD 2 — Yesterday's cash (collected vs deposited) */}
         <Card testID="yesterday-cash-card" style={{ marginTop: spacing.md }}>

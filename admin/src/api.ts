@@ -480,6 +480,34 @@ export interface EarningsForDate {
   count: number;
 }
 
+// A driver's request to withdraw salary; the hub pays or rejects it.
+export interface WithdrawalRow {
+  id: string;
+  driver_id: string;
+  driver_name: string | null;
+  driver_phone: string | null;
+  amount: number;
+  state: "pending" | "paid" | "rejected";
+  method: "razorpayx" | "manual" | null;
+  reference: string | null;
+  note: string | null;
+  requested_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  payout_id: string | null;
+  bank_kind: "bank_account" | "vpa" | null;
+  bank_masked: string | null;
+  // pending rows only: what the driver could be paid right now, and the cash they owe
+  payable_now?: number;
+  cash_owed?: number;
+}
+export interface WithdrawalsResponse {
+  items: WithdrawalRow[];
+  count: number;
+  pending: number;
+  razorpayx_ready: boolean;
+}
+
 export interface DutySegment {
   state: string;
   platforms: string[];

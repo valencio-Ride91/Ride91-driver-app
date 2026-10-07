@@ -138,6 +138,9 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "attendance_monthly_min_days": 27,     # good days needed in the month
     "attendance_monthly_min_gross": 0,     # optional monthly gross floor (0 = ignore)
     "attendance_monthly_bonus": 3000,      # ₹ paid when the month qualifies
+    # Salary cash-out (driver asks, hub pays).
+    "withdraw_min_amount": 100,            # smallest salary withdrawal a driver may request (₹)
+    "withdraw_hold_cash_owed": True,       # hold back salary equal to the collection cash the driver still owes
     # Razorpay credentials (owner-editable; override the env vars). Secret
     # values are never returned by the API — only their "set" status is.
     "razorpay_key_id": "",
@@ -6270,6 +6273,277 @@ async def admin_refresh_payout(
     return {"status": data.get("status"), "utr": data.get("utr")}
 
 
+# ---------- Salary cash-out ---------------------------------------------------
+# A driver's salary is their share of settled gross. They ask to withdraw it
+# from the app; the hub pays the request (RazorpayX payout to the saved bank /
+# UPI, or by hand) or rejects it.
+#
+#   earned    = share × settled gross, up to and including yesterday
+#   paid      = payouts already sent + requests the hub marked paid by hand
+#   pending   = requests waiting on the hub
+#   cash owed = collection cash the driver still has to hand in ("You owe")
+#   available = earned − paid − pending − cash owed        (never below 0)
+#
+# Cash owed is held back rather than deducted: the driver still pays it in the
+# usual way, and the held-back salary is released as soon as they do. Nothing
+# here ever writes to the cash ledger.
+
+# A payout in one of these states did not (or will not) reach the driver.
+PAYOUT_DEAD_STATES = {"failed", "reversed", "cancelled", "rejected"}
+
+
+async def _salary_state(driver: Dict, exclude_withdrawal_id: Optional[str] = None) -> Dict[str, Any]:
+    """The driver's salary position. `exclude_withdrawal_id` leaves one pending
+    request out of `pending`, so paying that request can be checked against
+    what is available without it counting against itself."""
+    did = driver["id"]
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    today_bd = business_date_now()
+
+    gross = 0.0
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"driver_id": did, "status": "settled", "business_date": {"$lt": today_bd}}},
+        {"$group": {"_id": None, "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
+    ]):
+        gross = float(r.get("g") or 0)
+    earned = round(gross * rate, 2)
+
+    paid = 0.0
+    async for p in db.payouts.find({"driver_id": did}, {"_id": 0, "amount_rupees": 1, "status": 1}):
+        if (p.get("status") or "") not in PAYOUT_DEAD_STATES:
+            paid += float(p.get("amount_rupees") or 0)
+    pending = 0.0
+    async for w in db.salary_withdrawals.find(
+        {"driver_id": did, "state": {"$in": ["pending", "paying", "paid"]}},
+        {"_id": 0, "id": 1, "amount": 1, "state": 1, "method": 1},
+    ):
+        if w["state"] in ("pending", "paying"):
+            if w["id"] != exclude_withdrawal_id:
+                pending += float(w.get("amount") or 0)
+        elif w.get("method") == "manual":
+            # Paid by hand, so there is no payout row carrying this amount.
+            paid += float(w.get("amount") or 0)
+
+    cash_owed = float((await _driver_balance(did)).get("you_owe") or 0)
+    held = cash_owed if get_setting("withdraw_hold_cash_owed") else 0.0
+    available = max(0.0, round(earned - paid - pending - held, 2))
+    return {
+        "share_rate": rate,
+        "gross": round(gross, 2),
+        "earned": earned,
+        "paid": round(paid, 2),
+        "pending": round(pending, 2),
+        "cash_owed": round(cash_owed, 2),
+        "cash_held_back": round(held, 2),
+        "available": available,
+        "min_amount": float(get_setting("withdraw_min_amount") or 0),
+    }
+
+
+def _withdrawal_out(w: Dict) -> Dict[str, Any]:
+    out = {k: w.get(k) for k in (
+        "id", "driver_id", "amount", "state", "method", "reference", "note",
+        "requested_at", "decided_at", "decided_by", "payout_id")}
+    # "paying" is an internal marker while a payment is in flight; to the
+    # driver and the hub the request is simply still pending.
+    if out["state"] == "paying":
+        out["state"] = "pending"
+        out["decided_by"] = None
+    return out
+
+
+class WithdrawIn(BaseModel):
+    # Leave the amount out to withdraw everything available.
+    amount_rupees: Optional[float] = Field(default=None, gt=0)
+    client_action_id: str
+
+
+@api.get("/money/salary")
+async def money_salary(driver: Dict = Depends(get_driver)):
+    """The driver's salary position and their recent withdrawal requests."""
+    state = await _salary_state(driver)
+    reqs = [_withdrawal_out(w) async for w in db.salary_withdrawals.find(
+        {"driver_id": driver["id"]}, {"_id": 0}).sort("requested_at", -1).limit(5)]
+    bank = await db.driver_bank_accounts.find_one({"driver_id": driver["id"]}, {"_id": 0, "kind": 1})
+    return {**state, "bank_saved": bool(bank), "has_pending": any(r["state"] == "pending" for r in reqs),
+            "requests": reqs}
+
+
+@api.post("/money/salary/withdraw")
+async def money_salary_withdraw(body: WithdrawIn, driver: Dict = Depends(get_driver)):
+    """Ask the hub to pay out salary. One request at a time; the amount can
+    never exceed what is available. Idempotent on client_action_id."""
+    did = driver["id"]
+    existing = await db.salary_withdrawals.find_one(
+        {"driver_id": did, "client_action_id": body.client_action_id}, {"_id": 0})
+    if existing:
+        return {"ok": True, "duplicate": True, "request": _withdrawal_out(existing)}
+    if await db.salary_withdrawals.find_one({"driver_id": did, "state": {"$in": ["pending", "paying"]}}, {"_id": 1}):
+        raise HTTPException(409, "withdrawal_pending")
+    state = await _salary_state(driver)
+    amount = round(float(body.amount_rupees if body.amount_rupees is not None else state["available"]), 2)
+    if amount <= 0 or state["available"] <= 0:
+        raise HTTPException(409, "nothing_to_withdraw")
+    if amount > state["available"] + 0.005:
+        raise HTTPException(409, "exceeds_available")
+    if amount < state["min_amount"]:
+        raise HTTPException(400, "below_minimum")
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": did,
+        "amount": amount,
+        "state": "pending",                 # pending | paid | rejected
+        "requested_at": iso(now_utc()),
+        "client_action_id": body.client_action_id,
+    }
+    await db.salary_withdrawals.insert_one(row.copy())
+    return {"ok": True, "duplicate": False, "request": _withdrawal_out(row)}
+
+
+@api.get("/admin/withdrawals")
+async def admin_withdrawals(
+    state: Optional[str] = None, hub_id: Optional[str] = None,
+    admin: Dict = Depends(fleet_admin),
+):
+    """Salary withdrawal requests, newest first. `?state=pending` is the hub's
+    to-pay queue; `?hub_id=` scopes to one hub's drivers. Each pending row
+    carries the driver's current salary position so the hub can see at a glance
+    whether it is still payable."""
+    q: Dict[str, Any] = {}
+    if state:
+        q["state"] = {"$in": ["pending", "paying"]} if state == "pending" else state
+    target = _hub_target(admin, hub_id)
+    if target:
+        q["driver_id"] = {"$in": await _hub_driver_ids(target)}
+    rows = [w async for w in db.salary_withdrawals.find(q, {"_id": 0}).sort("requested_at", -1).limit(300)]
+    who = await _drivers_by_ids([w.get("driver_id") for w in rows])
+    banks = {b["driver_id"]: b async for b in db.driver_bank_accounts.find(
+        {"driver_id": {"$in": [w["driver_id"] for w in rows] or ["_none"]}},
+        {"_id": 0, "driver_id": 1, "kind": 1, "masked": 1})}
+    items = []
+    for w in rows:
+        d = who.get(w["driver_id"], {})
+        out = _withdrawal_out(w)
+        out["driver_name"] = d.get("name")
+        out["driver_phone"] = d.get("phone")
+        b = banks.get(w["driver_id"])
+        out["bank_kind"] = b.get("kind") if b else None
+        out["bank_masked"] = b.get("masked") if b else None
+        if out["state"] == "pending":
+            drv = await db.drivers.find_one({"id": w["driver_id"]}, {"_id": 0, "id": 1})
+            if drv:
+                st = await _salary_state(drv, exclude_withdrawal_id=w["id"])
+                out["payable_now"] = st["available"]
+                out["cash_owed"] = st["cash_owed"]
+        items.append(out)
+    return {"items": items, "count": len(items),
+            "pending": sum(1 for i in items if i["state"] == "pending"),
+            "razorpayx_ready": _razorpayx_configured()}
+
+
+class WithdrawalPayIn(BaseModel):
+    # razorpayx: send the money now to the driver's saved bank / UPI.
+    # manual:    the hub paid some other way (cash, own bank transfer) and is recording it.
+    method: Literal["razorpayx", "manual"]
+    reference: Optional[str] = None      # required for manual (slip / UTR / "cash")
+
+
+@api.post("/admin/withdrawals/{withdrawal_id}/pay")
+async def admin_pay_withdrawal(
+    withdrawal_id: str, body: WithdrawalPayIn, admin: Dict = Depends(require_write)
+):
+    """Pay a pending withdrawal request. Re-checks the amount against the
+    driver's salary position at this moment, so a request that has since
+    become unpayable (e.g. the driver collected more cash) is refused."""
+    w = await db.salary_withdrawals.find_one({"id": withdrawal_id}, {"_id": 0})
+    if not w:
+        raise HTTPException(404, "withdrawal_not_found")
+    if w["state"] not in ("pending", "paying"):
+        raise HTTPException(409, "already_decided")
+    drv = await db.drivers.find_one({"id": w["driver_id"]}, {"_id": 0})
+    if not drv:
+        raise HTTPException(404, "driver_not_found")
+    st = await _salary_state(drv, exclude_withdrawal_id=withdrawal_id)
+    if float(w["amount"]) > st["available"] + 0.005:
+        raise HTTPException(409, "exceeds_available")
+    if body.method == "manual" and not (body.reference or "").strip():
+        raise HTTPException(400, "reference_required")
+
+    # Claim the request first, so two clicks (or two admins) cannot both pay it.
+    # A claim left behind by a crashed attempt can be taken over after two
+    # minutes; a RazorpayX retry is safe because the payout is keyed on this
+    # request's id and is returned rather than sent twice.
+    stale = iso(now_utc() - timedelta(minutes=2))
+    claimed = await db.salary_withdrawals.update_one(
+        {"id": withdrawal_id, "$or": [
+            {"state": "pending"},
+            {"state": "paying", "paying_at": {"$lt": stale}},
+        ]},
+        {"$set": {"state": "paying", "paying_at": iso(now_utc()), "decided_by": admin["username"]}},
+    )
+    if claimed.modified_count != 1:
+        raise HTTPException(409, "already_decided")
+
+    payout_id = None
+    try:
+        if body.method == "razorpayx":
+            ba = await db.driver_bank_accounts.find_one({"driver_id": w["driver_id"]}, {"_id": 0, "kind": 1})
+            if not ba:
+                raise HTTPException(400, "bank_account_not_saved")
+            res = await admin_create_payout(
+                AdminPayoutIn(
+                    driver_id=w["driver_id"],
+                    amount_rupees=float(w["amount"]),
+                    mode="UPI" if ba.get("kind") == "vpa" else "IMPS",
+                    narration="Ride91 salary",
+                    client_action_id=f"wd:{withdrawal_id}",
+                ),
+                admin,
+            )
+            payout_id = res["payout_id"]
+    except Exception:
+        # Nothing was sent: hand the request back to the queue.
+        await db.salary_withdrawals.update_one(
+            {"id": withdrawal_id, "state": "paying"},
+            {"$set": {"state": "pending"}, "$unset": {"decided_by": "", "paying_at": ""}},
+        )
+        raise
+
+    await db.salary_withdrawals.update_one(
+        {"id": withdrawal_id},
+        {"$set": {
+            "state": "paid", "method": body.method,
+            "reference": (body.reference or "").strip() or None,
+            "payout_id": payout_id,
+            "decided_at": iso(now_utc()), "decided_by": admin["username"],
+        }},
+    )
+    await _audit(admin, "pay_withdrawal", w["driver_id"],
+                 {"amount": w["amount"], "method": body.method, "withdrawal_id": withdrawal_id})
+    return {"ok": True, "id": withdrawal_id, "state": "paid", "payout_id": payout_id}
+
+
+@api.post("/admin/withdrawals/{withdrawal_id}/reject")
+async def admin_reject_withdrawal(
+    withdrawal_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_write)
+):
+    """Turn a pending request down; the amount goes back to the driver's
+    available salary. `note` is shown to the driver."""
+    res = await db.salary_withdrawals.update_one(
+        {"id": withdrawal_id, "state": "pending"},
+        {"$set": {"state": "rejected", "note": body.note,
+                  "decided_at": iso(now_utc()), "decided_by": admin["username"]}},
+    )
+    if res.modified_count != 1:
+        if not await db.salary_withdrawals.find_one({"id": withdrawal_id}, {"_id": 1}):
+            raise HTTPException(404, "withdrawal_not_found")
+        raise HTTPException(409, "already_decided")
+    w = await db.salary_withdrawals.find_one({"id": withdrawal_id}, {"_id": 0})
+    await _audit(admin, "reject_withdrawal", w["driver_id"],
+                 {"amount": w["amount"], "withdrawal_id": withdrawal_id})
+    return {"ok": True, "id": withdrawal_id, "state": "rejected"}
+
+
 # ---------- Webhook -----------------------------------------------------------
 
 @api.post("/webhooks/razorpayx")
@@ -6992,6 +7266,8 @@ async def _on_startup() -> None:
     await db.hubs.create_index([("name", 1)], unique=True)
     await db.vehicles.create_index([("hub_id", 1)])
     await db.driver_collection_qrs.create_index([("driver_id", 1)], unique=True)
+    await db.salary_withdrawals.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
+    await db.salary_withdrawals.create_index([("state", 1), ("requested_at", -1)])
     await db.collections.create_index([("razorpay_payment_id", 1)], unique=True)
     await db.collections.create_index([("driver_id", 1), ("business_date", 1)])
     await db.reward_payouts.create_index([("driver_id", 1), ("type", 1)])
