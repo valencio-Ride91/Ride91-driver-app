@@ -352,6 +352,23 @@ const en = {
   track_title: "Ride91 — on duty",
   track_body: "Sharing your location with the fleet.",
 
+  // ---- shift alarm card (Profile) ----
+  alarm_on: "Alarm on",
+  alarm_off: "Alarm off",
+  alarm_not_set: "Not set",
+  alarm_rings_at: "ALARM RINGS AT",
+  alarm_before_shift: (shift: string) => `1 hour before your shift at ${shift}`,
+  alarm_shift_starts: "YOUR SHIFT STARTS",
+  alarm_already_rang: "The alarm for this shift has already rung.",
+  alarm_in: (dur: string) => `in ${dur}`,
+  alarm_none: "No alarm set",
+  alarm_none_hub: "Your hub hasn't set your shift time yet. Ask your hub to set it and the alarm will switch on by itself.",
+  alarm_unavailable: "The alarm can't ring on this version of the app. Ask the office for the latest app.",
+  alarm_notif_off: "Notifications are off, so the alarm can't appear on your screen.",
+  alarm_allow: "Allow",
+  alarm_test: "Test the alarm",
+  alarm_test_note: "Rings now so you can check the sound. It doesn't change your real alarm.",
+
   // ---- salary cash-out ----
   sal_title: "Salary",
   sal_available: "AVAILABLE TO WITHDRAW",
@@ -738,6 +755,23 @@ const hi: CardText = {
   // ---- on-duty location notice (Android notification) ----
   track_title: "Ride91 — ड्यूटी पर",
   track_body: "आपकी लोकेशन फ़्लीट के साथ साझा हो रही है।",
+
+  // ---- shift alarm card (Profile) ----
+  alarm_on: "अलार्म चालू",
+  alarm_off: "अलार्म बंद",
+  alarm_not_set: "तय नहीं",
+  alarm_rings_at: "अलार्म बजेगा",
+  alarm_before_shift: (shift) => `आपकी ${shift} की शिफ़्ट से 1 घंटा पहले`,
+  alarm_shift_starts: "आपकी शिफ़्ट शुरू होगी",
+  alarm_already_rang: "इस शिफ़्ट का अलार्म बज चुका है।",
+  alarm_in: (dur) => `${dur} में`,
+  alarm_none: "कोई अलार्म नहीं लगा",
+  alarm_none_hub: "आपके हब ने अभी आपका शिफ़्ट समय तय नहीं किया है। हब से तय करवाएँ, अलार्म अपने आप चालू हो जाएगा।",
+  alarm_unavailable: "ऐप के इस वर्ज़न में अलार्म नहीं बज सकता। ऑफ़िस से नया ऐप लें।",
+  alarm_notif_off: "नोटिफ़िकेशन बंद हैं, इसलिए अलार्म आपकी स्क्रीन पर नहीं आ पाएगा।",
+  alarm_allow: "अनुमति दें",
+  alarm_test: "अलार्म जाँचें",
+  alarm_test_note: "अभी बजेगा ताकि आप आवाज़ जाँच सकें। आपका असली अलार्म नहीं बदलता।",
 
   // ---- salary cash-out ----
   sal_title: "वेतन",

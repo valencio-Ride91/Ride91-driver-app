@@ -79,6 +79,9 @@ interface Ctx {
 
 const ShiftAlarmCtx = createContext<Ctx | null>(null);
 
+// Schedule ids of test alarms start with this; their answers are never sent.
+const TEST_ID_PREFIX = "test-";
+
 // Only re-arm the native alarm when alarm_at drifts by more than this. Every
 // city block the ETA can wobble by ~seconds — no point burning battery on
 // AlarmManager churn.
@@ -185,6 +188,8 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
     const pending = await alarms.drainPending();
     for (const r of pending) {
       if (!r?.scheduleId || !r.response) continue;
+      // Answers to a test alarm are not real attendance signals — drop them.
+      if (r.scheduleId.startsWith(TEST_ID_PREFIX)) continue;
       // The end-of-shift alarm is scheduled under "<id>-end".
       const phase: "start" | "end" = r.scheduleId.endsWith("-end") ? "end" : "start";
       const cleanedId = phase === "end" ? r.scheduleId.slice(0, -4) : r.scheduleId;
@@ -272,23 +277,23 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
     [enabled, driver, refresh],
   );
 
+  // Ring the alarm now so the driver can check it works. A test always uses its
+  // own "test-…" id, never the real schedule's: answering a test must not count
+  // as answering the real wake-up (which would cancel it for the day).
   const testFireNow = useCallback<Ctx["testFireNow"]>(
     async (opts) => {
-      if (!driver) return;
+      if (!driver || !alarmsAvailable) return;
       const phase = opts?.phase ?? "start";
-      const scheduleId = phase === "end" ? `${next?.id ?? `test-${Date.now()}`}-end` : next?.id ?? `test-${Date.now()}`;
-      if (alarmsAvailable) {
-        await alarms.fireNow({
-          scheduleId,
-          driverId: driver.id,
-          title:
-            phase === "end"
-              ? getCardText().alarm_test_prefix + getCardText().alarm_title_end
-              : getCardText().alarm_test_prefix + getCardText().alarm_title_start,
-        });
-      }
+      await alarms.fireNow({
+        scheduleId: `${TEST_ID_PREFIX}${Date.now()}${phase === "end" ? "-end" : ""}`,
+        driverId: driver.id,
+        title:
+          phase === "end"
+            ? getCardText().alarm_test_prefix + getCardText().alarm_title_end
+            : getCardText().alarm_test_prefix + getCardText().alarm_title_start,
+      });
     },
-    [driver, next],
+    [driver],
   );
 
   const value = useMemo<Ctx>(
