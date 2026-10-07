@@ -2917,6 +2917,94 @@ async def admin_driver_detail(driver_id: str, admin: Dict = Depends(get_admin)):
     }
 
 
+# How far either side of a tap to look for a phone fix when the tap itself
+# carried no position.
+ACTIVITY_PING_WINDOW_SECONDS = 180
+
+
+async def _tap_position(driver_id: str, row: Dict, ts: datetime) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    """Where a button was pressed: (lat, lng, source). `source` is "tap" when
+    the phone sent its position with the press, "nearby_ping" when it did not
+    and the closest tracked fix within a few minutes is used instead, or None
+    when nothing is known. 0,0 from older app builds counts as unknown."""
+    lat, lng = row.get("lat"), row.get("lng")
+    if lat is not None and lng is not None and not (abs(lat) < 1e-6 and abs(lng) < 1e-6):
+        return lat, lng, "tap"
+    w = timedelta(seconds=ACTIVITY_PING_WINDOW_SECONDS)
+    best = None
+    async for p in db.phone_pings.find(
+        {"driver_id": driver_id, "lat": {"$ne": None},
+         "recorded_at": {"$gte": iso(ts - w)[:19], "$lte": iso(ts + w)[:19] + "~"}},
+        {"_id": 0, "lat": 1, "lng": 1, "recorded_at": 1},
+    ):
+        try:
+            gap = abs((_parse_iso(p["recorded_at"]) - ts).total_seconds())
+        except Exception:
+            continue
+        if p.get("lng") is not None and gap <= ACTIVITY_PING_WINDOW_SECONDS and (best is None or gap < best[0]):
+            best = (gap, p)
+    if best:
+        return best[1]["lat"], best[1]["lng"], "nearby_ping"
+    return None, None, None
+
+
+async def _activity_log(driver_id: str, business_date: str) -> List[Dict[str, Any]]:
+    """Every button the driver pressed on a business day, oldest first, with
+    where it was pressed. Each entry says what the press did:
+
+      start_duty / end_duty
+      apps_changed       an Uber / Rapido / Ola switch — see turned_on / turned_off
+      to_charger / charging_started / charging_finished
+      no_change          a press that changed nothing (e.g. "Not online" twice)
+
+    `online_on` is the set of apps the driver was online on after the press.
+    """
+    day_start, day_end = business_day_bounds(business_date)
+    apps: set = set()
+    prev_state: Optional[str] = None
+    out: List[Dict[str, Any]] = []
+    async for r in db.duty_states.find({"driver_id": driver_id}, {"_id": 0}).sort("started_at", 1):
+        try:
+            ts = _parse_iso(r["started_at"])
+        except Exception:
+            continue
+        state = r.get("state")
+        before = set(apps)
+        if state in ("start_duty", "end_duty"):
+            apps = set()
+        elif state in ("online", "not_online") or state in PLATFORMS:
+            plats = r.get("platforms")
+            if plats is None:
+                plats = [state] if state in PLATFORMS else []
+            apps = set(plats)
+        if day_start <= ts < day_end:
+            turned_on, turned_off = sorted(apps - before), sorted(before - apps)
+            if state in ("start_duty", "end_duty", "to_charger"):
+                action = state
+            elif state == "charging":
+                action = "charging_started"
+            elif state == "not_online" and prev_state == "charging":
+                action = "charging_finished"
+            elif turned_on or turned_off:
+                action = "apps_changed"
+            else:
+                action = "no_change"
+            lat, lng, where = await _tap_position(driver_id, r, ts)
+            out.append({
+                "id": r.get("id"),
+                "at": iso(ts),
+                "action": action,
+                "state": state,
+                "turned_on": [] if state == "start_duty" else turned_on,
+                "turned_off": [] if state == "start_duty" else turned_off,
+                "online_on": sorted(apps),
+                "lat": lat, "lng": lng, "location_source": where,
+                "source": r.get("source") or "driver",
+            })
+        prev_state = state
+    return out
+
+
 @api.get("/admin/drivers/{driver_id}/duty")
 async def admin_driver_duty(
     driver_id: str, date: Optional[str] = None, admin: Dict = Depends(get_admin)
@@ -2934,6 +3022,8 @@ async def admin_driver_duty(
     summary["last_ping_at"] = last.get("recorded_at")
     summary["last_lat"] = last.get("lat")
     summary["last_lng"] = last.get("lng")
+    # Every button press of the day, with where it was pressed.
+    summary["log"] = await _activity_log(driver_id, bd)
     return summary
 
 

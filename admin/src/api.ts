@@ -517,7 +517,23 @@ export interface DutySegment {
   to_ts: string;
   seconds: number;
 }
+// One button the driver pressed in the app, and where they were.
+export interface ActivityEntry {
+  id: string | null;
+  at: string;
+  action: "start_duty" | "end_duty" | "apps_changed" | "to_charger" | "charging_started" | "charging_finished" | "no_change";
+  state: string;
+  turned_on: string[];
+  turned_off: string[];
+  online_on: string[];              // apps the driver was online on after the press
+  lat: number | null;
+  lng: number | null;
+  // "tap": sent with the press. "nearby_ping": closest tracked position within 3 minutes.
+  location_source: "tap" | "nearby_ping" | null;
+  source: string;
+}
 export interface DutySummary {
+  log?: ActivityEntry[];            // absent on older servers
   segments: DutySegment[];
   totals_seconds: Record<string, number>;
   on_duty: boolean;

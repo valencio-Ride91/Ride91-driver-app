@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, DutySummary } from "../api";
 import { fmtDur, fmtAgo, todayISO, platformColor } from "./duty-format";
+import ActivityLog from "./ActivityLog";
 
 const STATE_COLOR: Record<string, string> = {
   online: "var(--live, #16a34a)",
@@ -88,6 +89,8 @@ export default function DutyCard({ driverId }: { driverId: string }) {
               <div className="muted-sm" style={{ marginTop: 6 }}>Timeline of the day — hover a block for platform &amp; duration.</div>
             </>
           ) : <div className="empty">No duty recorded for this day.</div>}
+
+          {d.log ? <ActivityLog entries={d.log} /> : null}
         </>
       )}
     </div>
