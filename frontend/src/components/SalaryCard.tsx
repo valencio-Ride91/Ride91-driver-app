@@ -61,7 +61,9 @@ const LIVE_TINT = "#E3F1EA";
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 
-export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }> = ({ style, onChanged }) => {
+// `refreshKey`: change it to make the card reload now (e.g. after a cash
+// deposit releases held-back salary).
+export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void; refreshKey?: number }> = ({ style, onChanged, refreshKey }) => {
   const c = useCardText();
   const [data, setData] = useState<Salary | null>(null);
   const [open, setOpen] = useState(false);
@@ -82,7 +84,7 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
     load();
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, refreshKey]);
 
   const openSheet = () => {
     if (!data) return;

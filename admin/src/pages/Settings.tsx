@@ -536,7 +536,7 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
               </label>
             </div>
             <div className="muted-sm" style={{ marginTop: 6 }}>
-              After changing the Webhook Secret, update it in Razorpay → Settings → Webhooks (URL: <code>{data?.payments?.webhook_url ?? "/api/webhooks/razorpay"}</code>).
+              After changing the Webhook Secret, update it in Razorpay → Settings → Webhooks (URL: <code>{data?.payments?.webhook_url ?? "/api/webhooks/razorpay"}</code>). Switch on these events there: <code>payment.captured</code>, <code>payment_link.paid</code>, <code>qr_code.credited</code>.
             </div>
             {payErr ? <div className="err">{payErr}</div> : null}
             {payMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{payMsg}</div> : null}

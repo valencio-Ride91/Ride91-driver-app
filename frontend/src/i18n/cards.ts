@@ -61,6 +61,15 @@ const en = {
   in_credit: "In credit",
   you_owe: "You owe",
   over_limit_deposit: (limit: number) => `Over ₹${limit} — deposit now`,
+  dep_btn: (amt: string) => `Deposit ${amt} by link`,
+  dep_waiting: (amt: string) => `Waiting for your payment of ${amt}…`,
+  dep_open: "Open payment link",
+  dep_share: "Share link",
+  dep_share_msg: (amt: string, url: string) => `Ride91 cash deposit of ${amt}. Pay here: ${url}`,
+  dep_paid: (amt: string) => `${amt} received. Thank you.`,
+  dep_note: "Pay by UPI, card or net banking. Your cash in hand updates as soon as the payment is done.",
+  dep_err_setup: "Online deposit is not set up yet. Hand in the cash at the office.",
+  dep_err_generic: "Could not make the link. Try again.",
   pay_dues: (amt: string) => `Pay ₹${amt} dues via UPI / card`,
 
   // ---- Collection QR ----
@@ -476,6 +485,15 @@ const hi: CardText = {
   in_credit: "आपका जमा",
   you_owe: "आप पर बाकी",
   over_limit_deposit: (limit) => `₹${limit} से ज़्यादा — अभी जमा करें`,
+  dep_btn: (amt) => `${amt} लिंक से जमा करें`,
+  dep_waiting: (amt) => `${amt} के भुगतान की प्रतीक्षा…`,
+  dep_open: "भुगतान लिंक खोलें",
+  dep_share: "लिंक भेजें",
+  dep_share_msg: (amt, url) => `Ride91 नकद जमा ${amt}। यहाँ भुगतान करें: ${url}`,
+  dep_paid: (amt) => `${amt} मिल गए। धन्यवाद।`,
+  dep_note: "UPI, कार्ड या नेट बैंकिंग से भुगतान करें। भुगतान होते ही आपके पास का नकद अपडेट हो जाता है।",
+  dep_err_setup: "ऑनलाइन जमा अभी चालू नहीं है। नकद ऑफ़िस में जमा करें।",
+  dep_err_generic: "लिंक नहीं बन सका। फिर कोशिश करें।",
   pay_dues: (amt) => `₹${amt} बकाया UPI / कार्ड से चुकाएँ`,
 
   // ---- Collection QR ----

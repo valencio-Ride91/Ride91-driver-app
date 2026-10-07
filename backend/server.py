@@ -5656,6 +5656,209 @@ async def razorpay_qr_status(
 
 
 # ---------------------------------------------------------------------------
+# DEPOSIT LINK — the driver hands in the collection cash they are holding by
+# paying a Razorpay payment link. The app asks for a link for what the driver
+# owes, opens it, and watches for the payment. A paid link becomes a trusted
+# "deposit" row, exactly like the other Razorpay deposit paths, so "You owe"
+# drops as soon as the payment is seen.
+#
+# A payment is seen three ways, whichever comes first: the payment_link.paid
+# webhook, the payment.captured webhook (the link's notes ride on the payment),
+# or the app asking for the link's status, which checks Razorpay directly. So
+# the balance still updates if a webhook is late or was never switched on.
+# ---------------------------------------------------------------------------
+DEPOSIT_LINK_TTL_MINUTES = 30        # Razorpay needs expire_by at least 15 minutes ahead
+DEPOSIT_LINK_RECHECK_SECONDS = 4     # how often one link may be checked against Razorpay
+
+
+class DepositLinkIn(BaseModel):
+    client_action_id: str
+    # Leave out to pay everything owed. Never more than is owed.
+    amount_rupees: Optional[float] = Field(default=None, gt=0)
+
+
+def _deposit_link_out(rec: Dict) -> Dict[str, Any]:
+    status = rec["status"]
+    if status == "created" and int(now_utc().timestamp()) > int(rec.get("expire_by") or 0):
+        status = "expired"
+    return {
+        "client_action_id": rec["client_action_id"],
+        "status": status,                              # created | paid | expired | cancelled
+        "short_url": rec.get("short_url"),
+        "amount": round(int(rec["amount_paise"]) / 100, 2),
+        "amount_received": round(int(rec.get("amount_received_paise") or 0) / 100, 2),
+        "expire_by": rec.get("expire_by"),
+        "paid_at": rec.get("paid_at"),
+    }
+
+
+async def _reconcile_deposit_link_once(
+    link_id: str, razorpay_payment_id: Optional[str], amount_paise: int
+) -> None:
+    """Mark a deposit link paid and write its deposit row. Only the first call
+    for a link does anything, so the webhooks and the status check can all
+    report the same payment safely."""
+    r = await db.deposit_links.find_one_and_update(
+        {"link_id": link_id, "status": {"$ne": "paid"}},
+        {"$set": {
+            "status": "paid",
+            "razorpay_payment_id": razorpay_payment_id,
+            "amount_received_paise": int(amount_paise),
+            "paid_at": iso(now_utc()),
+        }},
+        return_document=False,
+    )
+    if not r:
+        return  # unknown or already paid — safe no-op
+    await db.qr_payments.update_one(
+        {"driver_id": r["driver_id"], "client_action_id": r["client_action_id"]},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "driver_id": r["driver_id"],
+            "type": "deposit",
+            "amount": round(int(amount_paise) / 100, 2),
+            "reference": link_id,
+            "platform": None,
+            "occurred_at": iso(now_utc()),
+            "business_date": business_date_now(),
+            "source": "razorpay",
+            "razorpay_payment_link_id": link_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "client_action_id": r["client_action_id"],
+            "created_at": iso(now_utc()),
+        }},
+        upsert=True,
+    )
+
+
+async def _refresh_deposit_link(rec: Dict) -> Dict:
+    """Bring one unpaid link up to date with Razorpay and return the stored
+    row. Rate-limited per link; a Razorpay hiccup just leaves the row as it is."""
+    if rec["status"] != "created":
+        return rec
+    recheck_before = iso(now_utc() - timedelta(seconds=DEPOSIT_LINK_RECHECK_SECONDS))
+    claimed = await db.deposit_links.update_one(
+        {"link_id": rec["link_id"], "status": "created",
+         "$or": [{"checked_at": None}, {"checked_at": {"$lt": recheck_before}}]},
+        {"$set": {"checked_at": iso(now_utc())}},
+    )
+    if claimed.modified_count != 1:
+        return rec
+    try:
+        pl = await _rzp_request("GET", f"/payment_links/{rec['link_id']}")
+    except HTTPException:
+        return rec
+    st = pl.get("status")
+    if st == "paid":
+        pays = pl.get("payments") or []
+        await _reconcile_deposit_link_once(
+            rec["link_id"],
+            (pays[0] or {}).get("payment_id") if pays else None,
+            int(pl.get("amount_paid") or rec["amount_paise"]),
+        )
+    elif st in ("cancelled", "expired"):
+        await db.deposit_links.update_one(
+            {"link_id": rec["link_id"], "status": "created"}, {"$set": {"status": st}})
+    return await db.deposit_links.find_one({"link_id": rec["link_id"]}, {"_id": 0}) or rec
+
+
+@api.post("/money/deposit-link")
+async def create_deposit_link(body: DepositLinkIn, driver: Dict = Depends(get_driver)):
+    """A Razorpay payment link for the collection cash the driver owes. The
+    amount is the server's figure for what is owed (or less, if the driver
+    asks for less) — never the client's word for it."""
+    if not _razorpay_configured():
+        raise HTTPException(503, "razorpay_not_configured")
+    did = driver["id"]
+    existing = await db.deposit_links.find_one(
+        {"driver_id": did, "client_action_id": body.client_action_id}, {"_id": 0})
+    if existing:
+        return _deposit_link_out(existing)
+    dues_paise = await _driver_dues_paise(did)
+    if dues_paise < 100:
+        raise HTTPException(409, "no_dues")
+    amount_paise = dues_paise
+    if body.amount_rupees is not None:
+        req = int(round(float(body.amount_rupees) * 100))
+        if req < 100:
+            raise HTTPException(400, "amount_below_minimum")
+        amount_paise = min(req, dues_paise)
+
+    now_ts = int(now_utc().timestamp())
+    # Links still open from earlier taps. One that was in fact paid is settled
+    # here first; one for this same amount with time left is handed back; the
+    # rest are cancelled, so there is never a second link that could be paid
+    # on top of this one.
+    async for old in db.deposit_links.find({"driver_id": did, "status": "created"}, {"_id": 0}):
+        old = await _refresh_deposit_link(old)
+        if old["status"] == "paid":
+            raise HTTPException(409, "just_paid")
+        if old["status"] != "created":
+            continue
+        if old["amount_paise"] == amount_paise and int(old.get("expire_by") or 0) > now_ts + 300:
+            return _deposit_link_out(old)
+        try:
+            await _rzp_request("POST", f"/payment_links/{old['link_id']}/cancel")
+        except HTTPException:
+            pass    # already expired or paid at Razorpay; the status check sorts it out
+        await db.deposit_links.update_one(
+            {"link_id": old["link_id"], "status": "created"}, {"$set": {"status": "cancelled"}})
+
+    expire_by = now_ts + DEPOSIT_LINK_TTL_MINUTES * 60
+    name = (driver.get("name") or "Ride91 driver").strip()
+    customer: Dict[str, Any] = {"name": name[:50]}
+    phone = str(driver.get("phone") or "")
+    if len(phone) == 10 and phone.isdigit():
+        customer["contact"] = "+91" + phone
+    pl = await _rzp_request(
+        "POST", "/payment_links",
+        json={
+            "amount": amount_paise,
+            "currency": "INR",
+            "accept_partial": False,
+            "expire_by": expire_by,
+            "reference_id": body.client_action_id[:40],
+            "description": f"Ride91 cash deposit - {name}"[:120],
+            "customer": customer,
+            "notify": {"sms": False, "email": False},
+            "reminder_enable": False,
+            "notes": {
+                "driver_id": did,
+                "client_action_id": body.client_action_id,
+                "purpose": "deposit_link",
+            },
+        },
+    )
+    row = {
+        "id": str(uuid.uuid4()),
+        "driver_id": did,
+        "client_action_id": body.client_action_id,
+        "link_id": pl["id"],
+        "short_url": pl.get("short_url"),
+        "amount_paise": amount_paise,
+        "status": "created",
+        "expire_by": expire_by,
+        "checked_at": None,
+        "created_at": iso(now_utc()),
+    }
+    await db.deposit_links.insert_one(row.copy())
+    return _deposit_link_out(row)
+
+
+@api.get("/money/deposit-link")
+async def current_deposit_link(driver: Dict = Depends(get_driver)):
+    """The driver's most recent deposit link, checked against Razorpay if it
+    is still unpaid. The app polls this while a link is open, and calls it on
+    opening the Earnings tab to pick up a payment made while it was closed."""
+    rec = await db.deposit_links.find_one(
+        {"driver_id": driver["id"]}, {"_id": 0}, sort=[("created_at", -1)])
+    if not rec:
+        return {"link": None}
+    rec = await _refresh_deposit_link(rec)
+    return {"link": _deposit_link_out(rec)}
+
+
+# ---------------------------------------------------------------------------
 # COLLECTION QR — a permanent, reusable UPI QR per driver. The RIDER scans it
 # and pays the fare; money lands in the fleet's Razorpay account, tagged with
 # the driver_id (notes.purpose = "collection"). This is tracked money only: it
@@ -5943,7 +6146,13 @@ async def razorpay_webhook(req: Request):
         client_action_id = notes.get("client_action_id")
         driver_id = notes.get("driver_id")
         amount_paise = payment.get("amount") or order.get("amount") or 0
-        if order_id and payment_id and client_action_id and driver_id:
+        if notes.get("purpose") == "deposit_link":
+            # A deposit link was paid; its notes ride on the payment.
+            link = await db.deposit_links.find_one(
+                {"driver_id": driver_id, "client_action_id": client_action_id}, {"_id": 0, "link_id": 1})
+            if link and payment_id:
+                await _reconcile_deposit_link_once(link["link_id"], payment_id, int(amount_paise))
+        elif order_id and payment_id and client_action_id and driver_id:
             await _reconcile_razorpay_once(
                 driver_id=driver_id,
                 client_action_id=client_action_id,
@@ -5951,6 +6160,20 @@ async def razorpay_webhook(req: Request):
                 razorpay_payment_id=payment_id,
                 amount_paise=int(amount_paise),
             )
+    elif kind == "payment_link.paid":
+        payload = event.get("payload") or {}
+        pl = (payload.get("payment_link") or {}).get("entity") or {}
+        payment = (payload.get("payment") or {}).get("entity") or {}
+        if pl.get("id"):
+            await _reconcile_deposit_link_once(
+                pl["id"], payment.get("id"),
+                int(pl.get("amount_paid") or payment.get("amount") or 0))
+    elif kind in ("payment_link.expired", "payment_link.cancelled"):
+        pl = ((event.get("payload") or {}).get("payment_link") or {}).get("entity") or {}
+        if pl.get("id"):
+            await db.deposit_links.update_one(
+                {"link_id": pl["id"], "status": "created"},
+                {"$set": {"status": kind.split(".")[1]}})
     elif kind == "qr_code.credited":
         # A dynamic QR was paid. No order_id exists on this path, so it is
         # reconciled against qr_code_id instead.
@@ -7482,6 +7705,11 @@ async def _on_startup() -> None:
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
     await db.razorpay_orders.create_index([("razorpay_order_id", 1)], unique=True)
+    # Deposit links: by client_action_id (create replay), link_id (reconcile),
+    # and newest-first per driver (the app's status poll).
+    await db.deposit_links.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
+    await db.deposit_links.create_index([("link_id", 1)], unique=True)
+    await db.deposit_links.create_index([("driver_id", 1), ("created_at", -1)])
     await db.webhook_events.create_index([("event_id", 1)], unique=True)
     # RazorpayX payouts (Part B).
     await db.driver_bank_accounts.create_index([("driver_id", 1)], unique=True)

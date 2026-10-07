@@ -5,6 +5,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { CollectionQrCard } from "@/src/components/CollectionQrCard";
+import { DepositByLink } from "@/src/components/DepositByLink";
 import { SalaryCard } from "@/src/components/SalaryCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
@@ -55,6 +56,7 @@ export default function Money() {
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<Period>("yesterday");
   const [earn, setEarn] = useState<Earnings | null>(null);
+  const [salaryKey, setSalaryKey] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -90,6 +92,13 @@ export default function Money() {
     await Promise.all([load(), loadEarn(period)]);
     setRefreshing(false);
   }, [load, loadEarn, period]);
+
+  // A deposit just landed: show the new balance, and let the Salary card
+  // release whatever was being held back against it.
+  const onDeposited = useCallback(() => {
+    load();
+    setSalaryKey((k) => k + 1);
+  }, [load]);
 
   const inCredit = (day?.in_credit ?? 0) > 0;
 
@@ -141,7 +150,7 @@ export default function Money() {
         </Card>
 
         {/* Salary cash-out — what the driver can withdraw, and the button to ask for it */}
-        <SalaryCard style={{ marginTop: spacing.md }} />
+        <SalaryCard style={{ marginTop: spacing.md }} refreshKey={salaryKey} />
 
         {/* CARD 2 — Yesterday's cash (collected vs deposited) */}
         <Card testID="yesterday-cash-card" style={{ marginTop: spacing.md }}>
@@ -187,6 +196,8 @@ export default function Money() {
               <Text style={styles.overLimitBannerText}>{c.over_limit_deposit(day.cash_limit)}</Text>
             </View>
           ) : null}
+          {/* Hand the cash in by payment link; the balance above updates as it is paid. */}
+          <DepositByLink owe={inCredit ? 0 : Math.max(0, day?.you_owe ?? 0)} onPaid={onDeposited} />
         </Card>
 
       </ScrollView>
