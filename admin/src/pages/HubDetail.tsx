@@ -36,7 +36,7 @@ const TABS: { key: TabKey; label: string; fleetOnly?: boolean }[] = [
   { key: "captures", label: "Captures", fleetOnly: true },
   { key: "documents", label: "Documents", fleetOnly: true },
   { key: "inspections", label: "Inspections", fleetOnly: true },
-  { key: "shiftalarms", label: "Shift alarms", fleetOnly: true },
+  { key: "shiftalarms", label: "Shift alarms" },
   { key: "payouts", label: "Payouts", fleetOnly: true },
 ];
 

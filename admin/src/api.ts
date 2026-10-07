@@ -200,6 +200,7 @@ export interface NotificationRow {
   created_at: string;
   created_by: string | null;
   read: boolean;
+  kind?: "system" | null;          // "system": an automatic note, not typed by the driver
   driver_name?: string | null;
   driver_phone?: string | null;
 }
@@ -719,6 +720,35 @@ export async function uploadForm<T>(path: string, form: FormData): Promise<T> {
     throw err;
   }
   return data as T;
+}
+
+// One driver on the hub's shift board.
+export interface ShiftBoardRow {
+  driver_id: string;
+  name: string | null;
+  driver_phone?: string | null;
+  shift_type: string;
+  active: boolean;
+  shift_start_time: string | null;      // "HH:MM" set by the hub, or null
+  status: "no_shift_time" | "alarm_pending" | "ringing" | "no_answer" | "coming" | "not_coming" | "late" | "not_started" | "started";
+  schedule_id?: string;
+  shift_start?: string;
+  alarm_at?: string;
+  answered_at?: string | null;
+  reason_code?: string | null;
+  reason_note?: string | null;
+  back_by?: string | null;
+  snoozes?: number;
+  duty_started_at?: string | null;
+  late_minutes?: number | null;
+  // Is the alarm really set on the driver's phone?
+  phone?: "ready" | "unknown" | "not_picked_up" | "notifications_off" | "no_alarm_in_app";
+}
+export interface ShiftBoardData {
+  items: ShiftBoardRow[];
+  counts: Record<string, number>;
+  count: number;
+  server_ts: string;
 }
 
 export interface AlarmRow {

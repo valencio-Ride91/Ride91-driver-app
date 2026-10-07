@@ -1496,6 +1496,11 @@ async def next_shift_alarm(driver: Dict = Depends(get_driver)):
         )
         if acked:
             syn = _ops_shift_next(driver, skip=1) or syn
+        # The app has this shift now. (Newer builds follow up with
+        # /shift-alarm/armed to say whether the alarm is really set.)
+        await db.alarm_arming.update_one(
+            {"driver_id": driver["id"], "schedule_id": syn["id"]},
+            {"$set": {"fetched_at": iso(now_utc())}}, upsert=True)
         return syn
     row = await db.shift_schedules.find_one(
         {
@@ -1620,6 +1625,10 @@ async def shift_end_eta(
 
 @api.post("/shift-alarm/response")
 async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(get_driver)):
+    # An answer to a test alarm is not attendance: accept it (so the phone's
+    # queue clears) and keep nothing.
+    if _is_test_alarm(body.schedule_id):
+        return {"ok": True, "ignored": True}
     if body.response == "not_coming":
         if not body.reason_code or body.reason_code not in ALARM_REASONS:
             raise HTTPException(400, "reason_required")
@@ -1650,6 +1659,14 @@ async def record_alarm_response(body: AlarmResponseIn, driver: Dict = Depends(ge
         "client_action_id": body.client_action_id,
     }
     await db.alarm_responses.insert_one(row.copy())
+    # Tell the hub at once when a driver is not coming.
+    if body.phase == "start" and body.response == "not_coming":
+        why = ALARM_REASON_TEXT.get(body.reason_code or "", body.reason_code or "")
+        if body.reason_code == "other" and body.reason_note:
+            why = body.reason_note.strip()[:200]
+        back = f" Back by {body.back_by}." if body.back_by else ""
+        await _post_system_message(
+            driver["id"], f"notcoming:{row['id']}", f"Not coming for the next shift. Reason: {why}.{back}")
     # Advance the correct phase's state on the schedule.
     if body.phase == "start" and body.response in ("awake", "not_coming"):
         await db.shift_schedules.update_one(
@@ -1671,6 +1688,288 @@ async def list_alarm_responses(driver: Dict = Depends(get_driver)):
         {"driver_id": driver["id"]}, {"_id": 0}
     ).sort("responded_at", -1)
     return {"items": [r async for r in cursor]}
+
+
+# ---------------------------------------------------------------------------
+# SHIFT BOARD — what the hub sees about each driver's coming shift: is the
+# wake-up alarm set on the phone, did it ring, did the driver say they are
+# coming or not, and have they started duty. Nothing here is stored as a
+# "status": it is worked out from the alarm answers and duty rows each time it
+# is asked for, so it can never drift from what actually happened.
+# ---------------------------------------------------------------------------
+
+# Alarms rung from "Test the alarm" (and old preview builds) carry these ids.
+# Their answers are not attendance and are never stored or shown.
+TEST_ALARM_PREFIXES = ("test-", "preview-", "local-")
+_TEST_ALARM_REGEX = "^(test-|preview-|local-)"
+
+ALARM_NO_ANSWER_MINUTES = 15     # alarm rang this long ago with no answer -> "no answer"
+SHIFT_NO_SHOW_MINUTES = 15       # shift began this long ago with no duty started -> "not started"
+
+ALARM_REASON_TEXT = {
+    "unwell": "Unwell", "family_emergency": "Family emergency",
+    "vehicle_problem": "Vehicle problem", "transport_problem": "Transport problem",
+    "personal": "Personal", "other": "Other",
+}
+
+
+def _is_test_alarm(schedule_id: Any) -> bool:
+    return str(schedule_id or "").startswith(TEST_ALARM_PREFIXES)
+
+
+def _shift_hhmm(driver: Dict) -> Optional[Tuple[int, int]]:
+    """The hub-set shift start as (hour, minute), or None if unset / malformed."""
+    raw = driver.get("shift_start_time")
+    if not raw:
+        return None
+    try:
+        hh, mm = (int(x) for x in str(raw).split(":")[:2])
+    except (ValueError, TypeError):
+        return None
+    return (hh, mm) if 0 <= hh <= 23 and 0 <= mm <= 59 else None
+
+
+def _shift_occurrence(driver: Dict, now: datetime) -> Optional[Dict[str, Any]]:
+    """The shift the board is about: the occurrence of the driver's shift time
+    nearest to now (so a 06:00 shift is "today's" from 18:00 the evening before
+    until 18:00 that day). Its id matches the one the phone's alarm carries."""
+    hm = _shift_hhmm(driver)
+    if not hm:
+        return None
+    now_ist = now.astimezone(IST)
+    base = now_ist.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+    cand = min((base + timedelta(days=d) for d in (-1, 0, 1)),
+               key=lambda c: abs((c - now_ist).total_seconds()))
+    start = cand.astimezone(timezone.utc)
+    return {
+        "schedule_id": f"opsshift:{driver['id']}:{business_date_from_dt(start)}",
+        "shift_start": start,
+        "alarm_at": start - timedelta(hours=1),
+    }
+
+
+async def _shift_status(driver: Dict, now: datetime) -> Dict[str, Any]:
+    """Where one driver stands for their nearest shift.
+
+    status:
+      no_shift_time   the hub has not set a shift time, so there is no alarm
+      alarm_pending   the alarm has not rung yet
+      ringing         it rang in the last few minutes; no answer yet
+      no_answer       it rang a while ago and was never answered
+      coming          the driver answered "I'm coming"
+      not_coming      the driver answered "not coming" (with a reason)
+      late            said coming, shift has begun, duty not started
+      not_started     never answered, shift has begun, duty not started
+      started         duty started
+    """
+    occ = _shift_occurrence(driver, now)
+    if not occ:
+        return {"status": "no_shift_time"}
+    did, sid = driver["id"], occ["schedule_id"]
+    start, alarm_at = occ["shift_start"], occ["alarm_at"]
+
+    answer: Optional[Dict] = None
+    snoozes = 0
+    async for r in db.alarm_responses.find(
+        {"driver_id": did, "schedule_id": sid, "phase": "start"}, {"_id": 0}
+    ).sort("created_at", 1):
+        if r.get("response") == "snooze":
+            snoozes += 1
+        elif r.get("response") in ("awake", "not_coming"):
+            answer = r
+
+    # Duty started for this shift: from 3h before it (an early start) onward.
+    duty = await db.duty_states.find_one(
+        {"driver_id": did, "state": "start_duty",
+         "started_at": {"$gte": iso(start - timedelta(hours=3))[:19],
+                        "$lt": iso(start + timedelta(hours=12))[:19]}},
+        {"_id": 0, "started_at": 1}, sort=[("started_at", 1)])
+    duty_at = None
+    if duty:
+        try:
+            duty_at = _parse_iso(duty["started_at"])
+        except Exception:
+            duty_at = None
+
+    if duty_at:
+        status_ = "started"          # whatever they answered, they are at work
+    elif answer and answer.get("response") == "not_coming":
+        status_ = "not_coming"
+    elif answer:
+        status_ = "coming" if now < start + timedelta(minutes=SHIFT_NO_SHOW_MINUTES) else "late"
+    elif now < alarm_at:
+        status_ = "alarm_pending"
+    elif now < alarm_at + timedelta(minutes=ALARM_NO_ANSWER_MINUTES):
+        status_ = "ringing"
+    elif now < start + timedelta(minutes=SHIFT_NO_SHOW_MINUTES):
+        status_ = "no_answer"
+    else:
+        status_ = "not_started"
+
+    # Is the alarm really set on the phone? The app reports it when it arms it.
+    arm = await db.alarm_arming.find_one({"driver_id": did, "schedule_id": sid}, {"_id": 0})
+    if not arm:
+        phone = "not_picked_up"          # the app has not fetched this shift: the driver must open it
+    elif arm.get("native") is None:
+        phone = "unknown"                # an older app build fetched it but does not report
+    elif arm.get("native") is False:
+        phone = "no_alarm_in_app"        # an app build without the alarm
+    elif arm.get("notifications_ok") is False:
+        phone = "notifications_off"      # the alarm cannot show itself
+    else:
+        phone = "ready"
+
+    return {
+        "status": status_,
+        "schedule_id": sid,
+        "shift_start": iso(start),
+        "alarm_at": iso(alarm_at),
+        "answered_at": (answer or {}).get("responded_at") or (answer or {}).get("created_at"),
+        "reason_code": (answer or {}).get("reason_code"),
+        "reason_note": (answer or {}).get("reason_note"),
+        "back_by": (answer or {}).get("back_by"),
+        "snoozes": snoozes,
+        "duty_started_at": iso(duty_at) if duty_at else None,
+        "late_minutes": max(0, int((duty_at - start).total_seconds() // 60)) if duty_at else None,
+        "phone": phone,
+        "phone_checked_at": (arm or {}).get("armed_at") or (arm or {}).get("fetched_at"),
+    }
+
+
+class AlarmArmedIn(BaseModel):
+    schedule_id: str
+    native: bool                          # the app build has the alarm and set it
+    notifications_ok: Optional[bool] = None
+
+
+@api.post("/shift-alarm/armed")
+async def shift_alarm_armed(body: AlarmArmedIn, driver: Dict = Depends(get_driver)):
+    """The app tells us it has set (or could not set) the alarm for a shift, so
+    the hub can see the alarm is really live on that phone."""
+    if _is_test_alarm(body.schedule_id):
+        return {"ok": True, "ignored": True}
+    await db.alarm_arming.update_one(
+        {"driver_id": driver["id"], "schedule_id": body.schedule_id},
+        {"$set": {"native": body.native, "notifications_ok": body.notifications_ok,
+                  "armed_at": iso(now_utc())}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+async def _post_system_message(driver_id: str, key: str, body: str) -> bool:
+    """Put an automatic note about a driver into the hub's inbox, once per key.
+    It lights the Messages badge like a message from the driver would, but is
+    marked `kind: system` and is not shown back to the driver."""
+    if await db.notifications.find_one({"driver_id": driver_id, "client_action_id": key}, {"_id": 1}):
+        return False
+    await db.notifications.insert_one({
+        "id": str(uuid.uuid4()),
+        "driver_id": driver_id,
+        "direction": "from_driver",
+        "kind": "system",
+        "body": body,
+        "created_at": iso(now_utc()),
+        "created_by": "Ride91 app",
+        "read": False,
+        "read_at": None,
+        "client_action_id": key,
+    })
+    return True
+
+
+def _shift_clock(iso_ts: str) -> str:
+    return _parse_iso(iso_ts).astimezone(IST).strftime("%H:%M")
+
+
+_alarm_watch_at: Optional[datetime] = None
+
+
+async def _alarm_watch() -> None:
+    """Raise the alerts nobody is there to send: a driver who did not answer
+    the alarm, or who has not started duty after the shift began. There is no
+    clock running on the server, so this is run (at most once a minute) when
+    an admin panel asks for the inbox count — which every open panel does."""
+    global _alarm_watch_at
+    now = now_utc()
+    if _alarm_watch_at and (now - _alarm_watch_at).total_seconds() < 60:
+        return
+    _alarm_watch_at = now
+    async for d in db.drivers.find(
+        {"shift_start_time": {"$nin": [None, ""]}, "archived": {"$ne": True}, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "shift_start_time": 1},
+    ):
+        st = await _shift_status(d, now)
+        sid = st.get("schedule_id")
+        if st["status"] == "no_answer":
+            await _post_system_message(
+                d["id"], f"noanswer:{sid}",
+                f"Did not answer the wake-up alarm for the {_shift_clock(st['shift_start'])} shift.")
+        elif st["status"] == "not_started":
+            await _post_system_message(
+                d["id"], f"notstarted:{sid}",
+                f"Has not started duty. The shift was due at {_shift_clock(st['shift_start'])} and the alarm was never answered.")
+        elif st["status"] == "late":
+            await _post_system_message(
+                d["id"], f"late:{sid}",
+                f"Said they were coming but has not started duty. The shift was due at {_shift_clock(st['shift_start'])}.")
+
+
+@api.get("/admin/hubs/{hub_id}/shift-board")
+async def admin_shift_board(hub_id: str, admin: Dict = Depends(require_ops)):
+    """The hub's live board for the coming shift: one row per driver."""
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    ids = await _hub_driver_ids(hub_id)
+    now = now_utc()
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}, "archived": {"$ne": True}}, {"_id": 0, "password_hash": 0})]
+    rows: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {}
+    for d in sorted(drivers, key=lambda x: (x.get("shift_start_time") or "99", x.get("name") or "")):
+        st = await _shift_status(d, now)
+        counts[st["status"]] = counts.get(st["status"], 0) + 1
+        rows.append({
+            # `phone` in the status is the alarm's state on the handset, so the
+            # driver's number goes under its own name.
+            "driver_id": d["id"], "name": d.get("name"), "driver_phone": d.get("phone"),
+            "shift_type": d.get("shift_type") or "day", "active": d.get("active", True),
+            "shift_start_time": d.get("shift_start_time"),
+            **st,
+        })
+    return {"items": rows, "counts": counts, "count": len(rows), "server_ts": iso(now)}
+
+
+class HubShiftTimesIn(BaseModel):
+    shift_start_time: str                               # "HH:MM", or "" to clear
+    shift_type: Literal["day", "night", "all"] = "all"  # which drivers to set it for
+
+
+@api.post("/admin/hubs/{hub_id}/shift-times")
+async def admin_set_hub_shift_times(hub_id: str, body: HubShiftTimesIn, admin: Dict = Depends(require_ops)):
+    """Set (or clear) the shift time for every day driver, every night driver,
+    or all drivers of a hub in one go. Each driver's alarm follows."""
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    value: Optional[str] = body.shift_start_time.strip()
+    if value:
+        try:
+            value = datetime.strptime(value, "%H:%M").strftime("%H:%M")
+        except ValueError:
+            raise HTTPException(400, "invalid_time")
+    else:
+        value = None
+    q: Dict[str, Any] = {"id": {"$in": await _hub_driver_ids(hub_id) or ["_none"]}, "archived": {"$ne": True}}
+    if body.shift_type == "night":
+        q["shift_type"] = "night"
+    elif body.shift_type == "day":
+        q["shift_type"] = {"$ne": "night"}       # a driver with no shift type counts as day
+    res = await db.drivers.update_many(q, {"$set": {"shift_start_time": value}})
+    await _audit(admin, "set_hub_shift_times", hub_id,
+                 {"shift_start_time": value, "shift_type": body.shift_type, "drivers": res.modified_count})
+    return {"ok": True, "updated": res.modified_count, "shift_start_time": value}
 
 
 # ---------------------------------------------------------------------------
@@ -4063,12 +4362,12 @@ async def admin_inspection_media(inspection_id: str, admin: Dict = Depends(fleet
 
 
 @api.get("/admin/shift-alarms")
-async def admin_shift_alarms(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
-    """Recent shift-alarm responses across the fleet — who acknowledged, who
-    said they weren't coming, and the reason given. `?hub_id=` scopes to one
-    hub's drivers."""
+async def admin_shift_alarms(hub_id: Optional[str] = None, admin: Dict = Depends(get_admin)):
+    """Recent shift-alarm responses — who acknowledged, who said they weren't
+    coming, and the reason given. `?hub_id=` scopes to one hub's drivers; a
+    hub_manager always sees their own hub. Answers to test alarms are left out."""
     target = _hub_target(admin, hub_id)
-    aq: Dict[str, Any] = {}
+    aq: Dict[str, Any] = {"schedule_id": {"$not": {"$regex": _TEST_ALARM_REGEX}}}
     if target:
         aq["driver_id"] = {"$in": await _hub_driver_ids(target)}
     rows = [r async for r in db.alarm_responses.find(
@@ -4092,6 +4391,7 @@ async def admin_list_notifications(
     """The inbox: what drivers wrote to ops, newest first, with the count ops
     has not read yet (the menu badge). A hub_manager sees their own hub's
     drivers; anyone else may pass `?hub_id=` to look at one hub."""
+    await _alarm_watch()      # raises "no answer" / "not started" alerts when due
     query: Dict[str, Any] = {"direction": "from_driver"}
     target = _hub_target(admin, hub_id)
     if target:
@@ -7354,6 +7654,9 @@ async def driver_list_notifications(driver: Dict = Depends(get_driver)):
     rows = [r async for r in db.notifications.find(
         {"driver_id": driver["id"]}, {"_id": 0}
     ).sort("created_at", -1).limit(100)]
+    # Automatic notes to the hub about this driver are not part of the
+    # conversation the driver sees.
+    rows = [r for r in rows if r.get("kind") != "system"]
     # Unread = messages ops sent this driver that they haven't opened yet.
     unread = sum(1 for r in rows if r.get("direction") == "to_driver" and not r.get("read"))
     return {"items": rows, "unread": unread}
@@ -7969,6 +8272,9 @@ async def _on_startup() -> None:
     await db.alarm_responses.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )
+    await db.alarm_responses.create_index([("driver_id", 1), ("schedule_id", 1)])
+    await db.alarm_arming.create_index([("driver_id", 1), ("schedule_id", 1)], unique=True)
+    await db.notifications.create_index([("driver_id", 1), ("client_action_id", 1)])
     # Razorpay dedup — order per driver+action; unique order id from Razorpay.
     await db.razorpay_orders.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True

@@ -81,6 +81,19 @@ const ShiftAlarmCtx = createContext<Ctx | null>(null);
 
 // Schedule ids of test alarms start with this; their answers are never sent.
 const TEST_ID_PREFIX = "test-";
+// Ids that are not a real shift: a test, an old preview, or the alarm screen
+// opened with no schedule. Answers to these are not attendance.
+const isPracticeId = (id: string) => /^(test-|preview-|local-)/.test(id);
+
+// Can the alarm show itself? Android 13+ needs the notification permission.
+async function notificationsAllowed(): Promise<boolean> {
+  if (Platform.OS !== "android" || Number(Platform.Version) < 33) return true;
+  try {
+    return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+  } catch {
+    return true;
+  }
+}
 
 // Only re-arm the native alarm when alarm_at drifts by more than this. Every
 // city block the ETA can wobble by ~seconds — no point burning battery on
@@ -98,9 +111,26 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
   const [endEta, setEndEta] = useState<EndEta | null>(null);
   const listenerRef = useRef<{ remove: () => void } | null>(null);
   const lastEndArmedAtRef = useRef<number | null>(null);
+  const lastReportedRef = useRef<string | null>(null);
+
+  // Tell the hub whether the alarm for this shift is really set on this
+  // phone, so its board can show "ready" instead of guessing. Sent only when
+  // something about it changes.
+  const reportArmed = useCallback(async (scheduleId: string, native: boolean) => {
+    const notifications_ok = await notificationsAllowed();
+    const key = `${scheduleId}|${native}|${notifications_ok}`;
+    if (lastReportedRef.current === key) return;
+    try {
+      await api.post("/shift-alarm/armed", { schedule_id: scheduleId, native, notifications_ok });
+      lastReportedRef.current = key;
+    } catch {
+      // older server or offline — try again on the next refresh
+    }
+  }, []);
 
   const submitAlarmResponse = useCallback(
     async (r: AlarmResponse, phase: "start" | "end" = "start") => {
+      if (isPracticeId(r.scheduleId)) return;      // a test is not attendance
       await enqueue("/shift-alarm/response", {
         schedule_id: r.scheduleId,
         phase,
@@ -149,7 +179,7 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
         if (parsed.state !== "responded") {
           const atMs = new Date(parsed.alarm_fires_at).getTime();
           if (!Number.isNaN(atMs) && atMs > Date.now()) {
-            await alarms.schedule({
+            const armed = await alarms.schedule({
               atMs,
               scheduleId: parsed.id,
               driverId: parsed.driver_id,
@@ -157,7 +187,8 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
                 parsed.shift_type === "night"
                   ? getCardText().alarm_title_start_night
                   : getCardText().alarm_title_start,
-            });
+            }).then((id) => id != null, () => false);
+            reportArmed(parsed.id, armed);
           }
         }
         // Arm end alarm from ETA (if configured).
@@ -178,7 +209,7 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
     } catch {
       // ignore — try again on next tick / foreground
     }
-  }, [enabled, driver, lat, lng, armEndAlarm]);
+  }, [enabled, driver, lat, lng, armEndAlarm, reportArmed]);
 
   // Collect the answers the driver gave on the native alarm screen and queue
   // them for the server. Runs on start-up and on returning to the foreground

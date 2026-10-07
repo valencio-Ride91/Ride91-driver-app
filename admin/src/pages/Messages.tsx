@@ -109,7 +109,7 @@ export default function Messages({ hubId }: { hubId?: string }) {
       {hubId ? null : <h1>Messages</h1>}
       <div className="sub" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <span>
-          What drivers write from the app.{" "}
+          What drivers write from the app, and automatic alerts about their shift (not coming, no answer to the alarm, not started).{" "}
           {data ? (data.unread > 0
             ? <span className="tag alert" data-testid="messages-unread">{data.unread} unread</span>
             : <span className="tag muted">nothing unread</span>) : null}
@@ -142,7 +142,10 @@ export default function Messages({ hubId }: { hubId?: string }) {
             {t.messages.slice(0, SHOWN_PER_DRIVER).map((n) => (
               <div key={n.id} style={{ background: n.read ? "transparent" : "var(--line)", borderRadius: 8, padding: n.read ? "2px 0" : "6px 10px" }}>
                 <div style={{ fontSize: 14, whiteSpace: "pre-wrap", fontWeight: n.read ? 400 : 600 }}>{n.body}</div>
-                <div className="muted-sm">{fmtWhen(n.created_at)}</div>
+                <div className="muted-sm">
+                  {fmtWhen(n.created_at)}
+                  {n.kind === "system" ? <span title="Sent automatically by the app, not typed by the driver."> · automatic alert</span> : null}
+                </div>
               </div>
             ))}
             {t.messages.length > SHOWN_PER_DRIVER

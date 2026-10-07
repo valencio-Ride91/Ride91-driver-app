@@ -1,7 +1,10 @@
-// Shift alarms — the fleet's responses to start/end shift alarms. Read-only
-// log: who acknowledged, who said they weren't coming, and the reason given.
+// Shift alarms. Inside a hub this opens with the live Shift board (who is
+// coming, who is not, who has not answered, and where shift times are set),
+// followed by the log of every alarm answer: who acknowledged, who said they
+// weren't coming, and the reason given. Answers to test alarms are not shown.
 import { useCallback, useEffect, useState } from "react";
 import { api, AlarmRow } from "../api";
+import ShiftBoard from "../components/ShiftBoard";
 
 const RESPONSE_TONE: Record<string, string> = {
   awake: "live",
@@ -51,8 +54,9 @@ export default function ShiftAlarms({ hubId }: { hubId?: string }) {
 
   return (
     <div>
+      {hubId ? <ShiftBoard hubId={hubId} /> : null}
       <div className="page-head">
-        {hubId ? <div /> : (
+        {hubId ? <div><h2 style={{ margin: 0 }}>Alarm answers</h2></div> : (
           <div>
             <h1>Shift alarms</h1>
             <div className="sub">
@@ -78,7 +82,7 @@ export default function ShiftAlarms({ hubId }: { hubId?: string }) {
             {loading ? (
               <tr><td colSpan={6} className="empty">Loading…</td></tr>
             ) : shown.length === 0 ? (
-              <tr><td colSpan={6} className="empty">No responses.</td></tr>
+              <tr><td colSpan={6} className="empty">No alarm answers yet. They appear here when a driver answers a real wake-up alarm.</td></tr>
             ) : shown.map((r) => (
               <tr key={r.id}>
                 <td>{fmtWhen(r.responded_at || r.created_at)}</td>
