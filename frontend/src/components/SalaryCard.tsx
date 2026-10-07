@@ -36,6 +36,17 @@ interface Salary {
   bank_saved: boolean;
   has_pending: boolean;
   requests: WithdrawalRequest[];
+  payments?: Payment[];      // absent on older servers
+}
+
+// One salary payment the driver received, by transfer or by hand.
+interface Payment {
+  id: string;
+  amount: number;
+  at: string;
+  method: "bank" | "upi" | "hand";
+  status: "paid" | "processing";
+  reference?: string | null;
 }
 
 const LIVE_TINT = "#E3F1EA";
@@ -106,6 +117,8 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
 
   const pct = Math.round((data.share_rate ?? 0.3) * 100);
   const pendingReq = data.requests.find((r) => r.state === "pending");
+  const openRequests = data.requests.filter((r) => r.state !== "paid");
+  const payments = data.payments ?? [];
   const canWithdraw = !data.has_pending && data.available > 0 && data.available >= data.min_amount;
 
   // Why the button is off, in the driver's terms.
@@ -155,10 +168,11 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
         <Text style={styles.btnText}>{c.sal_withdraw}</Text>
       </TouchableOpacity>
 
-      {data.requests.length > 0 ? (
+      {/* Requests still waiting, or turned down. Paid ones move to the list below. */}
+      {openRequests.length > 0 ? (
         <>
           <Text style={styles.section}>{c.sal_recent}</Text>
-          {data.requests.slice(0, 3).map((r) => (
+          {openRequests.slice(0, 3).map((r) => (
             <View key={r.id} style={styles.reqRow} testID={`salary-req-${r.id}`}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.reqAmt}>{formatINR(r.amount)}</Text>
@@ -166,18 +180,32 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
                   {formatISTDate(r.requested_at)}{r.state === "rejected" && r.note ? ` · ${r.note}` : ""}
                 </Text>
               </View>
-              <Text
-                style={[
-                  styles.badge,
-                  r.state === "paid" ? styles.badgePaid : r.state === "rejected" ? styles.badgeNo : styles.badgeWait,
-                ]}
-              >
+              <Text style={[styles.badge, r.state === "rejected" ? styles.badgeNo : styles.badgeWait]}>
                 {c.sal_state[r.state] ?? r.state}
               </Text>
             </View>
           ))}
         </>
       ) : null}
+
+      {/* Every payment received, by bank / UPI transfer or by hand. */}
+      <Text style={styles.section}>{c.sal_payments}</Text>
+      {payments.length === 0 ? (
+        <Text style={styles.reqMeta} testID="salary-no-payments">{c.sal_no_payments}</Text>
+      ) : payments.map((p) => (
+        <View key={p.id} style={styles.reqRow} testID={`salary-pay-${p.id}`}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.reqAmt}>{formatINR(p.amount)}</Text>
+            <Text style={styles.reqMeta}>
+              {formatISTDate(p.at)} · {c.sal_pay_method[p.method] ?? p.method}
+              {p.reference ? ` · ${c.sal_pay_ref(p.reference)}` : ""}
+            </Text>
+          </View>
+          <Text style={[styles.badge, p.status === "paid" ? styles.badgePaid : styles.badgeWait]}>
+            {p.status === "paid" ? c.sal_state.paid : c.sal_pay_processing}
+          </Text>
+        </View>
+      ))}
 
       <Text style={styles.note}>{c.sal_note}</Text>
 

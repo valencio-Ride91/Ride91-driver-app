@@ -57,7 +57,7 @@ const en = {
   cash_collected: "Cash collected",
   deposited: "Deposited",
   cash_to_settle: "Cash to settle from yesterday",
-  your_balance: "Your balance",
+  your_balance: "Cash in hand",
   in_credit: "In credit",
   you_owe: "You owe",
   over_limit_deposit: (limit: number) => `Over ₹${limit} — deposit now`,
@@ -393,6 +393,11 @@ const en = {
   sal_recent: "RECENT REQUESTS",
   sal_state: { pending: "Waiting", paid: "Paid", rejected: "Not approved" } as Record<string, string>,
   sal_note: "Salary is your share of each day's fares. The office pays requests to your saved bank or UPI.",
+  sal_payments: "PAYMENTS RECEIVED",
+  sal_no_payments: "No payments yet.",
+  sal_pay_method: { bank: "Bank transfer", upi: "UPI", hand: "Paid by hand" } as Record<string, string>,
+  sal_pay_processing: "On its way",
+  sal_pay_ref: (ref: string) => `Ref ${ref}`,
 
   // ---- crash screen ----
   err_title: "Something went wrong",
@@ -463,7 +468,7 @@ const hi: CardText = {
   cash_collected: "नकद लिया",
   deposited: "जमा किया",
   cash_to_settle: "कल का बाकी नकद",
-  your_balance: "आपका हिसाब",
+  your_balance: "आपके पास नकद",
   in_credit: "आपका जमा",
   you_owe: "आप पर बाकी",
   over_limit_deposit: (limit) => `₹${limit} से ज़्यादा — अभी जमा करें`,
@@ -797,6 +802,11 @@ const hi: CardText = {
   sal_recent: "हाल के अनुरोध",
   sal_state: { pending: "प्रतीक्षा में", paid: "भुगतान हुआ", rejected: "मंज़ूर नहीं" },
   sal_note: "वेतन हर दिन के किराये में आपका हिस्सा है। ऑफ़िस आपके सहेजे गए बैंक या UPI में भुगतान करता है।",
+  sal_payments: "मिले हुए भुगतान",
+  sal_no_payments: "अभी कोई भुगतान नहीं मिला।",
+  sal_pay_method: { bank: "बैंक ट्रांसफ़र", upi: "UPI", hand: "हाथ से दिया गया" },
+  sal_pay_processing: "रास्ते में है",
+  sal_pay_ref: (ref) => `संदर्भ ${ref}`,
 
   // ---- crash screen ----
   err_title: "कुछ गड़बड़ हो गई",

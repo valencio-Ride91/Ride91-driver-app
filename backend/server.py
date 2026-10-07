@@ -6382,7 +6382,42 @@ async def money_salary(driver: Dict = Depends(get_driver)):
         {"driver_id": driver["id"]}, {"_id": 0}).sort("requested_at", -1).limit(5)]
     bank = await db.driver_bank_accounts.find_one({"driver_id": driver["id"]}, {"_id": 0, "kind": 1})
     return {**state, "bank_saved": bool(bank), "has_pending": any(r["state"] == "pending" for r in reqs),
-            "requests": reqs}
+            "requests": reqs, "payments": await _salary_payments(driver["id"])}
+
+
+async def _salary_payments(driver_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Every salary payment the driver has received, newest first, however it
+    was paid: a bank / UPI transfer (a payout row) or by hand (a withdrawal
+    request the hub marked paid). A request paid by transfer appears once, as
+    its transfer. Transfers that failed or were reversed never arrived, so they
+    are left out."""
+    out: List[Dict[str, Any]] = []
+    async for p in db.payouts.find({"driver_id": driver_id}, {"_id": 0}).sort("created_at", -1).limit(50):
+        status_ = p.get("status") or ""
+        if status_ in PAYOUT_DEAD_STATES:
+            continue
+        out.append({
+            "id": p["id"],
+            "amount": float(p.get("amount_rupees") or 0),
+            "at": p.get("created_at"),
+            "method": "upi" if p.get("mode") == "UPI" else "bank",
+            # "processed" is RazorpayX's word for arrived; anything else is still on its way.
+            "status": "paid" if status_ == "processed" else "processing",
+            "reference": p.get("utr"),
+        })
+    async for w in db.salary_withdrawals.find(
+        {"driver_id": driver_id, "state": "paid", "method": "manual"}, {"_id": 0},
+    ).sort("decided_at", -1).limit(50):
+        out.append({
+            "id": w["id"],
+            "amount": float(w.get("amount") or 0),
+            "at": w.get("decided_at") or w.get("requested_at"),
+            "method": "hand",
+            "status": "paid",
+            "reference": w.get("reference"),
+        })
+    out.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return out[:limit]
 
 
 @api.post("/money/salary/withdraw")

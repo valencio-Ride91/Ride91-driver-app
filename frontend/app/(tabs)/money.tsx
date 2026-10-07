@@ -5,8 +5,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
 import { CollectionQrCard } from "@/src/components/CollectionQrCard";
-import { PayDuesButton } from "@/src/components/PayDuesButton";
-import { PayoutsHistoryCard } from "@/src/components/PayoutsHistoryCard";
 import { SalaryCard } from "@/src/components/SalaryCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
@@ -33,14 +31,6 @@ interface MoneyYesterday {
 }
 
 const PLATFORMS = ["uber", "rapido", "ola"] as const;
-
-function fmtDay(iso: string): string {
-  try {
-    return new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
-  } catch {
-    return iso;
-  }
-}
 
 type Period = "yesterday" | "week" | "month";
 interface Earnings {
@@ -182,7 +172,7 @@ export default function Money() {
           <MoneyLine testID="y-net-cash" label={c.cash_to_settle} value={formatINR(Math.max(0, day?.net_cash_from_day ?? 0))} bold />
         </Card>
 
-        {/* CARD 3 — Running balance (what you owe overall) */}
+        {/* CARD 3 — Cash in hand: collection cash the driver still has to hand in */}
         <Card testID="balance-card" style={{ marginTop: spacing.md }}>
           <Text style={styles.cardTitle}>{c.your_balance}</Text>
           <MoneyLine
@@ -197,13 +187,8 @@ export default function Money() {
               <Text style={styles.overLimitBannerText}>{c.over_limit_deposit(day.cash_limit)}</Text>
             </View>
           ) : null}
-          <PayDuesButton duesPaise={Math.round(Math.max(0, day?.you_owe ?? 0) * 100)} />
         </Card>
 
-        {/* CARD 4 — Payouts history (RazorpayX) */}
-        <Card testID="payouts-card" style={{ marginTop: spacing.md }}>
-          <PayoutsHistoryCard />
-        </Card>
       </ScrollView>
     </SafeAreaView>
   );
