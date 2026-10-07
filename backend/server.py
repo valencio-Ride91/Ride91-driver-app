@@ -3974,23 +3974,28 @@ async def admin_shift_alarms(hub_id: Optional[str] = None, admin: Dict = Depends
 # ---- Notifications (admin) ------------------------------------------------
 @api.get("/admin/notifications")
 async def admin_list_notifications(
-    unread_only: bool = False, admin: Dict = Depends(fleet_admin)
+    unread_only: bool = False, hub_id: Optional[str] = None, limit: int = 200,
+    admin: Dict = Depends(get_admin),
 ):
-    """Feed of driver → ops notifications across the fleet (newest first),
-    with the count still unread by ops — drives the header badge."""
+    """The inbox: what drivers wrote to ops, newest first, with the count ops
+    has not read yet (the menu badge). A hub_manager sees their own hub's
+    drivers; anyone else may pass `?hub_id=` to look at one hub."""
     query: Dict[str, Any] = {"direction": "from_driver"}
+    target = _hub_target(admin, hub_id)
+    if target:
+        query["driver_id"] = {"$in": await _hub_driver_ids(target)}
+    unread = await db.notifications.count_documents({**query, "read": False})
     if unread_only:
         query["read"] = False
+    n = max(0, min(int(limit), 500))
+    # limit=0 asks for the unread count only (to Mongo, 0 would mean "no limit")
     rows = [r async for r in db.notifications.find(query, {"_id": 0})
-            .sort("created_at", -1).limit(200)]
+            .sort("created_at", -1).limit(n)] if n else []
     who = await _drivers_by_ids([r.get("driver_id") for r in rows])
     for r in rows:
         d = who.get(r.get("driver_id"), {})
         r["driver_name"] = d.get("name")
         r["driver_phone"] = d.get("phone")
-    unread = await db.notifications.count_documents(
-        {"direction": "from_driver", "read": False}
-    )
     return {"items": rows, "count": len(rows), "unread": unread}
 
 
@@ -4008,14 +4013,36 @@ async def admin_driver_notifications(driver_id: str, admin: Dict = Depends(get_a
     return {"items": rows, "count": len(rows)}
 
 
-@api.post("/admin/drivers/{driver_id}/notifications")
-async def admin_send_notification(
-    driver_id: str, body: AdminNotifyIn, admin: Dict = Depends(require_write)
-):
-    """Ops sends a message to a driver — appears on the driver app's bell."""
-    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+async def _mark_driver_messages_read(driver_id: str, admin: Dict) -> int:
+    """Mark everything this driver wrote that ops has not read yet as read."""
+    res = await db.notifications.update_many(
+        {"driver_id": driver_id, "direction": "from_driver", "read": False},
+        {"$set": {"read": True, "read_at": iso(now_utc()), "read_by": admin["username"]}},
+    )
+    return res.modified_count
+
+
+@api.post("/admin/drivers/{driver_id}/notifications/read")
+async def admin_mark_driver_messages_read(driver_id: str, admin: Dict = Depends(require_ops)):
+    """Ops has seen this driver's messages (without necessarily answering)."""
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not driver:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(driver, hub_scope(admin))
+    return {"ok": True, "marked": await _mark_driver_messages_read(driver_id, admin)}
+
+
+@api.post("/admin/drivers/{driver_id}/notifications")
+async def admin_send_notification(
+    driver_id: str, body: AdminNotifyIn, admin: Dict = Depends(require_ops)
+):
+    """Ops sends a message to a driver — appears on the driver app's bell.
+    A hub_manager may write to their own hub's drivers. Answering counts as
+    having read what the driver wrote."""
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(driver, hub_scope(admin))
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver_id,
@@ -4028,15 +4055,24 @@ async def admin_send_notification(
     }
     await db.notifications.insert_one(row.copy())
     row.pop("_id", None)
+    await _mark_driver_messages_read(driver_id, admin)
     await _audit(admin, "notify_driver", driver_id)
     return row
 
 
 @api.post("/admin/notifications/{notification_id}/read")
 async def admin_mark_notification_read(
-    notification_id: str, admin: Dict = Depends(require_write)
+    notification_id: str, admin: Dict = Depends(require_ops)
 ):
     """Ops marks a driver → ops message as handled."""
+    n = await db.notifications.find_one(
+        {"id": notification_id, "direction": "from_driver"}, {"_id": 0, "driver_id": 1})
+    if not n:
+        raise HTTPException(404, "notification_not_found")
+    scope = hub_scope(admin)
+    if scope:
+        driver = await db.drivers.find_one({"id": n["driver_id"]}, {"_id": 0, "hub_id": 1, "vehicle_id": 1})
+        await _assert_driver_in_scope(driver or {}, scope)
     await db.notifications.update_one(
         {"id": notification_id, "direction": "from_driver"},
         {"$set": {"read": True, "read_at": iso(now_utc()), "read_by": admin["username"]}},
@@ -7853,6 +7889,7 @@ async def _on_startup() -> None:
     await db.admin_audit.create_index([("action", 1), ("at", -1)])
     await db.notifications.create_index([("driver_id", 1), ("created_at", -1)])
     await db.notifications.create_index([("direction", 1), ("read", 1), ("created_at", -1)])
+    await db.notifications.create_index([("driver_id", 1), ("direction", 1), ("read", 1)])
     await db.hubs.create_index([("name", 1)], unique=True)
     await db.vehicles.create_index([("hub_id", 1)])
     await db.driver_collection_qrs.create_index([("driver_id", 1)], unique=True)

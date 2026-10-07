@@ -1,6 +1,8 @@
 // Persistent shell with sidebar nav. Wraps every authed page.
 
+import { useCallback, useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { api } from "../api";
 import { AdminIdentity, logout } from "../auth";
 
 // `hub` marks the pages a scoped hub_manager may see (their hub's drivers,
@@ -10,6 +12,7 @@ import { AdminIdentity, logout } from "../auth";
 // page), so those three are reached by opening a hub rather than from the nav.
 const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?: boolean }[] = [
   { to: "/hubs", label: "Hubs", hub: true },
+  { to: "/messages", label: "Messages", hub: true },
   { to: "/bookings", label: "Bookings" },
   { to: "/collections", label: "Collections" },
   { to: "/loyalty", label: "Loyalty & yearly", hub: true },
@@ -26,6 +29,28 @@ interface Props {
 
 export default function Layout({ admin, onLogout }: Props) {
   const nav = useNavigate();
+
+  // Unread driver messages, shown as a badge on "Messages" so a reply is seen
+  // from any page. Re-counted every 30s, and at once when the inbox changes.
+  const [unread, setUnread] = useState(0);
+  const countUnread = useCallback(async () => {
+    try {
+      const r = await api.get<{ unread: number }>("/admin/notifications?unread_only=true&limit=0");
+      setUnread(r.unread ?? 0);
+    } catch {
+      // keep the last count
+    }
+  }, []);
+  useEffect(() => {
+    countUnread();
+    const id = setInterval(countUnread, 30000);
+    window.addEventListener("ride91:messages-changed", countUnread);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("ride91:messages-changed", countUnread);
+    };
+  }, [countUnread]);
+
   const doLogout = async () => {
     await logout();
     onLogout();
@@ -44,6 +69,12 @@ export default function Layout({ admin, onLogout }: Props) {
         }).map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => (isActive ? "active" : "")}>
             {n.label}
+            {n.to === "/messages" && unread > 0 ? (
+              <span data-testid="nav-unread" style={{
+                marginLeft: 8, background: "var(--alert, #c0392b)", color: "#fff", borderRadius: 999,
+                padding: "1px 7px", fontSize: 11, fontWeight: 700,
+              }}>{unread > 99 ? "99+" : unread}</span>
+            ) : null}
           </NavLink>
         ))}
         <div className="footer">

@@ -64,6 +64,7 @@ export default function DriverDetail() {
     setSending(true);
     try {
       await api.post(`/admin/drivers/${id}/notifications`, { body: msg.trim() });
+      window.dispatchEvent(new Event("ride91:messages-changed"));   // replying marks them read
       setMsg("");
       await load();
     } catch {

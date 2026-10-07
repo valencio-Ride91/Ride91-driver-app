@@ -17,9 +17,10 @@ import Documents from "./Documents";
 import Inspections from "./Inspections";
 import ShiftAlarms from "./ShiftAlarms";
 import Payouts from "./Payouts";
+import Messages from "./Messages";
 
 type TabKey =
-  | "roster" | "activity" | "earnings" | "rewards" | "cash" | "requests"
+  | "roster" | "activity" | "messages" | "earnings" | "rewards" | "cash" | "requests"
   | "captures" | "documents" | "inspections" | "shiftalarms" | "payouts";
 
 // `fleetOnly` tabs hit endpoints a hub_manager can't reach (fleet_admin), so
@@ -27,6 +28,7 @@ type TabKey =
 const TABS: { key: TabKey; label: string; fleetOnly?: boolean }[] = [
   { key: "roster", label: "Vehicles & drivers" },
   { key: "activity", label: "Activity" },
+  { key: "messages", label: "Messages" },
   { key: "earnings", label: "Earnings" },
   { key: "rewards", label: "Rewards" },
   { key: "cash", label: "Cash", fleetOnly: true },
@@ -169,6 +171,7 @@ export default function HubDetail() {
       {err ? <div className="err" style={{ marginBottom: 12 }}>{err}</div> : null}
 
       {tab === "activity" ? <HubActivity hubId={id} />
+      : tab === "messages" ? <Messages hubId={id} />
       : tab === "earnings" ? <EarningsGrid hubId={id} />
       : tab === "rewards" ? <Rewards hubId={id} />
       : tab === "cash" ? <Cash hubId={id} />

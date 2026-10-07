@@ -26,6 +26,7 @@ import DailyEarnings from "./pages/DailyEarnings";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
 import Audit from "./pages/Audit";
+import Messages from "./pages/Messages";
 
 import { AdminIdentity, me } from "./auth";
 
@@ -75,6 +76,7 @@ export default function App() {
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/hubs" element={<Hubs />} />
             <Route path="/hubs/:id" element={<HubDetail />} />
+            <Route path="/messages" element={<Messages />} />
             <Route path="/cash" element={<Fleet admin={admin}><Cash /></Fleet>} />
             <Route path="/collections" element={<Fleet admin={admin}><Collections /></Fleet>} />
             <Route path="/rewards" element={<Rewards />} />
