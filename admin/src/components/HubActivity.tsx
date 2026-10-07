@@ -77,7 +77,16 @@ export default function HubActivity({ hubId }: { hubId: string }) {
                     : <span className="muted-sm">—</span>}
                 </td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtDur(r.on_duty_seconds)}</td>
-                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtDur(r.working_seconds)}</td>
+                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
+                  {fmtDur(r.working_seconds)}
+                  {/* time online on each app; a driver on two apps at once accrues on both */}
+                  {Object.entries(r.per_platform_seconds ?? {}).filter(([, s]) => s > 0).map(([p, s]) => (
+                    <div key={p} className="muted-sm" style={{ whiteSpace: "nowrap" }} data-testid={`plat-time-${p}`}>
+                      <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 4, background: platformColor(p), marginRight: 4 }} />
+                      {p} {fmtDur(s)}
+                    </div>
+                  ))}
+                </td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{r.distance_km.toFixed(1)} km</td>
                 <td className="muted-sm">
                   {fmtAgo(r.last_ping_at)}

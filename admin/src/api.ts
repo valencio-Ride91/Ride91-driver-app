@@ -548,6 +548,7 @@ export interface HubActivityRow {
   current_platforms: string[];
   on_duty_seconds: number;
   working_seconds: number;
+  per_platform_seconds?: Record<string, number>;   // time online on each app
   distance_km: number;
   last_ping_at: string | null;
   // Today only. "stopped" = on duty but the phone has gone quiet.

@@ -1,10 +1,14 @@
-// Horizontal proportional bar of today's shift, coloured by platform.
+// Horizontal proportional bar of today's shift, coloured by the app the driver
+// was online on. A stretch on two or three apps at once is drawn as stacked
+// bands, one per app. Below the bar: how long the driver has been online on
+// each app today.
+//
 // Offline periods are hatched (rendered as diagonal stripes via alternating
 // bands to avoid a heavy SVG dependency).
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { colors, fonts, platformColors, spacing } from "@/src/theme";
+import { colors, fonts, platformColors, platformLabels, spacing } from "@/src/theme";
 import type { DutySegment } from "@/src/duty";
 import { formatDuration } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
@@ -13,7 +17,11 @@ interface Props {
   segments: DutySegment[];
   shiftSeconds: number;
   workingSeconds: number;
+  /** Seconds online on each app today, from the server. */
+  perPlatformSeconds?: Record<string, number>;
 }
+
+const LEGEND_ORDER = ["uber", "rapido", "ola"];
 
 const HatchStripe: React.FC = () => (
   <View style={styles.hatchWrap}>
@@ -26,9 +34,15 @@ const HatchStripe: React.FC = () => (
   </View>
 );
 
-export const DutyStripe: React.FC<Props> = ({ segments, shiftSeconds, workingSeconds }) => {
+// The apps a segment was online on. New rows carry `platforms`; older ones
+// name a single app in `state`.
+const appsOf = (s: DutySegment): string[] =>
+  s.platforms?.length ? s.platforms : LEGEND_ORDER.includes(s.state) ? [s.state] : [];
+
+export const DutyStripe: React.FC<Props> = ({ segments, shiftSeconds, workingSeconds, perPlatformSeconds }) => {
   const c = useCardText();
   const total = segments.reduce((a, s) => a + s.seconds, 0) || 1;
+  const legend = LEGEND_ORDER.filter((p) => (perPlatformSeconds?.[p] ?? 0) > 0);
   return (
     <View style={styles.wrap} testID="duty-stripe">
       <View style={styles.header}>
@@ -54,17 +68,39 @@ export const DutyStripe: React.FC<Props> = ({ segments, shiftSeconds, workingSec
                 </View>
               );
             }
-            const color = platformColors[s.state] ?? colors.muted;
+            const apps = appsOf(s);
+            if (apps.length > 1) {
+              return (
+                <View key={i} style={{ flex }} testID={`duty-seg-${i}-${apps.join("+")}`}>
+                  {apps.map((p) => (
+                    <View key={p} style={{ flex: 1, backgroundColor: platformColors[p] ?? colors.muted }} />
+                  ))}
+                </View>
+              );
+            }
+            const color = platformColors[apps[0] ?? s.state] ?? colors.muted;
             return (
               <View
                 key={i}
                 style={[styles.segment, { flex, backgroundColor: color }]}
-                testID={`duty-seg-${i}-${s.state}`}
+                testID={`duty-seg-${i}-${apps[0] ?? s.state}`}
               />
             );
           })
         )}
       </View>
+      {legend.length > 0 ? (
+        <View style={styles.legend} testID="duty-stripe-legend">
+          {legend.map((p) => (
+            <View key={p} style={styles.legendItem} testID={`duty-time-${p}`}>
+              <View style={[styles.legendDot, { backgroundColor: platformColors[p] }]} />
+              <Text style={styles.legendText}>
+                {platformLabels[p]} {formatDuration(perPlatformSeconds![p])}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 };
@@ -86,6 +122,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.line,
   },
   segment: { height: "100%" },
+  legend: { flexDirection: "row", flexWrap: "wrap", gap: spacing.md, marginTop: spacing.sm },
+  legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontFamily: fonts.dataMed, fontSize: 12, color: colors.ink },
   hatchWrap: { flex: 1, overflow: "hidden" },
   hatchBase: { ...StyleSheet.absoluteFill, backgroundColor: colors.muted },
   hatchLines: {

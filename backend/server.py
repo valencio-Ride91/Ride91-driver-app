@@ -1151,13 +1151,22 @@ async def _segments_for_day(driver_id: str, day_start: datetime, day_end: dateti
         except Exception:
             continue
     segments: List[Dict] = []
+    now = now_utc()
     for i, (ts, row) in enumerate(parsed):
+        newest = i + 1 == len(parsed)
         seg_start = ts
-        seg_end = parsed[i + 1][0] if i + 1 < len(parsed) else now_utc()
+        seg_end = parsed[i + 1][0] if not newest else max(now, ts)
         # clip to day window
         s = max(seg_start, day_start)
         e = min(seg_end, day_end)
-        if e <= s:
+        # Two kinds of row are kept even at zero length. The newest row is
+        # what the driver is doing right now — it may be a second old, or
+        # stamped by a phone whose clock runs ahead of ours; dropping it made
+        # the app show the state before it, as if the last tap had not
+        # happened. And a start / end-duty row decides whether the driver is on
+        # duty at all, however quickly the next tap followed it.
+        keep_empty = (newest or row["state"] in ("start_duty", "end_duty")) and day_start <= ts < day_end
+        if e < s or (e == s and not keep_empty):
             continue
         # Derive the active-platform set for the segment. New rows carry
         # `platforms`; legacy rows encode a single platform in `state`.
@@ -1219,7 +1228,8 @@ def _apply_duty_carry(
                 in_day_marker = True
             else:
                 s_, e_ = _parse_iso(seg["from_ts"]), min(_parse_iso(seg["to_ts"]), cutoff)
-                if e_ <= s_:
+                # (a zero-length newest row inside the carry window is kept)
+                if e_ < s_ or (e_ == s_ and seg["seconds"] > 0):
                     continue
                 seg = {**seg, "to_ts": iso(e_), "seconds": int((e_ - s_).total_seconds())}
         out.append(seg)
@@ -2962,6 +2972,7 @@ async def admin_hub_activity(
             "current_platforms": summ["current_platforms"],
             "on_duty_seconds": summ["on_duty_seconds"],
             "working_seconds": summ["working_seconds"],
+            "per_platform_seconds": summ["per_platform_seconds"],
             "distance_km": summ["distance_km"],
             "last_ping_at": last.get("recorded_at"),
             # today only: "live" | "stopped" (on duty but the phone has gone quiet) | None

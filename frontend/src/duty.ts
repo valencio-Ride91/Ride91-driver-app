@@ -8,6 +8,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -22,7 +23,24 @@ export interface DutySegment {
   from_ts: string;
   to_ts: string;
   seconds: number;
+  /** Apps the driver was online on during this stretch. */
+  platforms?: string[];
+  /** When the row was really written (from_ts is clipped to the day). */
+  started_at?: string;
 }
+
+// What the driver just did on this phone, kept on screen until the server has
+// it too. Without this a reload that lands before the tap is saved shows the
+// state from before the tap, and the button the driver pressed flips back.
+interface LocalHold {
+  on_duty: boolean;
+  current_state: string;
+  current_platforms: string[];
+  startedMs: number;     // the action's own timestamp
+  madeAt: number;        // when it was made, by this phone's clock
+}
+
+const HOLD_GIVE_UP_MS = 15000;   // an action the server never accepted stops being shown after this
 
 export interface DutyToday {
   segments: DutySegment[];
@@ -35,6 +53,8 @@ export interface DutyToday {
   current_state: string | null;
   current_platform: string | null;
   current_platforms: string[];
+  /** Seconds online on each app today. */
+  per_platform_seconds?: Record<string, number>;
   distance_km: number;
   business_date: string;
   day_start: string;
@@ -76,18 +96,40 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
 }) => {
   const [today, setToday] = useState<DutyToday | null>(null);
   const [loading, setLoading] = useState(true);
-  const { enqueue } = useSync();
+  const { enqueue, unsynced } = useSync();
   const { lat, lng } = useTracking();
+  const hold = useRef<LocalHold | null>(null);
+  const unsyncedRef = useRef(unsynced);
+  unsyncedRef.current = unsynced;
 
   const refresh = useCallback(async () => {
     try {
       const r = await api.get<DutyToday>("/duty/today");
+      const h = hold.current;
+      if (h) {
+        // Has the server caught up with what the driver did here?
+        const last = r.segments[r.segments.length - 1];
+        const lastMs = last ? new Date(last.started_at ?? last.from_ts).getTime() : 0;
+        const caughtUp = lastMs >= h.startedMs - 1;
+        const givenUp = unsyncedRef.current === 0 && Date.now() - h.madeAt > HOLD_GIVE_UP_MS;
+        if (caughtUp || givenUp) {
+          hold.current = null;
+        } else {
+          setToday({ ...r, on_duty: h.on_duty, current_state: h.current_state, current_platforms: h.current_platforms });
+          return;
+        }
+      }
       setToday(r);
     } catch {
       // keep whatever we have
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Remember a local action so reloads keep showing it until the server has it.
+  const keep = useCallback((startedAt: string, v: Pick<LocalHold, "on_duty" | "current_state" | "current_platforms">) => {
+    hold.current = { ...v, startedMs: new Date(startedAt).getTime(), madeAt: Date.now() };
   }, []);
 
   useEffect(() => {
@@ -116,7 +158,7 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
           );
         }
         segs.push({ state, from_ts: startedAt, to_ts: startedAt, seconds: 0 });
-        return {
+        const next = {
           ...prev,
           segments: segs,
           current_state: state,
@@ -124,6 +166,8 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
           on_duty: state === "start_duty" ? true : state === "end_duty" ? false : prev.on_duty,
           current_platforms: state === "start_duty" || state === "end_duty" ? [] : prev.current_platforms,
         };
+        keep(startedAt, next);
+        return next;
       });
 
       // If we're moving AWAY FROM a platform (not to Offline) and the
@@ -154,7 +198,7 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
       // Refresh soon after so the server-side segment math takes over
       setTimeout(refresh, 1500);
     },
-    [enqueue, lat, lng, today, refresh],
+    [enqueue, lat, lng, today, refresh, keep],
   );
 
   // Start duty goes straight to the server instead of through the offline
@@ -165,7 +209,8 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
     async (queueIfOffline) => {
       const startedAt = new Date().toISOString();
       const body = { state: "start_duty", started_at: startedAt, lat, lng, source: "driver" };
-      const showOnDuty = () =>
+      const showOnDuty = () => {
+        keep(startedAt, { on_duty: true, current_state: "start_duty", current_platforms: [] });
         setToday((prev) =>
           prev
             ? {
@@ -177,6 +222,7 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
               }
             : prev,
         );
+      };
       try {
         await api.post("/duty/state", { ...body, client_action_id: Crypto.randomUUID() });
       } catch (e: any) {
@@ -191,7 +237,7 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
       await refresh();
       return "ok";
     },
-    [enqueue, lat, lng, refresh],
+    [enqueue, lat, lng, refresh, keep],
   );
 
   const setPlatforms: DutyCtx["setPlatforms"] = useCallback(
@@ -206,9 +252,10 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
         if (segs.length) {
           segs[segs.length - 1] = { ...segs[segs.length - 1], to_ts: startedAt };
         }
-        segs.push({ state, from_ts: startedAt, to_ts: startedAt, seconds: 0 });
+        segs.push({ state, from_ts: startedAt, to_ts: startedAt, seconds: 0, platforms: uniq });
         return { ...prev, segments: segs, current_state: state, current_platforms: uniq };
       });
+      keep(startedAt, { on_duty: true, current_state: state, current_platforms: uniq });
       await enqueue("/duty/state", {
         state,
         platforms: uniq,
@@ -219,7 +266,7 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
       });
       setTimeout(refresh, 1200);
     },
-    [enqueue, lat, lng, refresh],
+    [enqueue, lat, lng, refresh, keep],
   );
 
   const value = useMemo<DutyCtx>(

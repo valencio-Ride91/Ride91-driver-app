@@ -405,6 +405,7 @@ export default function Home() {
           segments={today?.segments ?? []}
           shiftSeconds={24 * 3600}
           workingSeconds={today?.working_seconds ?? 0}
+          perPlatformSeconds={today?.per_platform_seconds}
         />
       </View>
 
