@@ -3421,7 +3421,8 @@ async def admin_import_uber_payments(
                  "business_date": business_date},
                 {"$set": row,
                  "$setOnInsert": {"id": str(uuid.uuid4()),
-                                  "created_at": now_iso}},
+                                  "created_at": now_iso,
+                                  "client_action_id": _day_row_key(platform, business_date)}},
                 upsert=True,
             )
         imported.append({"driver_id": driver["id"], "name": name,
@@ -3473,6 +3474,18 @@ async def admin_link_uber_uuid(
 # overwrites an official settled import (precedence: settled > manual > ocr),
 # so the two sources can't double-count.
 # ---------------------------------------------------------------------------
+def _day_row_key(platform: str, business_date: str) -> str:
+    """The `client_action_id` for a driver's one canonical earnings row for a
+    platform and day (hub-entered or imported from a report).
+
+    platform_cash has a UNIQUE index on (driver_id, client_action_id), built
+    for the driver app's idempotent uploads. A row written without that field
+    counts as null, and a unique index allows only one null per driver — so
+    without a key the hub could save a driver's earnings for exactly one day,
+    and every other day was rejected. Every canonical row gets its own key."""
+    return f"day:{platform}:{business_date}"
+
+
 class EarningsEntryIn(BaseModel):
     business_date: Optional[str] = None          # YYYY-MM-DD; default today
     platform: Literal["uber", "rapido", "ola"] = "uber"
@@ -3531,7 +3544,9 @@ async def admin_set_driver_earnings(
     if not driver:
         raise HTTPException(404, "driver_not_found")
     await _assert_driver_in_scope(driver, hub_scope(admin))
-    bd = body.business_date or business_date_now()
+    bd = _bd_or_400(body.business_date)          # any past day is fine; a bad date is a 400
+    if bd > business_date_now():
+        raise HTTPException(400, "future_date")
     existing = await db.platform_cash.find_one(
         {"driver_id": driver_id, "platform": body.platform, "business_date": bd},
         {"_id": 0, "source": 1})
@@ -3551,7 +3566,8 @@ async def admin_set_driver_earnings(
             "window_start": iso(start), "window_end": iso(end),
             "entered_by": admin["username"], "updated_at": now,
          },
-         "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+         "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now,
+                          "client_action_id": _day_row_key(body.platform, bd)}},
         upsert=True,
     )
     await _audit(admin, "set_driver_earnings", driver_id,
