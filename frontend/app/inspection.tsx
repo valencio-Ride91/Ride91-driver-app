@@ -29,6 +29,7 @@ import { colors, fonts, radius, spacing } from "@/src/theme";
 import { useI18n } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
 import { api } from "@/src/api";
+import { useDuty } from "@/src/duty";
 
 type Step = "dashboard" | "exterior" | "review" | "submitting" | "done";
 
@@ -38,6 +39,7 @@ export default function Inspection() {
   const { t } = useI18n();
   const c = useCardText();
   const router = useRouter();
+  const { startDuty } = useDuty();
   const cameraRef = useRef<CameraView>(null);
 
   const [step, setStep] = useState<Step>("dashboard");
@@ -186,6 +188,10 @@ export default function Inspection() {
         client_action_id: Crypto.randomUUID(),
       });
       setStep("done");
+      // The inspection is the last thing standing between the driver and
+      // duty, so start duty now rather than send them back to tap Start a
+      // second time. If it cannot start, Home still shows the Start button.
+      await startDuty(true).catch(() => {});
       // Small delay so the driver sees the tick before we bounce back
       setTimeout(() => router.replace("/(tabs)"), 900);
     } catch (e: any) {
@@ -193,7 +199,7 @@ export default function Inspection() {
     } finally {
       setBusy(false);
     }
-  }, [dashPhotoUri, videoUri, router, c]);
+  }, [dashPhotoUri, videoUri, router, c, startDuty]);
 
   // ---- Render -------------------------------------------------------------
   if (!canUseCamera) {

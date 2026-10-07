@@ -321,8 +321,9 @@ class DutyStateIn(BaseModel):
     # Sent with state="online"; empty/None means not online on any app.
     platforms: Optional[List[str]] = None
     started_at: str
-    lat: float
-    lng: float
+    # Where the driver was. None when the phone had no fix — never 0,0.
+    lat: Optional[float] = None
+    lng: Optional[float] = None
     source: Literal["driver", "admin_correction", "system"] = "driver"
     client_action_id: str
 
@@ -1170,9 +1171,59 @@ async def _segments_for_day(driver_id: str, day_start: datetime, day_end: dateti
                 "from_ts": iso(s),
                 "to_ts": iso(e),
                 "seconds": int((e - s).total_seconds()),
+                # When the row itself was written; earlier than from_ts for a
+                # state carried in from the day before.
+                "started_at": iso(seg_start),
             }
         )
     return segments
+
+
+# A duty that runs past the 04:00 day change carries into the new day, so a
+# night driver is not switched off mid-shift. But only for this long after it
+# started: a driver who simply forgot to end duty is treated as off after that,
+# and starts the next day fresh (with that day's inspection).
+DUTY_CARRY_HOURS = 16
+
+
+async def _duty_carried_in(driver_id: str, day_start: datetime) -> Optional[datetime]:
+    """If the driver was on duty when this business day began, when that duty
+    started; otherwise None."""
+    last = await db.duty_states.find_one(
+        {"driver_id": driver_id, "state": {"$in": ["start_duty", "end_duty"]},
+         "started_at": {"$lt": iso(day_start)}},
+        {"_id": 0, "state": 1, "started_at": 1},
+        sort=[("started_at", -1)],
+    )
+    if not last or last["state"] != "start_duty":
+        return None
+    try:
+        return _parse_iso(last["started_at"])
+    except Exception:
+        return None
+
+
+def _apply_duty_carry(
+    segs: List[Dict], day_start: datetime, carried_from: Optional[datetime], now: datetime
+) -> Tuple[List[Dict], bool]:
+    """Trim the part of the day that comes before its first start/end-duty row.
+    That stretch belongs to yesterday's duty: it counts only while that duty is
+    still within DUTY_CARRY_HOURS of its start, and not at all if the driver
+    was off duty when the day began. Returns (segments, still_carried_now)."""
+    cutoff = carried_from + timedelta(hours=DUTY_CARRY_HOURS) if carried_from else day_start
+    out: List[Dict] = []
+    in_day_marker = False
+    for seg in segs:
+        if not in_day_marker:
+            if seg["state"] in ("start_duty", "end_duty") and _parse_iso(seg["started_at"]) >= day_start:
+                in_day_marker = True
+            else:
+                s_, e_ = _parse_iso(seg["from_ts"]), min(_parse_iso(seg["to_ts"]), cutoff)
+                if e_ <= s_:
+                    continue
+                seg = {**seg, "to_ts": iso(e_), "seconds": int((e_ - s_).total_seconds())}
+        out.append(seg)
+    return out, (not in_day_marker and carried_from is not None and now < cutoff)
 
 
 async def _duty_summary(
@@ -1182,6 +1233,8 @@ async def _duty_summary(
     the driver's /duty/today and the admin duty views, so they never drift."""
     day_start, day_end = business_day_bounds(business_date)
     segs = await _segments_for_day(driver_id, day_start, day_end)
+    segs, carried_now = _apply_duty_carry(
+        segs, day_start, await _duty_carried_in(driver_id, day_start), min(now_utc(), day_end))
     totals: Dict[str, int] = {}
     for s in segs:
         totals[s["state"]] = totals.get(s["state"], 0) + s["seconds"]
@@ -1193,9 +1246,11 @@ async def _duty_summary(
     for s in segs:
         for p in s.get("platforms") or []:
             per_platform_seconds[p] = per_platform_seconds.get(p, 0) + s["seconds"]
-    # On-duty time = working + not_online + charging segments after start_duty.
+    # On-duty time = everything from start_duty on: the wait before the first
+    # platform is picked, working, not_online and charging.
     on_duty_seconds = (
         working_seconds
+        + totals.get("start_duty", 0)
         + totals.get("not_online", 0)
         + totals.get("to_charger", 0)
         + totals.get("charging", 0)
@@ -1203,15 +1258,12 @@ async def _duty_summary(
     charging_seconds = totals.get("to_charger", 0) + totals.get("charging", 0)
     # Current state = most recent row across the day.
     current = segs[-1]["state"] if segs else None
-    # Is the driver ON DUTY? Yes iff most recent start_duty is more recent
-    # than most recent end_duty within the business day.
-    on_duty = False
+    # Is the driver ON DUTY? The latest start/end-duty row of the day decides.
+    # With none yet today, a duty carried in from yesterday still counts.
+    on_duty = carried_now
     for s in reversed(segs):
-        if s["state"] == "end_duty":
-            on_duty = False
-            break
-        if s["state"] == "start_duty":
-            on_duty = True
+        if s["state"] in ("start_duty", "end_duty") and _parse_iso(s["started_at"]) >= day_start:
+            on_duty = s["state"] == "start_duty"
             break
     # Current active-platform SET is the most recent platform-layer row after
     # the last start_duty. `current_platform` (singular) is kept for older
@@ -1219,7 +1271,7 @@ async def _duty_summary(
     current_platforms: List[str] = []
     if on_duty:
         for s in reversed(segs):
-            if s["state"] == "start_duty":
+            if s["state"] == "start_duty" and _parse_iso(s["started_at"]) >= day_start:
                 break
             if s["state"] in ("online", "not_online") or s["state"] in PLATFORMS:
                 current_platforms = list(s.get("platforms") or [])
@@ -1768,7 +1820,7 @@ async def documents_expiring_summary(driver: Dict = Depends(get_driver)):
 # CONSENTS (Part 9)
 # ---------------------------------------------------------------------------
 CONSENT_LABELS = {
-    "location_tracking": "Location tracking during duty",
+    "location_tracking": "Location tracking while signed in to the app",
     "camera_and_video": "Camera & video capture for inspections",
     "cash_handling": "Handling and reconciling cash on our behalf",
     "communications": "Operational SMS / WhatsApp / email",
@@ -2899,7 +2951,8 @@ async def admin_hub_activity(
     rows: List[Dict[str, Any]] = []
     for d in sorted(drivers, key=lambda x: (x.get("code") or "", x.get("name") or "")):
         summ = await _duty_summary(d["id"], d.get("vehicle_id"), bd)
-        last = await _last_ping(d.get("vehicle_id"), d["id"])
+        last = await _last_phone_ping(d["id"])
+        track = await _tracking_status(d["id"], summ["on_duty"], last) if bd == business_date_now() else {}
         rows.append({
             "driver_id": d["id"], "name": d.get("name"), "code": d.get("code"),
             "phone": d.get("phone"), "shift_type": d.get("shift_type", "day"),
@@ -2911,6 +2964,9 @@ async def admin_hub_activity(
             "working_seconds": summ["working_seconds"],
             "distance_km": summ["distance_km"],
             "last_ping_at": last.get("recorded_at"),
+            # today only: "live" | "stopped" (on duty but the phone has gone quiet) | None
+            "tracking": track.get("tracking"),
+            "tracking_reason": track.get("reason"),
         })
     on_now = sum(1 for r in rows if r["on_duty"])
     return {
@@ -3015,6 +3071,26 @@ async def admin_vehicles_live(admin: Dict = Depends(fleet_admin)):
                 "stale": bool(age_min is not None and age_min > 10),
             }
         )
+    # Drivers with no car assigned have no car dot; show them from their phone.
+    async for d in db.drivers.find(
+        {"vehicle_id": None, "archived": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1, "hub_name": 1}
+    ):
+        last = await _last_phone_ping(d["id"])
+        if not last:
+            continue
+        try:
+            age_min = (now - _parse_iso(last["recorded_at"])).total_seconds() / 60
+        except Exception:
+            age_min = None
+        out.append({
+            "vehicle_id": None, "vehicle_number": None,
+            "driver_id": d["id"], "driver_name": d.get("name"), "hub_name": d.get("hub_name"),
+            "lat": last["lat"], "lng": last["lng"],
+            "speed_kmph": None, "soc_pct": None, "accuracy_m": None,
+            "recorded_at": last["recorded_at"],
+            "age_minutes": round(age_min, 1) if age_min is not None else None,
+            "stale": bool(age_min is not None and age_min > 10),
+        })
     return {"items": out, "count": len(out), "server_ts": iso(now)}
 
 
@@ -7226,6 +7302,37 @@ async def vehicle_ping_ingest(
 # VEHICLE PING helpers
 
 
+TRACKING_QUIET_MINUTES = 10      # an on-duty phone silent for longer than this has stopped tracking
+
+
+async def _last_phone_ping(driver_id: str) -> Dict[str, Any]:
+    """The driver's own latest phone fix, or {}. Unlike _last_ping this does
+    not need a car, so a driver with no car assigned is still covered."""
+    row = await db.phone_pings.find_one(
+        {"driver_id": driver_id, "lat": {"$ne": None}}, {"_id": 0}, sort=[("recorded_at", -1)])
+    return row or {}
+
+
+async def _tracking_status(driver_id: str, on_duty: bool, last_ping: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether an on-duty driver's phone is still reporting. Off duty there is
+    nothing to flag. `reason` says what the phone last told us about itself."""
+    if not on_duty:
+        return {"tracking": None, "reason": None}
+    age_min = None
+    if last_ping.get("recorded_at"):
+        try:
+            age_min = (now_utc() - _parse_iso(last_ping["recorded_at"])).total_seconds() / 60
+        except Exception:
+            age_min = None
+    if age_min is not None and age_min <= TRACKING_QUIET_MINUTES:
+        return {"tracking": "live", "reason": None}
+    hb = await db.heartbeats.find_one({"driver_id": driver_id}, {"_id": 0}, sort=[("received_at", -1)])
+    reason = "no_signal"         # phone off, no network, or the app was closed by the phone
+    if hb and hb.get("permission_ok") is False:
+        reason = "location_off"  # the driver switched location off or took the permission away
+    return {"tracking": "stopped", "reason": reason}
+
+
 async def _last_ping(vehicle_id: Optional[str], driver_id: Optional[str] = None) -> Dict[str, Any]:
     """Most recent GPS ping for a car, or {} if none. With `driver_id`, only
     that driver's own phone pings count — on a car shared by a day and a night
@@ -7648,6 +7755,9 @@ async def _on_startup() -> None:
     await db.close_outs.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     await db.requests.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     await db.vehicle_pings.create_index([("vehicle_id", 1), ("recorded_at", 1)])
+    # Latest phone fix / heartbeat per driver (tracking-stopped flag, live map).
+    await db.phone_pings.create_index([("driver_id", 1), ("recorded_at", -1)])
+    await db.heartbeats.create_index([("driver_id", 1), ("received_at", -1)])
     # Latest-ping-per-vehicle windows on recorded_at across all vehicles, so
     # it needs the timestamp leading. At ~200 vehicles pinging every 4
     # minutes this collection is the fastest-growing one in the system.

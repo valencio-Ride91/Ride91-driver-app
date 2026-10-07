@@ -11,6 +11,8 @@ import React, {
   useState,
 } from "react";
 
+import * as Crypto from "expo-crypto";
+
 import { api } from "@/src/api";
 import { useSync } from "@/src/sync";
 import { useTracking } from "@/src/tracking";
@@ -53,7 +55,16 @@ interface DutyCtx {
   ) => Promise<void>;
   // Set the full set of platforms the driver is online on (multiple allowed).
   setPlatforms: (platforms: string[]) => Promise<void>;
+  // Start duty and say what happened, so the screen can react:
+  //   ok                  on duty
+  //   inspection_required today's car check is not on file yet
+  //   offline             no network. With `queueIfOffline` the start is kept
+  //                       on the phone and sent when the network is back.
+  //   error               the server refused for some other reason
+  startDuty: (queueIfOffline: boolean) => Promise<StartDutyResult>;
 }
+
+export type StartDutyResult = "ok" | "inspection_required" | "offline" | "error";
 
 const Ctx = createContext<DutyCtx | null>(null);
 
@@ -105,7 +116,14 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
           );
         }
         segs.push({ state, from_ts: startedAt, to_ts: startedAt, seconds: 0 });
-        return { ...prev, segments: segs, current_state: state };
+        return {
+          ...prev,
+          segments: segs,
+          current_state: state,
+          // start / end duty decide this; every other state leaves it alone
+          on_duty: state === "start_duty" ? true : state === "end_duty" ? false : prev.on_duty,
+          current_platforms: state === "start_duty" || state === "end_duty" ? [] : prev.current_platforms,
+        };
       });
 
       // If we're moving AWAY FROM a platform (not to Offline) and the
@@ -129,14 +147,51 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
       await enqueue("/duty/state", {
         state,
         started_at: startedAt,
-        lat: lat ?? 0,
-        lng: lng ?? 0,
+        lat,       // null when the phone has no fix — never a made-up 0,0
+        lng,
         source: "driver",
       });
       // Refresh soon after so the server-side segment math takes over
       setTimeout(refresh, 1500);
     },
     [enqueue, lat, lng, today, refresh],
+  );
+
+  // Start duty goes straight to the server instead of through the offline
+  // queue: the server can refuse it (no inspection on file), and the driver
+  // has to be told at once rather than left looking at a button that did
+  // nothing.
+  const startDuty: DutyCtx["startDuty"] = useCallback(
+    async (queueIfOffline) => {
+      const startedAt = new Date().toISOString();
+      const body = { state: "start_duty", started_at: startedAt, lat, lng, source: "driver" };
+      const showOnDuty = () =>
+        setToday((prev) =>
+          prev
+            ? {
+                ...prev,
+                on_duty: true,
+                current_state: "start_duty",
+                current_platforms: [],
+                segments: [...prev.segments, { state: "start_duty", from_ts: startedAt, to_ts: startedAt, seconds: 0 }],
+              }
+            : prev,
+        );
+      try {
+        await api.post("/duty/state", { ...body, client_action_id: Crypto.randomUUID() });
+      } catch (e: any) {
+        if (e?.status === 409 && e?.body?.detail === "inspection_required") return "inspection_required";
+        if (e?.status) return "error";
+        if (!queueIfOffline) return "offline";
+        showOnDuty();
+        await enqueue("/duty/state", body);
+        return "offline";
+      }
+      showOnDuty();
+      await refresh();
+      return "ok";
+    },
+    [enqueue, lat, lng, refresh],
   );
 
   const setPlatforms: DutyCtx["setPlatforms"] = useCallback(
@@ -158,8 +213,8 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
         state,
         platforms: uniq,
         started_at: startedAt,
-        lat: lat ?? 0,
-        lng: lng ?? 0,
+        lat,
+        lng,
         source: "driver",
       });
       setTimeout(refresh, 1200);
@@ -168,8 +223,8 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
   );
 
   const value = useMemo<DutyCtx>(
-    () => ({ today, loading, refresh, switchState, setPlatforms }),
-    [today, loading, refresh, switchState, setPlatforms],
+    () => ({ today, loading, refresh, switchState, setPlatforms, startDuty }),
+    [today, loading, refresh, switchState, setPlatforms, startDuty],
   );
   return React.createElement(Ctx.Provider, { value }, children);
 };

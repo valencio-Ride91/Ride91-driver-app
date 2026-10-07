@@ -1,7 +1,23 @@
-// Tracking health context.
-// - Every 4 min: request a balanced-accuracy location and POST /tracking/ping
-// - Every 60s: heartbeat with permission_ok + network_up
-// The pill in the header reads from here.
+// Location tracking.
+//
+// Two things run while a driver is signed in:
+//
+//   * A background tracker (Android foreground service, see locationTask.ts)
+//     that reports the phone's position to the fleet about once a minute,
+//     with the app open, closed or the screen off.
+//   * A foreground watcher that keeps `lat` / `lng` here fresh, for the Home
+//     map and for stamping duty actions with where they happened.
+//
+// "Location is working" needs three things to be true, and each can change
+// behind the app's back, so all three are re-checked every time the driver
+// comes back to the app and once a minute:
+//
+//   1. the app has location permission,
+//   2. location is switched on in the phone,
+//   3. the background tracker is actually running (the phone may have killed
+//      it; if so it is restarted here).
+//
+// The header pill and the Start-duty check read from this.
 
 import React, {
   createContext,
@@ -12,7 +28,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import * as Location from "expo-location";
 import NetInfo from "@react-native-community/netinfo";
 
@@ -27,7 +43,15 @@ interface TrackingCtx {
   lat: number | null;
   lng: number | null;
   permissionOk: boolean;
+  /** Permission granted AND location switched on in the phone. */
+  locationOk: boolean;
   requestPermission: () => Promise<boolean>;
+  /** Get location working, asking the driver for whatever is missing.
+   *  Resolves true once permission is granted and location is on. */
+  ensureLocation: () => Promise<boolean>;
+  /** Try to start the background tracker again; true if it is now running. */
+  restartTracker: () => Promise<boolean>;
+  openSettings: () => void;
 }
 
 const Ctx = createContext<TrackingCtx | null>(null);
@@ -40,6 +64,9 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
   enabled,
 }) => {
   const [permissionOk, setPermissionOk] = useState(false);
+  const [servicesOn, setServicesOn] = useState(true);
+  // null = not known yet; false = should be running and is not.
+  const [serviceUp, setServiceUp] = useState<boolean | null>(null);
   const [online, setOnline] = useState(true);
   const [pos, setPos] = useState<{ lat: number | null; lng: number | null }>({
     lat: null,
@@ -47,78 +74,37 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
   });
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const askedBackground = useRef(false);
+  const webOk = useRef(false);
 
-  const requestPermission = useCallback(async () => {
-    if (Platform.OS === "web") {
-      // Best-effort on web preview
-      try {
-        const p = await new Promise<GeolocationPosition | null>((resolve) => {
-          if (!navigator.geolocation) return resolve(null);
-          navigator.geolocation.getCurrentPosition(
-            (x) => resolve(x),
-            () => resolve(null),
-            { enableHighAccuracy: false, timeout: 5000 },
-          );
-        });
-        if (p) {
-          setPos({ lat: p.coords.latitude, lng: p.coords.longitude });
-          setPermissionOk(true);
-          return true;
-        }
-        setPermissionOk(false);
-        return false;
-      } catch {
-        setPermissionOk(false);
-        return false;
-      }
+  const webLocate = useCallback(async () => {
+    // Best-effort on web preview
+    let p: GeolocationPosition | null = null;
+    try {
+      p = await new Promise<GeolocationPosition | null>((resolve) => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition(
+          (x) => resolve(x),
+          () => resolve(null),
+          { enableHighAccuracy: false, timeout: 5000 },
+        );
+      });
+    } catch {
+      p = null;
     }
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    const ok = status === "granted";
-    setPermissionOk(ok);
-    if (ok) {
-      // Ask for "Allow all the time" so tracking keeps running in the
-      // background / with the screen off. If the driver only grants
-      // while-in-use, the foreground-service tracker still works while the
-      // app's service notification is active.
-      try {
-        await Location.requestBackgroundPermissionsAsync();
-      } catch {
-        // ignore — foreground service still covers the common case
-      }
-      try {
-        const p = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        setPos({ lat: p.coords.latitude, lng: p.coords.longitude });
-      } catch {
-        // ignore
-      }
-    }
-    return ok;
+    if (p) setPos({ lat: p.coords.latitude, lng: p.coords.longitude });
+    webOk.current = !!p;
+    setPermissionOk(!!p);
+    return !!p;
   }, []);
-
-  useEffect(() => {
-    const sub = NetInfo.addEventListener((s) => {
-      setOnline(!!(s.isConnected && s.isInternetReachable !== false));
-    });
-    return () => sub();
-  }, []);
-
-  // Auto-request on enable
-  useEffect(() => {
-    if (enabled) {
-      requestPermission();
-    }
-  }, [enabled, requestPermission]);
 
   // Start the OS-level background location service. This keeps reporting even
   // when the app is backgrounded or the screen is off (Android foreground
   // service). The task in locationTask.ts does the actual POST /tracking/ping.
-  const startBackground = useCallback(async () => {
-    if (Platform.OS === "web" || !permissionOk) return;
+  const startBackground = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === "web") return true;
     try {
-      const already = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
-      if (already) return;
+      if (await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK)) return true;
       await Location.startLocationUpdatesAsync(LOCATION_TASK, {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: 60000,        // ~every 60s
@@ -131,10 +117,11 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
           notificationColor: "#10231C",
         },
       });
+      return true;
     } catch {
-      // ignore — surfaced via the health pill
+      return false;   // surfaced via the health pill
     }
-  }, [permissionOk]);
+  }, []);
 
   const stopBackground = useCallback(async () => {
     if (Platform.OS === "web") return;
@@ -146,6 +133,126 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
       // ignore
     }
   }, []);
+
+  // Read the three facts as they are right now, and restart the background
+  // tracker if it should be running and is not. Never prompts the driver.
+  const checkStatus = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === "web") return webOk.current;
+    let perm = false;
+    let services = true;
+    try {
+      perm = (await Location.getForegroundPermissionsAsync()).status === "granted";
+      services = await Location.hasServicesEnabledAsync();
+    } catch {
+      // leave the pessimistic defaults
+    }
+    setPermissionOk(perm);
+    setServicesOn(services);
+    if (enabled && perm && services) setServiceUp(await startBackground());
+    return perm && services;
+  }, [enabled, startBackground]);
+
+  const requestPermission = useCallback(async () => {
+    if (Platform.OS === "web") return webLocate();
+    let ok = false;
+    try {
+      ok = (await Location.requestForegroundPermissionsAsync()).status === "granted";
+    } catch {
+      ok = false;
+    }
+    setPermissionOk(ok);
+    if (ok && !askedBackground.current) {
+      // Ask once per launch for "Allow all the time", so tracking keeps
+      // running with the app closed. If the driver only grants while-in-use,
+      // the foreground service still covers it while its notice is showing.
+      askedBackground.current = true;
+      try {
+        const bg = await Location.getBackgroundPermissionsAsync();
+        if (bg.status !== "granted" && bg.canAskAgain) await Location.requestBackgroundPermissionsAsync();
+      } catch {
+        // ignore — foreground service still covers the common case
+      }
+    }
+    return ok;
+  }, [webLocate]);
+
+  const ensureLocation = useCallback(async () => {
+    if (Platform.OS === "web") return webLocate();
+    if (!(await requestPermission())) return false;
+    let services = false;
+    try {
+      services = await Location.hasServicesEnabledAsync();
+      if (!services && Platform.OS === "android") {
+        // Shows Android's own "turn on location" dialog.
+        await Location.enableNetworkProviderAsync();
+        services = await Location.hasServicesEnabledAsync();
+      }
+    } catch {
+      services = false;   // the driver said no
+    }
+    setServicesOn(services);
+    if (services && enabled) setServiceUp(await startBackground());
+    return services;
+  }, [enabled, requestPermission, startBackground, webLocate]);
+
+  const restartTracker = useCallback(async () => {
+    const up = await startBackground();
+    setServiceUp(up);
+    return up;
+  }, [startBackground]);
+
+  const openSettings = useCallback(() => {
+    Linking.openSettings().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const sub = NetInfo.addEventListener((s) => {
+      setOnline(!!(s.isConnected && s.isInternetReachable !== false));
+    });
+    return () => sub();
+  }, []);
+
+  // Signed in: ask for permission (only the first time shows a prompt), then
+  // re-check whenever the driver returns to the app — they may have just
+  // changed something in the phone's settings.
+  useEffect(() => {
+    if (!enabled) {
+      stopBackground();
+      setServiceUp(null);
+      return;
+    }
+    requestPermission().then(() => checkStatus());
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") checkStatus();
+    });
+    return () => sub.remove();
+  }, [enabled, requestPermission, checkStatus, stopBackground]);
+
+  // Keep lat/lng fresh while the app is open and location is usable. Seeded
+  // with the last known fix so the map is right at once, even indoors.
+  const usable = enabled && permissionOk && servicesOn;
+  useEffect(() => {
+    if (!usable || Platform.OS === "web") return;
+    let alive = true;
+    let watcher: Location.LocationSubscription | null = null;
+    const take = (p: Location.LocationObject | null) => {
+      if (alive && p) setPos({ lat: p.coords.latitude, lng: p.coords.longitude });
+    };
+    Location.getLastKnownPositionAsync().then(take).catch(() => {});
+    Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.Balanced, timeInterval: 10000, distanceInterval: 15 },
+      take,
+    )
+      .then((w) => {
+        if (alive) watcher = w;
+        else w.remove();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      watcher?.remove();
+    };
+  }, [usable]);
 
   // Web preview can't run a background service: fall back to a direct ping so
   // the dashboard still shows a position during testing.
@@ -162,49 +269,53 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     }
   }, [permissionOk, pos]);
 
+  // Once a minute: re-check, then tell the server how the phone is doing, so
+  // the hub can see "location switched off" rather than just a silent driver.
   const heartbeat = useCallback(async () => {
+    const ok = await checkStatus();
     try {
       await api.post("/tracking/heartbeat", {
         ts: new Date().toISOString(),
-        permission_ok: permissionOk,
+        permission_ok: ok,
         network_up: online,
       });
     } catch {
       // ignore
     }
-  }, [permissionOk, online]);
+  }, [checkStatus, online]);
 
   useEffect(() => {
-    if (!enabled) {
-      if (pingRef.current) clearInterval(pingRef.current);
-      if (beatRef.current) clearInterval(beatRef.current);
-      pingRef.current = null;
-      beatRef.current = null;
-      stopBackground();
-      return;
-    }
-    startBackground();               // native: OS background tracker
+    if (!enabled) return;
     heartbeat();
     beatRef.current = setInterval(heartbeat, HEARTBEAT_MS);
-    if (Platform.OS === "web") {     // web preview fallback
-      webPing();
-      pingRef.current = setInterval(webPing, PING_MS);
-    }
+    return () => {
+      if (beatRef.current) clearInterval(beatRef.current);
+      beatRef.current = null;
+    };
+  }, [enabled, heartbeat]);
+
+  useEffect(() => {
+    if (!enabled || Platform.OS !== "web") return;   // web preview fallback
+    webPing();
+    pingRef.current = setInterval(webPing, PING_MS);
     return () => {
       if (pingRef.current) clearInterval(pingRef.current);
-      if (beatRef.current) clearInterval(beatRef.current);
+      pingRef.current = null;
     };
-  }, [enabled, startBackground, stopBackground, heartbeat, webPing]);
+  }, [enabled, webPing]);
 
-  const health: HealthState = !online
-    ? "no_network"
-    : !permissionOk
+  const locationOk = permissionOk && servicesOn;
+  const health: HealthState = !locationOk
     ? "location_off"
+    : serviceUp === false
+    ? "service_killed"
+    : !online
+    ? "no_network"
     : "synced";
 
   const value = useMemo<TrackingCtx>(
-    () => ({ health, lat: pos.lat, lng: pos.lng, permissionOk, requestPermission }),
-    [health, pos.lat, pos.lng, permissionOk, requestPermission],
+    () => ({ health, lat: pos.lat, lng: pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings }),
+    [health, pos.lat, pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings],
   );
   return React.createElement(Ctx.Provider, { value }, children);
 };

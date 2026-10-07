@@ -7,6 +7,8 @@ import { colors, fonts, spacing } from "@/src/theme";
 interface Props {
   lat: number | null;
   lng: number | null;
+  fallbackLat?: number | null;
+  fallbackLng?: number | null;
 }
 
 export const DriverMap: React.FC<Props> = ({ lat, lng }) => (

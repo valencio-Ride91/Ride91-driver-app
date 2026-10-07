@@ -16,15 +16,17 @@ import { BottomSheet } from "@/src/components/ui";
 const LANG_LABEL: Record<Lang, string> = { en: "EN", hi: "हिं", kn: "ಕನ್" };
 
 // Single-truth status pill. Never shows two contradictory states.
-// Priority: GPS off > No network > Saving N > On phone N > Synced
+// Priority: Location off > Tracking off > No network > Saving N > On phone N > Synced
 const singleStatus = (
   online: boolean,
-  permissionOk: boolean,
+  locationOk: boolean,
+  trackerDown: boolean,
   unsynced: number,
   t: ReturnType<typeof useI18n>["t"],
   c: CardText,
 ): { bg: string; fg: string; label: string; testID: string } => {
-  if (!permissionOk) return { bg: colors.alert, fg: colors.white, label: t.health_location, testID: "status-gps-off" };
+  if (!locationOk) return { bg: colors.alert, fg: colors.white, label: t.health_location, testID: "status-gps-off" };
+  if (trackerDown) return { bg: colors.alert, fg: colors.white, label: c.track_stopped, testID: "status-tracker-down" };
   if (!online && unsynced > 0)
     return { bg: colors.muted, fg: colors.white, label: c.on_phone(unsynced), testID: "status-on-phone" };
   if (!online)
@@ -42,12 +44,13 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
   const { lang, setLang, t } = useI18n();
   const c = useCardText();
   const { unsynced, online } = useSync();
-  const { permissionOk, requestPermission } = useTracking();
+  const { locationOk, health, ensureLocation, restartTracker, openSettings } = useTracking();
+  const trackerDown = health === "service_killed";
   const { driver } = useAuth();
   const router = useRouter();
   const [langOpen, setLangOpen] = useState(false);
   const [unread, setUnread] = useState(0);
-  const status = singleStatus(online, permissionOk, unsynced, t, c);
+  const status = singleStatus(online, locationOk, trackerDown, unsynced, t, c);
 
   useEffect(() => {
     if (!driver) return;
@@ -89,8 +92,14 @@ export const AppHeader: React.FC<Props> = ({ title }) => {
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.healthPill, { backgroundColor: status.bg }]}
-            onPress={() => {
-              if (!permissionOk) requestPermission();
+            onPress={async () => {
+              // Location problem: try to put it right; if the phone will not
+              // ask again, take the driver to the app's settings.
+              if (!locationOk) {
+                if (!(await ensureLocation())) openSettings();
+              } else if (trackerDown && !(await restartTracker())) {
+                openSettings();
+              }
             }}
             testID={status.testID}
           >

@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { DutyStripe } from "@/src/components/DutyStripe";
@@ -33,9 +35,9 @@ const CHARGE_NEXT: Record<string, { next: string; key: "go_to_charger" | "chargi
 export default function Home() {
   const { t } = useI18n();
   const c = useCardText();
-  const { today, switchState, setPlatforms, refresh } = useDuty();
-  const { lat, lng } = useTracking();
-  const { vehicle } = useAuth();
+  const { today, switchState, setPlatforms, refresh, startDuty: startDutyNow } = useDuty();
+  const { lat, lng, ensureLocation, openSettings } = useTracking();
+  const { vehicle, driver } = useAuth();
   const router = useRouter();
 
   // Deposit banner. Driven by you_owe — the settled balance from reports up
@@ -68,26 +70,31 @@ export default function Home() {
     };
   }, []);
 
-  // Inspection status. Auto-redirect on first-of-day if not complete.
+  // Whether today's car check is on file. Only used when the phone is
+  // offline; online, the server answers that question at the moment of start.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const insp = await api.get<{ completed: boolean }>("/inspection/today");
-        if (!alive) return;
-        setInspectionOk(insp.completed);
-      } catch {
-        // keep prev
-      }
-    };
-    load();
-    const id = setInterval(load, 20000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
+  const loadInspection = useCallback(async () => {
+    try {
+      const insp = await api.get<{ completed: boolean }>("/inspection/today");
+      setInspectionOk(insp.completed);
+    } catch {
+      // keep prev
+    }
   }, []);
+  useEffect(() => {
+    loadInspection();
+    const id = setInterval(loadInspection, 20000);
+    return () => clearInterval(id);
+  }, [loadInspection]);
+
+  // Coming back to Home (e.g. from the inspection): show the truth at once
+  // instead of waiting for the next poll.
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+      loadInspection();
+    }, [refresh, loadInspection]),
+  );
 
   const onDuty = !!today?.on_duty;
   // The driver can be online on several platforms at once.
@@ -95,18 +102,35 @@ export default function Home() {
   // current_state is the raw latest row, which is what the charging cycle keys off.
   const currentState = today?.current_state ?? null;
 
-  // Duty toggle: Start duty routes through the daily inspection first (the one
-  // and only car check). Once today's inspection is on file, going on duty and
-  // picking a platform are friction-free — no separate walk-around capture.
-  // End duty simply appends end_duty. Both push a row into duty_states.
+  // Start duty, one tap:
+  //   1. Location must be working — the driver is asked to switch it on.
+  //   2. The server is asked to start duty. If today's car check is not on
+  //      file it says so, and the driver goes to the inspection; finishing the
+  //      inspection starts duty by itself, with no second tap.
+  //   3. With no network, the start is kept on the phone and sent later — but
+  //      only if the car check is already known to be done.
+  const [starting, setStarting] = useState(false);
   const startDuty = useCallback(async () => {
-    if (inspectionOk !== true) {
-      router.push("/inspection");
-      return;
+    if (starting) return;
+    setStarting(true);
+    try {
+      if (!(await ensureLocation())) {
+        Alert.alert(c.start_loc_title, c.start_loc_body, [
+          { text: t.cancel, style: "cancel" },
+          { text: c.open_settings, onPress: openSettings },
+        ]);
+        return;
+      }
+      const r = await startDutyNow(inspectionOk === true);
+      if (r === "inspection_required" || (r === "offline" && inspectionOk !== true)) {
+        router.push("/inspection");
+      } else if (r === "error") {
+        Alert.alert(c.start_fail);
+      }
+    } finally {
+      setStarting(false);
     }
-    await switchState("start_duty", () => {});
-    setTimeout(refresh, 800);
-  }, [inspectionOk, switchState, refresh, router]);
+  }, [starting, ensureLocation, openSettings, startDutyNow, inspectionOk, router, c, t]);
 
   const endDuty = useCallback(async () => {
     await switchState("end_duty", () => {});
@@ -169,7 +193,7 @@ export default function Home() {
       ) : null}
 
       <View style={styles.mapWrap} testID="home-map">
-        <DriverMap lat={lat} lng={lng} />
+        <DriverMap lat={lat} lng={lng} fallbackLat={driver?.hub_lat} fallbackLng={driver?.hub_lng} />
       </View>
 
       <View style={styles.statusBar} testID="status-bar">
@@ -195,10 +219,13 @@ export default function Home() {
           ) : (
             <TouchableOpacity
               testID="start-duty-btn"
-              style={styles.startBtn}
+              style={[styles.startBtn, starting ? { opacity: 0.6 } : null]}
               onPress={startDuty}
+              disabled={starting}
             >
-              <Text style={styles.startBtnText}>{c.start_duty}</Text>
+              {starting
+                ? <ActivityIndicator color={colors.white} />
+                : <Text style={styles.startBtnText}>{c.start_duty}</Text>}
             </TouchableOpacity>
           )}
         </View>

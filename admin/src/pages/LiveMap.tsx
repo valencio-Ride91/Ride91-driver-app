@@ -56,14 +56,14 @@ export default function LiveMap() {
           />
           {rows.map((r) => (
             <Marker
-              key={r.vehicle_id}
+              key={r.vehicle_id ?? `d:${r.driver_id}`}
               position={[r.lat, r.lng]}
               icon={dotIcon(r.stale ? "#67756D" : "#0B7A4B", r.stale)}
             >
               <Popup>
                 <div style={{ minWidth: 200 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{r.vehicle_number ?? r.vehicle_id.slice(0, 8)}</div>
-                  <div style={{ color: "#67756D", fontSize: 12, marginBottom: 8 }}>{r.driver_name ?? "unassigned"}</div>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{r.vehicle_number ?? (r.vehicle_id ? r.vehicle_id.slice(0, 8) : "No car assigned")}</div>
+                  <div style={{ color: "#67756D", fontSize: 12, marginBottom: 8 }}>{r.driver_name ?? "unassigned"}{r.vehicle_id ? "" : " · from phone"}</div>
                   <div style={{ fontSize: 12 }}>Speed: {r.speed_kmph != null ? `${r.speed_kmph.toFixed(0)} km/h` : "—"}</div>
                   <div style={{ fontSize: 12 }}>SoC: {r.soc_pct != null ? `${r.soc_pct}%` : "—"}</div>
                   <div style={{ fontSize: 12 }}>Accuracy: {r.accuracy_m != null ? `${r.accuracy_m.toFixed(0)} m` : "—"}</div>

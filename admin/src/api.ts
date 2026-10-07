@@ -205,7 +205,7 @@ export interface NotificationRow {
 }
 
 export interface VehicleLiveRow {
-  vehicle_id: string;
+  vehicle_id: string | null;       // null: a driver with no car, shown from their phone
   vehicle_number: string | null;
   driver_id: string | null;
   driver_name: string | null;
@@ -550,6 +550,9 @@ export interface HubActivityRow {
   working_seconds: number;
   distance_km: number;
   last_ping_at: string | null;
+  // Today only. "stopped" = on duty but the phone has gone quiet.
+  tracking?: "live" | "stopped" | null;
+  tracking_reason?: "location_off" | "no_signal" | null;
 }
 export interface HubActivity {
   hub: { id: string; name: string | null };

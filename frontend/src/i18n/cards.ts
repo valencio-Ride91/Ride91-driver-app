@@ -357,9 +357,14 @@ const en = {
   doc_number_ph: "e.g. KA01 2020 0001234",
   doc_plus_days: (d: number) => `+${d}d`,
 
-  // ---- on-duty location notice (Android notification) ----
-  track_title: "Ride91 — on duty",
-  track_body: "Sharing your location with the fleet.",
+  // ---- location notice (Android notification) — shown whenever signed in ----
+  track_title: "Ride91 — location sharing on",
+  track_body: "Your location is shared with the fleet while you are signed in.",
+  track_stopped: "Tracking off",
+  start_loc_title: "Turn on location",
+  start_loc_body: "Ride91 needs your location to start duty. Switch location on and allow it for Ride91.",
+  open_settings: "Open settings",
+  start_fail: "Could not start duty. Please try again.",
 
   // ---- shift alarm card (Profile) ----
   alarm_on: "Alarm on",
@@ -431,7 +436,7 @@ const DOC_HI: Record<string, string> = {
 };
 
 const CONSENT_HI: Record<string, string> = {
-  location_tracking: "ड्यूटी के दौरान लोकेशन ट्रैकिंग",
+  location_tracking: "साइन इन रहने तक लोकेशन ट्रैकिंग",
   camera_and_video: "जाँच के लिए कैमरा और वीडियो",
   cash_handling: "हमारी ओर से नकद लेना और उसका हिसाब देना",
   communications: "काम से जुड़े SMS / WhatsApp / ईमेल",
@@ -779,9 +784,14 @@ const hi: CardText = {
   doc_number_ph: "जैसे KA01 2020 0001234",
   doc_plus_days: (d) => `+${d} दिन`,
 
-  // ---- on-duty location notice (Android notification) ----
-  track_title: "Ride91 — ड्यूटी पर",
-  track_body: "आपकी लोकेशन फ़्लीट के साथ साझा हो रही है।",
+  // ---- location notice (Android notification) — shown whenever signed in ----
+  track_title: "Ride91 — लोकेशन साझा हो रही है",
+  track_body: "साइन इन रहने तक आपकी लोकेशन फ़्लीट के साथ साझा होती है।",
+  track_stopped: "ट्रैकिंग बंद",
+  start_loc_title: "लोकेशन चालू करें",
+  start_loc_body: "ड्यूटी शुरू करने के लिए Ride91 को आपकी लोकेशन चाहिए। लोकेशन चालू करें और Ride91 को अनुमति दें।",
+  open_settings: "सेटिंग खोलें",
+  start_fail: "ड्यूटी शुरू नहीं हो सकी। फिर कोशिश करें।",
 
   // ---- shift alarm card (Profile) ----
   alarm_on: "अलार्म चालू",

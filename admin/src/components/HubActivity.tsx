@@ -79,7 +79,19 @@ export default function HubActivity({ hubId }: { hubId: string }) {
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtDur(r.on_duty_seconds)}</td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtDur(r.working_seconds)}</td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{r.distance_km.toFixed(1)} km</td>
-                <td className="muted-sm">{fmtAgo(r.last_ping_at)}</td>
+                <td className="muted-sm">
+                  {fmtAgo(r.last_ping_at)}
+                  {r.tracking === "stopped" ? (
+                    <div>
+                      <span className="tag alert" data-testid="tracking-stopped"
+                        title={r.tracking_reason === "location_off"
+                          ? "The driver's phone reported that location is switched off or not allowed for the app."
+                          : "No position from this phone for over 10 minutes: phone off, no network, or the phone closed the app."}>
+                        {r.tracking_reason === "location_off" ? "location off" : "tracking stopped"}
+                      </span>
+                    </div>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </tbody>
