@@ -8,11 +8,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, EarningsForDate, EarningsRow } from "../api";
+import { todayISO } from "./duty-format";
 
 const PLATFORMS = ["uber", "rapido", "ola"] as const;
-function todayISO() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
-}
 
 interface Draft { gross: string; cash: string; }
 
