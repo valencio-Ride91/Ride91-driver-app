@@ -1,5 +1,8 @@
-// Salary withdrawal requests — drivers ask to withdraw their salary from the
-// app, and the hub pays or rejects each request here.
+// Salary withdrawal requests — drivers withdraw their salary from the app.
+// With direct withdrawal on, most are paid straight to the bank and only show
+// under "Recently handled". The ones that could not go direct (switched off,
+// no bank saved, over the daily limit, transfer failed) wait here for the hub
+// to pay or reject.
 //
 // Each pending row shows what the driver can be paid right now (their share of
 // settled gross, less what has been paid, less the collection cash they still
@@ -110,7 +113,7 @@ export default function WithdrawalRequests({ hubId, onPaid }: { hubId?: string; 
           {!data ? (
             <tr><td colSpan={7} className="empty">Loading…</td></tr>
           ) : pending.length === 0 ? (
-            <tr><td colSpan={7} className="empty">No requests waiting. Drivers ask from the Earnings tab of the app.</td></tr>
+            <tr><td colSpan={7} className="empty">No requests waiting. Drivers withdraw from the Earnings tab of the app.</td></tr>
           ) : pending.map((r) => {
             const short = r.payable_now != null && r.amount > r.payable_now + 0.005;
             const busy = busyId === r.id;
@@ -121,7 +124,15 @@ export default function WithdrawalRequests({ hubId, onPaid }: { hubId?: string; 
                   <Link to={`/drivers/${r.driver_id}`} style={{ fontWeight: 600, color: "var(--ink)" }}>{who(r)}</Link>
                   <div className="muted-sm" style={{ fontFamily: "ui-monospace, monospace" }}>{r.driver_phone}</div>
                 </td>
-                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>{fmtINR(r.amount)}</td>
+                <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>
+                  {fmtINR(r.amount)}
+                  {r.direct_error ? (
+                    <div className="muted-sm" style={{ color: "var(--alert)", fontFamily: "inherit", fontWeight: 400, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}
+                      title={r.direct_error}>
+                      Direct transfer was not sent. Use Pay now to retry: it cannot pay twice.
+                    </div>
+                  ) : null}
+                </td>
                 <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", color: short ? "var(--alert)" : "inherit" }}>
                   {r.payable_now != null ? fmtINR(r.payable_now) : "—"}
                   {short ? <div className="muted-sm" style={{ color: "var(--alert)" }}>less than asked</div> : null}
@@ -162,7 +173,7 @@ export default function WithdrawalRequests({ hubId, onPaid }: { hubId?: string; 
                   <td style={{ textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{fmtINR(r.amount)}</td>
                   <td>
                     {r.state === "paid"
-                      ? <span className="tag live">paid{r.method === "manual" ? " · by hand" : ""}</span>
+                      ? <span className="tag live">paid{r.method === "manual" ? " · by hand" : r.direct ? " · direct" : ""}</span>
                       : <span className="tag alert">rejected</span>}
                   </td>
                   <td className="muted-sm">{r.reference ?? r.note ?? ""}</td>

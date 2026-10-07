@@ -1,6 +1,8 @@
 // Salary cash-out. Shows what the driver has earned, what has been paid, what
 // is being held back against collection cash they still owe, and so what they
-// can withdraw now — with a button that sends a withdrawal request to the hub.
+// can withdraw now — with a button to withdraw it. When direct withdrawal is
+// available the money goes straight to their bank; otherwise the withdrawal
+// goes to the hub as a request.
 //
 // The server owns every number here; the app only asks. A request is sent
 // directly (not through the offline queue) because the driver needs to know
@@ -37,6 +39,12 @@ interface Salary {
   has_pending: boolean;
   requests: WithdrawalRequest[];
   payments?: Payment[];      // absent on older servers
+  direct?: boolean;          // a withdrawal goes straight to the bank, no hub approval
+}
+
+interface WithdrawResult {
+  direct?: boolean;          // true when the money was sent straight away
+  request: WithdrawalRequest;
 }
 
 // One salary payment the driver received, by transfer or by hand.
@@ -60,7 +68,7 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [sent, setSent] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -92,10 +100,11 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
     setBusy(true);
     setErr(null);
     try {
-      await api.post("/money/salary/withdraw", { amount_rupees: a, client_action_id: Crypto.randomUUID() });
+      const res = await api.post<WithdrawResult>("/money/salary/withdraw", { amount_rupees: a, client_action_id: Crypto.randomUUID() });
       setOpen(false);
-      setSent(true);
-      setTimeout(() => setSent(false), 4000);
+      // Sent straight to the bank, or handed to the hub as a request.
+      setSent(res?.direct ? c.sal_sent_direct(formatINR(res.request.amount)) : c.sal_sent);
+      setTimeout(() => setSent(null), 6000);
       await load();
       onChanged?.();
     } catch (e: any) {
@@ -154,7 +163,7 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
       {data.pending > 0 ? <Line label={c.sal_requested} value={`− ${formatINR(data.pending)}`} /> : null}
       {data.cash_held_back > 0 ? <Line label={c.sal_cash_owed} value={`− ${formatINR(data.cash_held_back)}`} alert /> : null}
 
-      {sent ? <Text style={[styles.hint, styles.hintDone]} testID="salary-sent">{c.sal_sent}</Text> : null}
+      {sent ? <Text style={[styles.hint, styles.hintDone]} testID="salary-sent">{sent}</Text> : null}
       {hint && !sent ? (
         <Text style={[styles.hint, hintTone === "wait" ? styles.hintWait : styles.hintInfo]} testID="salary-hint">{hint}</Text>
       ) : null}
@@ -207,7 +216,7 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
         </View>
       ))}
 
-      <Text style={styles.note}>{c.sal_note}</Text>
+      <Text style={styles.note}>{data.direct ? c.sal_note_direct : c.sal_note}</Text>
 
       <BottomSheet visible={open} onClose={() => (busy ? undefined : setOpen(false))} title={c.sal_withdraw} testID="salary-sheet">
         <Text style={styles.sheetLabel}>{c.sal_amount}</Text>
@@ -221,9 +230,10 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void }>
           placeholderTextColor={colors.muted}
         />
         <Text style={styles.sheetHelp}>{c.sal_max(formatINR(data.available))}</Text>
+        {data.direct ? <Text style={styles.sheetHelp} testID="salary-direct-help">{c.sal_direct_help}</Text> : null}
         {err ? <Text style={styles.err} testID="salary-err">{err}</Text> : null}
         <TouchableOpacity testID="salary-send-btn" style={[styles.btn, busy ? styles.btnOff : null]} onPress={submit} disabled={busy}>
-          {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.btnText}>{c.sal_send}</Text>}
+          {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.btnText}>{data.direct ? c.sal_send_direct : c.sal_send}</Text>}
         </TouchableOpacity>
       </BottomSheet>
     </Card>

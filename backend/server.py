@@ -138,9 +138,12 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "attendance_monthly_min_days": 27,     # good days needed in the month
     "attendance_monthly_min_gross": 0,     # optional monthly gross floor (0 = ignore)
     "attendance_monthly_bonus": 3000,      # ₹ paid when the month qualifies
-    # Salary cash-out (driver asks, hub pays).
+    # Salary cash-out. With direct withdrawal on, the money goes straight to the
+    # driver's saved bank / UPI; otherwise (or above the daily limit) the hub pays.
     "withdraw_min_amount": 100,            # smallest salary withdrawal a driver may request (₹)
     "withdraw_hold_cash_owed": True,       # hold back salary equal to the collection cash the driver still owes
+    "withdraw_direct": True,               # send withdrawals straight to the bank, no hub approval
+    "withdraw_direct_daily_max": 10000,    # most a driver can take directly in one day (₹, 0 = no limit)
     # Razorpay credentials (owner-editable; override the env vars). Secret
     # values are never returned by the API — only their "set" status is.
     "razorpay_key_id": "",
@@ -831,6 +834,10 @@ class SettingsIn(BaseModel):
     attendance_monthly_min_days: Optional[int] = Field(default=None, ge=0)
     attendance_monthly_min_gross: Optional[int] = Field(default=None, ge=0)
     attendance_monthly_bonus: Optional[int] = Field(default=None, ge=0)
+    # Salary withdrawal.
+    withdraw_min_amount: Optional[int] = Field(default=None, ge=0)
+    withdraw_direct: Optional[bool] = None
+    withdraw_direct_daily_max: Optional[int] = Field(default=None, ge=0)
     # Razorpay credentials (owner only; override env vars, never read back).
     razorpay_key_id: Optional[str] = None
     razorpay_key_secret: Optional[str] = None
@@ -2015,6 +2022,7 @@ _REWARD_SETTING_KEYS = (
     "attendance_enabled", "attendance_daily_target", "attendance_require_ontime",
     "attendance_grace_minutes", "attendance_monthly_min_days",
     "attendance_monthly_min_gross", "attendance_monthly_bonus",
+    "withdraw_min_amount", "withdraw_direct", "withdraw_direct_daily_max",
 )
 
 
@@ -2050,6 +2058,7 @@ async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
         **_settings_out(),
         "business_day_cutoff_ist": "04:00",   # cutoff is read-only
         "payments": _payments_status(),
+        "razorpayx_ready": _razorpayx_configured(),   # direct withdrawal needs this
     }
 
 
@@ -2088,10 +2097,13 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
               "reward_days_required", "yearly_top_driver", "yearly_top_car",
               "loyalty_wallet_per_day", "loyalty_wallet_min_gross", "loyalty_wallet_payout_every_days",
               "attendance_daily_target", "attendance_grace_minutes", "attendance_monthly_min_days",
-              "attendance_monthly_min_gross", "attendance_monthly_bonus"):
+              "attendance_monthly_min_gross", "attendance_monthly_bonus",
+              "withdraw_min_amount", "withdraw_direct_daily_max"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v
+    if body.withdraw_direct is not None:
+        updates["withdraw_direct"] = bool(body.withdraw_direct)
     if body.loyalty_wallet_enabled is not None:
         updates["loyalty_wallet_enabled"] = bool(body.loyalty_wallet_enabled)
     if body.attendance_enabled is not None:
@@ -2120,7 +2132,8 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
         meta = {k: ("***" if k in secret_keys else v)
                 for k, v in updates.items() if k not in ("updated_at", "updated_by")}
         await _audit(admin, "update_settings", "", meta)
-    return {"ok": True, **_settings_out(), "payments": _payments_status()}
+    return {"ok": True, **_settings_out(), "payments": _payments_status(),
+            "razorpayx_ready": _razorpayx_configured()}
 
 
 # ---- Audit log (manager+) --------------------------------------------------
@@ -6169,6 +6182,9 @@ class AdminPayoutIn(BaseModel):
     narration: Optional[str] = "Ride91 driver payout"
     reference_id: Optional[str] = None
     client_action_id: Optional[str] = None  # ops-side idempotency
+    # Sent to RazorpayX as the payout's idempotency key. Give the same key on a
+    # retry and RazorpayX returns the first payout instead of sending a second.
+    idempotency_key: Optional[str] = None
 
 
 @api.post("/admin/payouts/create")
@@ -6204,7 +6220,7 @@ async def admin_create_payout(
 
     fa = await _ensure_rzpx_contact_and_fund_account(body.driver_id)
     ref_id = body.reference_id or f"ride91-{action[:20]}"
-    idem = str(uuid.uuid4())
+    idem = body.idempotency_key or str(uuid.uuid4())
     payload = {
         "account_number": RAZORPAYX_ACCOUNT_NUMBER,
         "fund_account_id": fa["fund_account_id"],
@@ -6290,9 +6306,10 @@ async def admin_refresh_payout(
 
 
 # ---------- Salary cash-out ---------------------------------------------------
-# A driver's salary is their share of settled gross. They ask to withdraw it
-# from the app; the hub pays the request (RazorpayX payout to the saved bank /
-# UPI, or by hand) or rejects it.
+# A driver's salary is their share of settled gross. They withdraw it from the
+# app. With direct withdrawal on (and RazorpayX set up, and a bank / UPI saved)
+# the money is sent straight away. Otherwise the withdrawal waits as a request
+# for the hub, which pays it (RazorpayX payout, or by hand) or rejects it.
 #
 #   earned    = share × settled gross, up to and including yesterday
 #   paid      = payouts already sent + requests the hub marked paid by hand
@@ -6359,7 +6376,7 @@ async def _salary_state(driver: Dict, exclude_withdrawal_id: Optional[str] = Non
 def _withdrawal_out(w: Dict) -> Dict[str, Any]:
     out = {k: w.get(k) for k in (
         "id", "driver_id", "amount", "state", "method", "reference", "note",
-        "requested_at", "decided_at", "decided_by", "payout_id")}
+        "requested_at", "decided_at", "decided_by", "payout_id", "direct", "direct_error")}
     # "paying" is an internal marker while a payment is in flight; to the
     # driver and the hub the request is simply still pending.
     if out["state"] == "paying":
@@ -6381,8 +6398,12 @@ async def money_salary(driver: Dict = Depends(get_driver)):
     reqs = [_withdrawal_out(w) async for w in db.salary_withdrawals.find(
         {"driver_id": driver["id"]}, {"_id": 0}).sort("requested_at", -1).limit(5)]
     bank = await db.driver_bank_accounts.find_one({"driver_id": driver["id"]}, {"_id": 0, "kind": 1})
+    direct_on = _direct_withdraw_on()
     return {**state, "bank_saved": bool(bank), "has_pending": any(r["state"] == "pending" for r in reqs),
-            "requests": reqs, "payments": await _salary_payments(driver["id"])}
+            "requests": reqs, "payments": await _salary_payments(driver["id"]),
+            # True when a withdrawal goes straight to the bank without the hub.
+            "direct": direct_on and bool(bank),
+            "direct_left_today": await _direct_left_today(driver["id"]) if direct_on else None}
 
 
 async def _salary_payments(driver_id: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -6420,16 +6441,110 @@ async def _salary_payments(driver_id: str, limit: int = 10) -> List[Dict[str, An
     return out[:limit]
 
 
+# Who the audit log and the payout row name when a withdrawal pays itself.
+DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
+
+
+def _direct_withdraw_on() -> bool:
+    return bool(get_setting("withdraw_direct")) and _razorpayx_configured()
+
+
+async def _direct_left_today(driver_id: str) -> Optional[float]:
+    """How much more the driver can take directly today, or None for no limit."""
+    cap = float(get_setting("withdraw_direct_daily_max") or 0)
+    if cap <= 0:
+        return None
+    start, _end = business_day_bounds(business_date_now())
+    taken = 0.0
+    async for w in db.salary_withdrawals.find(
+        {"driver_id": driver_id, "direct": True, "state": "paid", "decided_at": {"$gte": iso(start)}},
+        {"_id": 0, "amount": 1},
+    ):
+        taken += float(w.get("amount") or 0)
+    return max(0.0, round(cap - taken, 2))
+
+
+async def _send_withdrawal(w: Dict, actor: Dict) -> str:
+    """Send a withdrawal to the driver's saved bank / UPI and return the payout
+    id. Keyed on the withdrawal's id at both ends, so sending the same
+    withdrawal again returns the first payout rather than a second one."""
+    ba = await db.driver_bank_accounts.find_one({"driver_id": w["driver_id"]}, {"_id": 0, "kind": 1})
+    if not ba:
+        raise HTTPException(400, "bank_account_not_saved")
+    res = await admin_create_payout(
+        AdminPayoutIn(
+            driver_id=w["driver_id"],
+            amount_rupees=float(w["amount"]),
+            mode="UPI" if ba.get("kind") == "vpa" else "IMPS",
+            narration="Ride91 salary",
+            client_action_id=f"wd:{w['id']}",
+            idempotency_key=w["id"],
+        ),
+        actor,
+    )
+    return res["payout_id"]
+
+
+async def _pay_withdrawal_direct(row: Dict) -> Optional[str]:
+    """Try to pay a fresh withdrawal straight away. Returns None when it was
+    paid, otherwise why it was left for the hub:
+      off              direct withdrawal is switched off or RazorpayX is not set up
+      no_bank          the driver has not saved a bank account or UPI
+      over_daily_limit this would take the driver past today's direct limit
+      transfer_failed  the bank transfer could not be sent
+    """
+    wid, did = row["id"], row["driver_id"]
+    if not _direct_withdraw_on():
+        return "off"
+    if not await db.driver_bank_accounts.find_one({"driver_id": did}, {"_id": 1}):
+        return "no_bank"
+    left = await _direct_left_today(did)
+    if left is not None and float(row["amount"]) > left + 0.005:
+        return "over_daily_limit"
+    claimed = await db.salary_withdrawals.update_one(
+        {"id": wid, "state": "pending"},
+        {"$set": {"state": "paying", "paying_at": iso(now_utc()), "decided_by": DIRECT_ACTOR["username"]}},
+    )
+    if claimed.modified_count != 1:
+        return "transfer_failed"
+    try:
+        payout_id = await _send_withdrawal(row, DIRECT_ACTOR)
+    except Exception as e:
+        # Hand it to the hub. "Pay now" there is safe even if this attempt did
+        # reach RazorpayX: it reuses the same key and gets the same payout back.
+        why = str(e.detail) if isinstance(e, HTTPException) else type(e).__name__
+        logger.warning("direct withdrawal %s not sent: %s", wid, why)
+        await db.salary_withdrawals.update_one(
+            {"id": wid, "state": "paying"},
+            {"$set": {"state": "pending", "direct_error": why[:200]},
+             "$unset": {"decided_by": "", "paying_at": ""}},
+        )
+        return "transfer_failed"
+    await db.salary_withdrawals.update_one(
+        {"id": wid},
+        {"$set": {
+            "state": "paid", "method": "razorpayx", "direct": True, "payout_id": payout_id,
+            "decided_at": iso(now_utc()), "decided_by": DIRECT_ACTOR["username"],
+        }},
+    )
+    await _audit(DIRECT_ACTOR, "direct_withdrawal", did,
+                 {"amount": row["amount"], "withdrawal_id": wid})
+    return None
+
+
 @api.post("/money/salary/withdraw")
 async def money_salary_withdraw(body: WithdrawIn, driver: Dict = Depends(get_driver)):
-    """Ask the hub to pay out salary. One request at a time; the amount can
-    never exceed what is available. Idempotent on client_action_id."""
+    """Withdraw salary. Paid straight to the driver's bank / UPI when direct
+    withdrawal is available; otherwise it waits for the hub. One at a time; the
+    amount can never exceed what is available. Idempotent on client_action_id."""
     did = driver["id"]
     existing = await db.salary_withdrawals.find_one(
         {"driver_id": did, "client_action_id": body.client_action_id}, {"_id": 0})
     if existing:
-        return {"ok": True, "duplicate": True, "request": _withdrawal_out(existing)}
-    if await db.salary_withdrawals.find_one({"driver_id": did, "state": {"$in": ["pending", "paying"]}}, {"_id": 1}):
+        return {"ok": True, "duplicate": True, "request": _withdrawal_out(existing),
+                "direct": bool(existing.get("direct"))}
+    open_q = {"driver_id": did, "state": {"$in": ["pending", "paying"]}}
+    if await db.salary_withdrawals.find_one(open_q, {"_id": 1}):
         raise HTTPException(409, "withdrawal_pending")
     state = await _salary_state(driver)
     amount = round(float(body.amount_rupees if body.amount_rupees is not None else state["available"]), 2)
@@ -6448,7 +6563,24 @@ async def money_salary_withdraw(body: WithdrawIn, driver: Dict = Depends(get_dri
         "client_action_id": body.client_action_id,
     }
     await db.salary_withdrawals.insert_one(row.copy())
-    return {"ok": True, "duplicate": False, "request": _withdrawal_out(row)}
+    # Two taps landing together can both get past the check above. Only the
+    # first one in stands; the other is withdrawn before any money moves.
+    first = await db.salary_withdrawals.find_one(
+        open_q, {"_id": 0, "id": 1}, sort=[("requested_at", 1), ("id", 1)])
+    if first and first["id"] != row["id"]:
+        await db.salary_withdrawals.delete_one({"id": row["id"], "state": "pending"})
+        raise HTTPException(409, "withdrawal_pending")
+    # ...and if another withdrawal was paid in that same instant, the amount
+    # checked above is out of date. Check it again now that this one is on file.
+    fresh = await _salary_state(driver, exclude_withdrawal_id=row["id"])
+    if amount > fresh["available"] + 0.005:
+        await db.salary_withdrawals.delete_one({"id": row["id"], "state": "pending"})
+        raise HTTPException(409, "exceeds_available")
+
+    left_for_hub = await _pay_withdrawal_direct(row)
+    saved = await db.salary_withdrawals.find_one({"id": row["id"]}, {"_id": 0}) or row
+    return {"ok": True, "duplicate": False, "request": _withdrawal_out(saved),
+            "direct": left_for_hub is None, "direct_reason": left_for_hub}
 
 
 @api.get("/admin/withdrawals")
@@ -6538,20 +6670,7 @@ async def admin_pay_withdrawal(
     payout_id = None
     try:
         if body.method == "razorpayx":
-            ba = await db.driver_bank_accounts.find_one({"driver_id": w["driver_id"]}, {"_id": 0, "kind": 1})
-            if not ba:
-                raise HTTPException(400, "bank_account_not_saved")
-            res = await admin_create_payout(
-                AdminPayoutIn(
-                    driver_id=w["driver_id"],
-                    amount_rupees=float(w["amount"]),
-                    mode="UPI" if ba.get("kind") == "vpa" else "IMPS",
-                    narration="Ride91 salary",
-                    client_action_id=f"wd:{withdrawal_id}",
-                ),
-                admin,
-            )
-            payout_id = res["payout_id"]
+            payout_id = await _send_withdrawal(w, admin)
     except Exception:
         # Nothing was sent: hand the request back to the queue.
         await db.salary_withdrawals.update_one(
@@ -6567,7 +6686,7 @@ async def admin_pay_withdrawal(
             "reference": (body.reference or "").strip() or None,
             "payout_id": payout_id,
             "decided_at": iso(now_utc()), "decided_by": admin["username"],
-        }},
+        }, "$unset": {"direct_error": ""}},
     )
     await _audit(admin, "pay_withdrawal", w["driver_id"],
                  {"amount": w["amount"], "method": body.method, "withdrawal_id": withdrawal_id})

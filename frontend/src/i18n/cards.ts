@@ -398,6 +398,10 @@ const en = {
   sal_pay_method: { bank: "Bank transfer", upi: "UPI", hand: "Paid by hand" } as Record<string, string>,
   sal_pay_processing: "On its way",
   sal_pay_ref: (ref: string) => `Ref ${ref}`,
+  sal_send_direct: "Send to my bank now",
+  sal_sent_direct: (amt: string) => `${amt} sent to your bank`,
+  sal_direct_help: "The money goes straight to your saved bank or UPI.",
+  sal_note_direct: "Salary is your share of each day's fares. Withdrawals go straight to your saved bank or UPI.",
 
   // ---- crash screen ----
   err_title: "Something went wrong",
@@ -807,6 +811,10 @@ const hi: CardText = {
   sal_pay_method: { bank: "बैंक ट्रांसफ़र", upi: "UPI", hand: "हाथ से दिया गया" },
   sal_pay_processing: "रास्ते में है",
   sal_pay_ref: (ref) => `संदर्भ ${ref}`,
+  sal_send_direct: "अभी मेरे बैंक में भेजें",
+  sal_sent_direct: (amt) => `${amt} आपके बैंक में भेज दिए गए`,
+  sal_direct_help: "पैसा सीधे आपके सहेजे गए बैंक या UPI में जाता है।",
+  sal_note_direct: "वेतन हर दिन के किराये में आपका हिस्सा है। निकाला गया पैसा सीधे आपके सहेजे गए बैंक या UPI में जाता है।",
 
   // ---- crash screen ----
   err_title: "कुछ गड़बड़ हो गई",

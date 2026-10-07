@@ -54,6 +54,14 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [aMsg, setAMsg] = useState<string | null>(null);
   const [aErr, setAErr] = useState<string | null>(null);
 
+  // salary withdrawal
+  const [sDirect, setSDirect] = useState(true);
+  const [sDailyMax, setSDailyMax] = useState("");
+  const [sMin, setSMin] = useState("");
+  const [sBusy, setSBusy] = useState(false);
+  const [sMsg, setSMsg] = useState<string | null>(null);
+  const [sErr, setSErr] = useState<string | null>(null);
+
   // change password
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -91,6 +99,9 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     setAMinDays(String(s.attendance_monthly_min_days ?? ""));
     setAMinGross(String(s.attendance_monthly_min_gross ?? ""));
     setABonus(String(s.attendance_monthly_bonus ?? ""));
+    setSDirect(!!s.withdraw_direct);
+    setSDailyMax(String(s.withdraw_direct_daily_max ?? ""));
+    setSMin(String(s.withdraw_min_amount ?? ""));
   }, []);
 
   useEffect(() => { load().catch(() => setErr("Could not load settings.")); }, [load]);
@@ -214,6 +225,28 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setAErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
     } finally {
       setABusy(false);
+    }
+  };
+
+  const saveWithdrawal = async () => {
+    setSErr(null); setSMsg(null);
+    const nums = { withdraw_direct_daily_max: Number(sDailyMax), withdraw_min_amount: Number(sMin) };
+    for (const [k, v] of Object.entries(nums)) {
+      if (!Number.isFinite(v) || v < 0) return setSErr(`"${k.replace(/_/g, " ")}" must be 0 or more.`);
+    }
+    setSBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", {
+        withdraw_direct: sDirect,
+        ...Object.fromEntries(Object.entries(nums).map(([k, v]) => [k, Math.round(v)])),
+      });
+      setData(s);
+      setSMsg("Withdrawal settings saved.");
+      setTimeout(() => setSMsg(null), 3000);
+    } catch (e: any) {
+      setSErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setSBusy(false);
     }
   };
 
@@ -385,6 +418,38 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
         {isOwner ? (
           <div className="form-actions">
             <button className="primary" onClick={saveAttendance} disabled={aBusy}>{aBusy ? "Saving…" : "Save attendance"}</button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>Salary withdrawal {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          With direct withdrawal on, a driver's withdrawal is sent straight to their saved bank or UPI, with no hub approval. A driver can never take more than their unpaid salary, less any collection cash they still owe.
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 10 }}>
+          <input type="checkbox" checked={sDirect} disabled={!isOwner} onChange={(e) => setSDirect(e.target.checked)} style={{ width: "auto" }} />
+          Direct withdrawal (no hub approval)
+        </label>
+        <div className="form-grid">
+          <label>Direct limit per driver per day (₹, 0 = no limit)
+            <input type="number" min={0} value={sDailyMax} disabled={!isOwner} onChange={(e) => setSDailyMax(e.target.value)} />
+          </label>
+          <label>Smallest withdrawal (₹)
+            <input type="number" min={0} value={sMin} disabled={!isOwner} onChange={(e) => setSMin(e.target.value)} />
+          </label>
+        </div>
+        <div className="muted-sm" style={{ marginTop: 6 }}>Anything over the daily limit waits in the hub's Payouts tab to be paid there.</div>
+        {sDirect && data && data.razorpayx_ready === false ? (
+          <div className="err" data-testid="direct-not-ready">
+            RazorpayX payouts are not set up on the server, so no money can be sent automatically yet. Until they are, every withdrawal waits in the hub's Payouts tab.
+          </div>
+        ) : null}
+        {sErr ? <div className="err">{sErr}</div> : null}
+        {sMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{sMsg}</div> : null}
+        {isOwner ? (
+          <div className="form-actions">
+            <button className="primary" onClick={saveWithdrawal} disabled={sBusy}>{sBusy ? "Saving…" : "Save withdrawal settings"}</button>
           </div>
         ) : null}
       </div>

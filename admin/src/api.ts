@@ -495,6 +495,8 @@ export interface WithdrawalRow {
   decided_at: string | null;
   decided_by: string | null;
   payout_id: string | null;
+  direct?: boolean | null;         // paid straight from the app, no hub approval
+  direct_error?: string | null;    // why a direct transfer was not sent
   bank_kind: "bank_account" | "vpa" | null;
   bank_masked: string | null;
   // pending rows only: what the driver could be paid right now, and the cash they owe
@@ -627,6 +629,11 @@ export interface SettingsData {
   attendance_monthly_min_days: number;
   attendance_monthly_min_gross: number;
   attendance_monthly_bonus: number;
+  // Salary withdrawal.
+  withdraw_min_amount: number;
+  withdraw_direct: boolean;
+  withdraw_direct_daily_max: number;
+  razorpayx_ready?: boolean;       // RazorpayX payouts are set up on the server
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
 }
