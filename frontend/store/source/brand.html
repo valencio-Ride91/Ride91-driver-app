@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ride91 brand assets</title>
+<!--
+  Builds every logo file the driver app and its Play listing need from the two
+  pieces of Ride91 brand artwork:
+    mark.jpg      the "R" plug mark              (square)
+    wordmark.jpg  RIDE91 · DECARBONISING BHARAT  (wide)
+  Both arrive as JPEGs on a white ground. Each is first lifted off that ground
+  (white becomes transparent, edges keep their smoothness) and trimmed to the
+  artwork, then placed on the canvases below and posted to serve.py, which
+  writes the PNGs to ./out.
+
+  To regenerate: put mark.jpg and wordmark.jpg next to this file, run
+  `python serve.py`, open http://127.0.0.1:5311/brand.html.
+-->
+<style>
+  body { margin: 16px; background: #dfe5df; font-family: system-ui; }
+  canvas { background-image: repeating-conic-gradient(#ccc 0 25%, #eee 0 50%); background-size: 24px 24px; margin: 0 12px 12px 0; }
+  #status { font: 14px system-ui; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div id="status">drawing…</div>
+<div id="sheet"></div>
+<script>
+const WHITE = "#FFFFFF";
+
+function load(src) {
+  return new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error("cannot load " + src)); i.src = src; });
+}
+function canvas(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+
+// Lift artwork off its white ground. A pixel that is a mix of ink and white
+// (every smooth edge) gets the matching part-transparency and its true ink
+// colour back, so the result sits cleanly on any background. `full` is how far
+// from white a pixel must be to count as solid ink; both brand colours (the
+// green and the charcoal) are further from white than this.
+function liftOffWhite(img, full = 150) {
+  const c = canvas(img.naturalWidth, img.naturalHeight);
+  const ctx = c.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  const d = ctx.getImageData(0, 0, c.width, c.height);
+  const p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    const far = Math.max(255 - p[i], 255 - p[i + 1], 255 - p[i + 2]);
+    let a = Math.min(1, far / full);
+    if (a < 0.06) a = 0;                       // JPEG speckle in the white
+    if (a > 0 && a < 1) {
+      for (let k = 0; k < 3; k++) p[i + k] = Math.max(0, Math.min(255, Math.round((p[i + k] - (1 - a) * 255) / a)));
+    }
+    p[i + 3] = Math.round(a * 255);
+  }
+  ctx.putImageData(d, 0, 0);
+  return trim(c);
+}
+
+// Crop to the artwork itself.
+function trim(c) {
+  const ctx = c.getContext("2d");
+  const p = ctx.getImageData(0, 0, c.width, c.height).data;
+  let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+    if (p[(y * c.width + x) * 4 + 3] > 40) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  const out = canvas(x1 - x0 + 1, y1 - y0 + 1);
+  out.getContext("2d").drawImage(c, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+  return out;
+}
+
+// The same shape in one flat colour (Android's themed icons tint it).
+function silhouette(c, colour) {
+  const out = canvas(c.width, c.height);
+  const ctx = out.getContext("2d");
+  ctx.drawImage(c, 0, 0);
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = colour;
+  ctx.fillRect(0, 0, c.width, c.height);
+  return out;
+}
+
+// Draw `art` centred at (cx, cy), scaled so it fits inside boxW x boxH.
+function place(ctx, art, cx, cy, boxW, boxH) {
+  const s = Math.min(boxW / art.width, boxH / art.height);
+  const w = art.width * s, h = art.height * s;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(art, cx - w / 2, cy - h / 2, w, h);
+}
+
+const FILES = {};
+function make(name, w, h, paint, showW) {
+  const c = canvas(w, h);
+  paint(c.getContext("2d"), w, h);
+  c.style.width = (showW || 200) + "px";
+  c.title = name;
+  document.getElementById("sheet").appendChild(c);
+  FILES[name] = c;
+}
+
+async function main() {
+  const mark = liftOffWhite(await load("mark.jpg"));
+  const word = liftOffWhite(await load("wordmark.jpg"));
+  const info = { mark: [mark.width, mark.height], word: [word.width, word.height] };
+
+  // Launcher icon (legacy Android, Play listing): the mark on white, full square.
+  const icon = (ctx, w) => { ctx.fillStyle = WHITE; ctx.fillRect(0, 0, w, w); place(ctx, mark, w / 2, w / 2, w * 0.62, w * 0.62); };
+  make("icon.png", 1024, 1024, icon);
+  make("play-icon-512.png", 512, 512, icon, 100);
+  make("favicon.png", 196, 196, icon, 60);
+
+  // Android adaptive icon: launchers crop this to their own shape and only the
+  // middle ~61% is guaranteed to show, so the mark stays inside the middle 50%.
+  make("adaptive-icon.png", 1024, 1024, (ctx, w) => place(ctx, mark, w / 2, w / 2, w * 0.50, w * 0.50));
+  make("adaptive-icon-mono.png", 1024, 1024, (ctx, w) => place(ctx, silhouette(mark, WHITE), w / 2, w / 2, w * 0.50, w * 0.50));
+
+  // Splash: Android 12+ shows this inside a circle on the background colour.
+  // The full wordmark is fitted so its corners stay inside that circle.
+  make("splash-image.png", 1024, 1024, (ctx, w) => place(ctx, word, w / 2, w / 2, w * 0.86, w * 0.86));
+
+  // The wordmark on its own, for the login screen.
+  make("ride91-wordmark.png", 1200, Math.round(1200 * word.height / word.width), (ctx, w, h) => place(ctx, word, w / 2, h / 2, w, h), 300);
+
+  // Play Store feature graphic (1024 x 500).
+  make("play-feature-1024x500.png", 1024, 500, (ctx, w, h) => { ctx.fillStyle = WHITE; ctx.fillRect(0, 0, w, h); place(ctx, word, w / 2, h / 2, w * 0.74, h * 0.74); }, 420);
+
+  // How it looks in use (preview only, not shipped).
+  make("preview.png", 1500, 620, (ctx, w, h) => {
+    ctx.fillStyle = "#C9D2CB"; ctx.fillRect(0, 0, w, h);
+    ctx.font = "500 26px system-ui"; ctx.fillStyle = "#10231C";
+    const src = FILES["icon.png"], fg = FILES["adaptive-icon.png"];
+    ctx.save(); ctx.beginPath(); ctx.roundRect(60, 90, 300, 300, 66); ctx.clip(); ctx.drawImage(src, 60, 90, 300, 300); ctx.restore();
+    ctx.fillText("App icon", 60, 440);
+    // round launcher: the 108dp layer is cropped to its middle 72dp
+    const circ = (x, y, s) => { ctx.save(); ctx.beginPath(); ctx.arc(x + s / 2, y + s / 2, s / 2, 0, Math.PI * 2); ctx.clip(); ctx.fillStyle = WHITE; ctx.fillRect(x, y, s, s); const full = s * 1.5; ctx.drawImage(fg, x - (full - s) / 2, y - (full - s) / 2, full, full); ctx.restore(); };
+    circ(430, 90, 300); ctx.fillText("On a round launcher", 430, 440);
+    [96, 64, 48].forEach((s, i) => circ(800 + i * 110, 90 + (300 - s) / 2, s));
+    ctx.fillText("Small sizes", 800, 440);
+    // splash: a 288dp icon box, of which the middle 192dp circle shows; the
+    // image is drawn 200dp wide. Phone here is 260px = 360dp wide.
+    const k = 260 / 360, px = 1190, py = 40, pw = 260, ph = 540;
+    ctx.fillStyle = WHITE; ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 34); ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.arc(px + pw / 2, py + ph / 2, 96 * k, 0, Math.PI * 2); ctx.clip();
+    ctx.drawImage(FILES["splash-image.png"], px + pw / 2 - 100 * k, py + ph / 2 - 100 * k, 200 * k, 200 * k); ctx.restore();
+    ctx.fillStyle = "#10231C"; ctx.fillText("Splash screen", 1190, 606);
+  }, 900);
+
+  let saved = 0;
+  for (const [name, c] of Object.entries(FILES)) {
+    const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+    const res = await fetch("/save?name=" + encodeURIComponent(name), { method: "POST", body: blob });
+    if (res.ok) saved++;
+  }
+  document.getElementById("status").textContent = `saved ${saved}/${Object.keys(FILES).length}`;
+  window.__info = info;
+  window.__done = saved;
+}
+main().catch((e) => { document.getElementById("status").textContent = "error: " + e.message; window.__err = String(e); });
+</script>
+</body>
+</html>

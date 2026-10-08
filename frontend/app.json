@@ -24,7 +24,7 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "monochromeImage": "./assets/images/adaptive-icon-mono.png",
-        "backgroundColor": "#10231C"
+        "backgroundColor": "#FFFFFF"
       },
       "package": "com.ride91.driver",
       "versionCode": 1,
@@ -91,7 +91,7 @@
           "image": "./assets/images/splash-image.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#10231C"
+          "backgroundColor": "#FFFFFF"
         }
       ],
       "expo-font",

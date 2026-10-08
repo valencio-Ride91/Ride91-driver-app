@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -52,10 +53,13 @@ export default function Login() {
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          <View style={styles.brandRow}>
-            <View style={styles.brandDot} />
-            <Text style={styles.brandName}>Ride91</Text>
-          </View>
+          <Image
+            source={require("@/assets/images/ride91-wordmark.png")}
+            style={styles.brandLogo}
+            resizeMode="contain"
+            accessibilityLabel="Ride91 — Decarbonising Bharat"
+            testID="login-logo"
+          />
           <Text style={styles.h1} testID="login-title">{t.login_title}</Text>
           <Text style={styles.sub}>{t.login_subtitle}</Text>
 
@@ -104,15 +108,8 @@ export default function Login() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
   container: { padding: spacing.xl, gap: spacing.md, flexGrow: 1 },
-  brandRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    marginTop: spacing.xxl,
-    marginBottom: spacing.xxl,
-  },
-  brandDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.live },
-  brandName: { fontFamily: fonts.display, fontSize: 22, color: colors.ink },
+  // the wordmark is 1200 x 385
+  brandLogo: { width: 190, height: 61, alignSelf: "flex-start", marginTop: spacing.xxl, marginBottom: spacing.xxl },
   h1: { fontFamily: fonts.display, fontSize: 36, color: colors.ink },
   sub: { fontFamily: fonts.ui, fontSize: 16, color: colors.muted, marginBottom: spacing.lg },
   input: {
