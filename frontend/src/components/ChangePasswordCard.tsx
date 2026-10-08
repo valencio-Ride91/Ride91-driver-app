@@ -72,7 +72,7 @@ export function ChangePasswordCard() {
             onPress={submit}
             disabled={busy || !cur || !next}
           >
-            {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.ctaText}>{t.pw_save}</Text>}
+            {busy ? <ActivityIndicator color={colors.onBrand} /> : <Text style={styles.ctaText}>{t.pw_save}</Text>}
           </TouchableOpacity>
         </View>
       ) : null}
@@ -96,8 +96,8 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.ink,
   },
-  cta: { backgroundColor: colors.live, borderRadius: radius.md, paddingVertical: 13, alignItems: "center", marginTop: spacing.xs },
-  ctaText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.white },
+  cta: { backgroundColor: colors.brand, borderRadius: radius.md, paddingVertical: 13, alignItems: "center", marginTop: spacing.xs },
+  ctaText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.onBrand },
   err: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.alert },
   ok: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.live },
 });

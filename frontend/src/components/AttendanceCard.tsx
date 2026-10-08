@@ -29,7 +29,7 @@ export interface AttendanceState {
   days_left?: number;                 // days left this month, today included
 }
 
-const LIVE_TINT = "#E3F1EA";
+const LIVE_TINT = colors.brandTint;
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 const ALERT_TINT = "#F8E4E0";
@@ -105,7 +105,7 @@ export const AttendanceCard: React.FC<{ data: AttendanceState; style?: ViewStyle
         <View
           style={[
             styles.barFill,
-            { width: `${pct}%` as const, backgroundColor: data.qualified ? colors.live : outOfTime ? colors.alert : colors.amber },
+            { width: `${pct}%` as const, backgroundColor: data.qualified ? colors.brand : outOfTime ? colors.alert : colors.amber },
           ]}
         />
       </View>
@@ -218,10 +218,10 @@ const styles = StyleSheet.create({
     marginRight: spacing.sm,
     marginTop: 1,
   },
-  bulletDone: { backgroundColor: colors.live, borderColor: colors.live },
+  bulletDone: { backgroundColor: colors.brand, borderColor: colors.brand },
   bulletWarn: { borderColor: colors.amber, backgroundColor: colors.card },
   bulletText: { fontFamily: fonts.dataMed, fontSize: 11, color: colors.muted },
-  bulletTextDone: { color: colors.white, fontFamily: fonts.uiBold },
+  bulletTextDone: { color: colors.onBrand, fontFamily: fonts.uiBold },
   bulletTextWarn: { color: AMBER_INK, fontFamily: fonts.uiBold },
   ruleText: { flex: 1, fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink, lineHeight: 19 },
   ruleTextWarn: { color: AMBER_INK },

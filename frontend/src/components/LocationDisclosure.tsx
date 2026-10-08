@@ -43,8 +43,8 @@ const styles = StyleSheet.create({
   lead: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 21, marginBottom: spacing.sm },
   point: { fontFamily: fonts.ui, fontSize: 14, color: colors.ink, lineHeight: 21, marginBottom: 4 },
   foot: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, lineHeight: 18, marginTop: spacing.sm },
-  btn: { backgroundColor: colors.live, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.md },
-  btnText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  btn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.md },
+  btnText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   btnGhost: { paddingVertical: 12, alignItems: "center", marginTop: 4 },
   btnGhostText: { fontFamily: fonts.uiMed, color: colors.muted, fontSize: 14 },
 });

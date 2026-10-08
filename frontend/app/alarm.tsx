@@ -239,7 +239,7 @@ const styles = StyleSheet.create({
   kicker: {
     fontFamily: fonts.uiBold,
     fontSize: 12,
-    color: colors.live,
+    color: colors.brand,
     letterSpacing: 2,
     marginBottom: spacing.sm,
   },
@@ -271,12 +271,12 @@ const styles = StyleSheet.create({
   etaValue: { fontFamily: fonts.dataMed, fontSize: 20, color: colors.white },
   actions: { gap: spacing.md, marginTop: spacing.sm },
   primary: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: 20,
     alignItems: "center",
   },
-  primaryText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 16 },
+  primaryText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 16 },
   danger: {
     backgroundColor: colors.alert,
     borderRadius: radius.md,
@@ -298,7 +298,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#2E403A",
   },
-  ghostText: { fontFamily: fonts.uiMed, color: "#EEF1EC", fontSize: 14 },
+  ghostText: { fontFamily: fonts.uiMed, color: colors.paper, fontSize: 14 },
   reasonLabel: {
     fontFamily: fonts.uiBold,
     fontSize: 12,
@@ -319,7 +319,7 @@ const styles = StyleSheet.create({
   selectCaret: { color: "#B7C4BE", fontSize: 16 },
   snoozeMsg: {
     fontFamily: fonts.uiMed,
-    color: "#EEF1EC",
+    color: colors.paper,
     fontSize: 15,
     textAlign: "center",
     marginTop: spacing.xl,
@@ -351,5 +351,5 @@ const styles = StyleSheet.create({
   },
   sheetRowText: { fontFamily: fonts.uiMed, fontSize: 15, color: colors.ink },
   radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.muted },
-  radioOn: { borderColor: colors.live, backgroundColor: colors.live },
+  radioOn: { borderColor: colors.brand, backgroundColor: colors.brand },
 });

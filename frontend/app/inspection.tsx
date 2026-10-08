@@ -385,7 +385,7 @@ export default function Inspection() {
           </View>
           <Text style={styles.doneTitle}>{c.insp_all_set}</Text>
           <Text style={styles.doneBody}>{c.insp_can_start}</Text>
-          <ActivityIndicator color={colors.live} style={{ marginTop: spacing.md }} />
+          <ActivityIndicator color={colors.brand} style={{ marginTop: spacing.md }} />
         </View>
       </SafeAreaView>
     );
@@ -442,8 +442,8 @@ const Button: React.FC<{
   disabled?: boolean;
   testID?: string;
 }> = ({ label, onPress, variant = "primary", disabled, testID }) => {
-  const bg = variant === "danger" ? colors.alert : variant === "secondary" ? colors.card : colors.live;
-  const fg = variant === "secondary" ? colors.ink : colors.white;
+  const bg = variant === "danger" ? colors.alert : variant === "secondary" ? colors.card : colors.brand;
+  const fg = variant === "secondary" ? colors.ink : variant === "danger" ? colors.white : colors.onBrand;
   const border = variant === "secondary" ? colors.line : "transparent";
   return (
     <TouchableOpacity
@@ -551,8 +551,8 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: colors.live,
-    color: colors.white,
+    backgroundColor: colors.brand,
+    color: colors.onBrand,
     fontFamily: fonts.uiBold,
     textAlign: "center",
     lineHeight: 64,
@@ -607,23 +607,23 @@ const styles = StyleSheet.create({
   },
   gateBtn: {
     marginTop: spacing.md,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xxl,
   },
-  gateBtnText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  gateBtnText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   doneWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: spacing.sm },
   doneCircle: {
     width: 96,
     height: 96,
     borderRadius: 48,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: spacing.sm,
   },
-  doneTick: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 44, lineHeight: 44 },
+  doneTick: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 44, lineHeight: 44 },
   doneTitle: { fontFamily: fonts.display, fontSize: 28, color: colors.ink },
   doneBody: { fontFamily: fonts.ui, fontSize: 14, color: colors.muted },
 });

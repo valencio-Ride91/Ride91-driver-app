@@ -15,7 +15,7 @@ import { useShiftAlarm } from "@/src/shift-alarms";
 import { alarms } from "@/src/alarms";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
-const LIVE_TINT = "#E3F1EA";
+const LIVE_TINT = colors.brandTint;
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 const ALERT_TINT = "#F8E4E0";

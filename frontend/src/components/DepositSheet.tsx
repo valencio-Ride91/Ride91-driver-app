@@ -151,7 +151,7 @@ export const DepositSheet: React.FC<Props> = ({ visible, onClose, duesPaise, onP
     <BottomSheet visible={visible} onClose={onClose} title={t.deposit_cash} testID="deposit-sheet">
       {phase === "loading" ? (
         <View style={styles.center} testID="deposit-loading">
-          <ActivityIndicator color={colors.live} />
+          <ActivityIndicator color={colors.brand} />
         </View>
       ) : phase === "no_dues" ? (
         <View style={styles.center} testID="deposit-no-dues">
@@ -202,7 +202,7 @@ export const DepositSheet: React.FC<Props> = ({ visible, onClose, duesPaise, onP
               />
             ) : (
               <View style={styles.center}>
-                <ActivityIndicator color={colors.live} />
+                <ActivityIndicator color={colors.brand} />
               </View>
             )}
           </View>
@@ -287,21 +287,21 @@ const styles = StyleSheet.create({
   waiting: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted },
   timer: { fontFamily: fonts.dataMed, fontSize: 13, color: colors.ink },
   btn: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: 12,
     paddingHorizontal: spacing.xl,
     marginTop: spacing.lg,
   },
-  btnTxt: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  btnTxt: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   tickCircle: {
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: spacing.md,
   },
-  tick: { color: colors.white, fontSize: 30, fontFamily: fonts.uiBold },
+  tick: { color: colors.onBrand, fontSize: 30, fontFamily: fonts.uiBold },
 });

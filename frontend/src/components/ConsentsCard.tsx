@@ -113,7 +113,7 @@ export const ConsentsCard: React.FC = () => {
               value={r.granted}
               disabled={saving === r.kind}
               onValueChange={(v) => toggle(r, v)}
-              trackColor={{ true: colors.live, false: colors.line }}
+              trackColor={{ true: colors.brand, false: colors.line }}
               thumbColor={colors.white}
               accessibilityRole="switch"
               accessibilityLabel={r.label}

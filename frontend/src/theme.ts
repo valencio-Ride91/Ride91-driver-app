@@ -1,11 +1,18 @@
-// Design tokens from the Ride91 spec. Do not use a default template look.
+// Design tokens, taken from the Ride91 logo: its green and its charcoal.
+//
+// The logo green is bright, and white text on it is too faint to read. So a
+// green FILL (a button, an active pill) uses `brand` with `onBrand` text, and
+// green TEXT on a white card uses `live`, the same hue deepened until it reads.
 export const colors = {
-  ink: "#10231C",
-  paper: "#EEF1EC",
+  ink: "#434343",        // the logo's charcoal: text, and dark surfaces
+  paper: "#F2F4F0",
   card: "#FFFFFF",
-  line: "#D6DCD5",
-  muted: "#67756D",
-  live: "#0B7A4B",
+  line: "#DADDD6",
+  muted: "#6E746B",
+  brand: "#69BC46",      // the logo's green: fills
+  onBrand: "#1E2A18",    // text and icons on a brand fill
+  brandTint: "#E4F3DC",  // a wash of the brand green behind green text
+  live: "#3A7A1F",       // green text on white ("paid", amounts, on-track)
   amber: "#E8A317",
   alert: "#BF3F2C",
   white: "#FFFFFF",
@@ -13,12 +20,12 @@ export const colors = {
 };
 
 export const platformColors: Record<string, string> = {
-  ride91: "#0B7A4B",
+  ride91: "#69BC46",
   uber: "#26282B",
   rapido: "#E8A317",
   ola: "#3B6FD4",
-  offline: "#67756D",
-  shift_end: "#10231C",
+  offline: "#6E746B",
+  shift_end: "#434343",
   to_charger: "#7FC4E4",
   charging: "#4FA8D8",
 };

@@ -57,7 +57,7 @@ interface Payment {
   reference?: string | null;
 }
 
-const LIVE_TINT = "#E3F1EA";
+const LIVE_TINT = colors.brandTint;
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 
@@ -235,7 +235,7 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void; r
         {data.direct ? <Text style={styles.sheetHelp} testID="salary-direct-help">{c.sal_direct_help}</Text> : null}
         {err ? <Text style={styles.err} testID="salary-err">{err}</Text> : null}
         <TouchableOpacity testID="salary-send-btn" style={[styles.btn, busy ? styles.btnOff : null]} onPress={submit} disabled={busy}>
-          {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.btnText}>{data.direct ? c.sal_send_direct : c.sal_send}</Text>}
+          {busy ? <ActivityIndicator color={colors.onBrand} /> : <Text style={styles.btnText}>{data.direct ? c.sal_send_direct : c.sal_send}</Text>}
         </TouchableOpacity>
       </BottomSheet>
     </Card>
@@ -265,9 +265,9 @@ const styles = StyleSheet.create({
   hintInfo: { backgroundColor: colors.paper, color: colors.muted },
   hintWait: { backgroundColor: AMBER_TINT, color: AMBER_INK },
   hintDone: { backgroundColor: LIVE_TINT, color: colors.live, fontFamily: fonts.uiBold },
-  btn: { backgroundColor: colors.live, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.md },
+  btn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.md },
   btnOff: { opacity: 0.4 },
-  btnText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  btnText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   section: { fontFamily: fonts.uiBold, fontSize: 10, color: colors.muted, letterSpacing: 0.8, marginTop: spacing.lg, marginBottom: spacing.xs },
   reqRow: { flexDirection: "row", alignItems: "center", paddingVertical: 6, borderTopWidth: 1, borderTopColor: colors.line },
   reqAmt: { fontFamily: fonts.dataMed, fontSize: 14, color: colors.ink },

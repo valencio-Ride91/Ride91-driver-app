@@ -8,7 +8,7 @@ import { useI18n } from "@/src/i18n";
 
 const TabIcon: React.FC<{ label: string; focused: boolean }> = ({ label, focused }) => (
   <View style={styles.iconWrap}>
-    <View style={[styles.dot, { backgroundColor: focused ? colors.live : colors.line }]} />
+    <View style={[styles.dot, { backgroundColor: focused ? colors.brand : colors.line }]} />
     <Text style={[styles.iconLabel, { color: focused ? colors.ink : colors.muted }]}>{label}</Text>
   </View>
 );

@@ -62,11 +62,11 @@ const styles = StyleSheet.create({
   msg: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.alert },
   stack: { fontFamily: fonts.dataMed, fontSize: 11, color: colors.muted },
   btn: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: 14,
     alignItems: "center",
     marginTop: spacing.sm,
   },
-  btnText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.white },
+  btnText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.onBrand },
 });

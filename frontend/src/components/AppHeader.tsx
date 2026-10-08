@@ -33,7 +33,7 @@ const singleStatus = (
     return { bg: colors.muted, fg: colors.white, label: t.health_offline, testID: "status-offline" };
   if (unsynced > 0)
     return { bg: colors.amber, fg: colors.ink, label: c.saving_n(unsynced), testID: "status-saving" };
-  return { bg: colors.live, fg: colors.white, label: t.health_synced, testID: "status-synced" };
+  return { bg: colors.brand, fg: colors.onBrand, label: t.health_synced, testID: "status-synced" };
 };
 
 interface Props {

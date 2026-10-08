@@ -143,7 +143,7 @@ const RewardRow: React.FC<{ tier: RewardTier; label: string; note: string; testI
         <Text style={styles.rewardAmount}>+{formatINR(tier.reward)}</Text>
       </View>
       <View style={styles.bar}>
-        <View style={[styles.barFill, { width: pctW, backgroundColor: tier.qualified ? colors.live : colors.amber }]} />
+        <View style={[styles.barFill, { width: pctW, backgroundColor: tier.qualified ? colors.brand : colors.amber }]} />
       </View>
       <View style={styles.rewardFoot}>
         <Text style={styles.rewardProgress}>{formatINR(tier.value)} / {formatINR(tier.target)}</Text>

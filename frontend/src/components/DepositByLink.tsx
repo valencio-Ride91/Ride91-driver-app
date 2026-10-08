@@ -27,7 +27,7 @@ interface DepositLink {
 }
 
 const POLL_MS = 3000;
-const LIVE_TINT = "#E3F1EA";
+const LIVE_TINT = colors.brandTint;
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 
@@ -137,7 +137,7 @@ export const DepositByLink: React.FC<{ owe: number; onPaid?: () => void }> = ({ 
       {owe >= 1 ? (
         <>
           <TouchableOpacity style={[styles.btn, busy ? styles.btnOff : null]} onPress={start} disabled={busy} testID="deposit-link-btn">
-            {busy ? <ActivityIndicator color={colors.white} /> : <Text style={styles.btnText}>{c.dep_btn(formatINR(owe))}</Text>}
+            {busy ? <ActivityIndicator color={colors.onBrand} /> : <Text style={styles.btnText}>{c.dep_btn(formatINR(owe))}</Text>}
           </TouchableOpacity>
           {err ? <Text style={styles.err} testID="deposit-link-err">{err}</Text> : null}
           <Text style={styles.note}>{c.dep_note}</Text>
@@ -149,9 +149,9 @@ export const DepositByLink: React.FC<{ owe: number; onPaid?: () => void }> = ({ 
 
 const styles = StyleSheet.create({
   wrap: { marginTop: spacing.xs },
-  btn: { backgroundColor: colors.live, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.sm },
+  btn: { backgroundColor: colors.brand, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", marginTop: spacing.sm },
   btnOff: { opacity: 0.4 },
-  btnText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  btnText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   btnGhost: {
     borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card,
     paddingVertical: 12, alignItems: "center", marginTop: spacing.sm,

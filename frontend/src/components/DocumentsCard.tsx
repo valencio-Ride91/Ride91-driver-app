@@ -40,7 +40,7 @@ export interface DocRow {
 const STATUS_META: Record<DocStatus, { label: string; bg: string; fg: string }> = {
   expired: { label: "Expired", bg: "#F5D4CE", fg: colors.alert },
   expiring_soon: { label: "Renew ≤30d", bg: "#FBEAC8", fg: "#8A5A00" },
-  ok: { label: "Valid", bg: "#DCEEE3", fg: colors.live },
+  ok: { label: "Valid", bg: colors.brandTint, fg: colors.live },
   missing: { label: "Missing", bg: colors.line, fg: colors.muted },
 };
 
@@ -92,7 +92,7 @@ export const DocumentsCard: React.FC = () => {
             </Text>
           </View>
         ) : (
-          <View style={[styles.badge, { backgroundColor: "#DCEEE3" }]}>
+          <View style={[styles.badge, { backgroundColor: colors.brandTint }]}>
             <Text style={[styles.badgeText, { color: colors.live }]}>{c.docs_all_valid}</Text>
           </View>
         )}
@@ -411,12 +411,12 @@ const styles = StyleSheet.create({
   },
   primary: {
     flex: 1,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: 14,
     alignItems: "center",
   },
-  primaryText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 15 },
+  primaryText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 15 },
   secondary: {
     flex: 1,
     borderWidth: 1,

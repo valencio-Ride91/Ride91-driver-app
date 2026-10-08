@@ -323,7 +323,7 @@ export const BankAccountCard: React.FC = () => {
           disabled={busy}
         >
           {busy ? (
-            <ActivityIndicator color={colors.white} />
+            <ActivityIndicator color={colors.onBrand} />
           ) : (
             <Text style={styles.primaryText}>{t.save}</Text>
           )}
@@ -416,14 +416,14 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   primary: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: 14,
     paddingHorizontal: spacing.lg,
     alignItems: "center",
   },
   primaryFlex: { flex: 1 },
-  primaryText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 14 },
+  primaryText: { fontFamily: fonts.uiBold, color: colors.onBrand, fontSize: 14 },
   secondary: {
     borderRadius: radius.md,
     borderWidth: 1,

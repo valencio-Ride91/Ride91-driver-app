@@ -74,7 +74,7 @@ export default function Notifications() {
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         {loading ? (
-          <View style={styles.center}><ActivityIndicator color={colors.live} /></View>
+          <View style={styles.center}><ActivityIndicator color={colors.brand} /></View>
         ) : items.length === 0 ? (
           <View style={styles.center}><Text style={styles.empty}>{t.notif_empty}</Text></View>
         ) : (
@@ -115,7 +115,7 @@ export default function Notifications() {
             onPress={send}
             disabled={sending || !text.trim()}
           >
-            {sending ? <ActivityIndicator color={colors.white} /> : <Text style={styles.sendText}>{t.notif_send}</Text>}
+            {sending ? <ActivityIndicator color={colors.onBrand} /> : <Text style={styles.sendText}>{t.notif_send}</Text>}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -142,13 +142,13 @@ const styles = StyleSheet.create({
   bubbleRow: { flexDirection: "row" },
   bubble: { maxWidth: "78%", paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.lg },
   opsBubble: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
-  meBubble: { backgroundColor: colors.live },
+  meBubble: { backgroundColor: colors.brand },
   bubbleText: { fontFamily: fonts.uiMed, fontSize: 15 },
   opsText: { color: colors.ink },
-  meText: { color: colors.white },
+  meText: { color: colors.onBrand },
   bubbleMeta: { fontFamily: fonts.ui, fontSize: 10, marginTop: 4 },
   opsMeta: { color: colors.muted },
-  meMeta: { color: colors.white, opacity: 0.8 },
+  meMeta: { color: colors.onBrand, opacity: 0.75 },
   composer: {
     flexDirection: "row",
     alignItems: "flex-end",
@@ -171,12 +171,12 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   sendBtn: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     alignItems: "center",
     justifyContent: "center",
   },
-  sendText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.white },
+  sendText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.onBrand },
 });

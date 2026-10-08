@@ -64,7 +64,7 @@ const styles = StyleSheet.create({
     width: 16,
     height: 16,
     borderRadius: 8,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
   },
   title: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.muted },
   sub: { fontFamily: fonts.data, fontSize: 13, color: colors.muted },

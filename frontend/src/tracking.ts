@@ -139,7 +139,7 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
         foregroundService: {
           notificationTitle: getCardText().track_title,
           notificationBody: getCardText().track_body,
-          notificationColor: "#10231C",
+          notificationColor: "#69BC46",
         },
       });
       return true;

@@ -92,7 +92,7 @@ export default function Login() {
             onPress={signInNow}
             disabled={busy || !phone || !password}
           >
-            {busy ? <ActivityIndicator color={colors.white} /> : (
+            {busy ? <ActivityIndicator color={colors.onBrand} /> : (
               <Text style={styles.ctaText}>{t.sign_in}</Text>
             )}
           </TouchableOpacity>
@@ -124,13 +124,13 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   cta: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: spacing.lg,
     alignItems: "center",
     marginTop: spacing.sm,
   },
-  ctaText: { fontFamily: fonts.uiBold, fontSize: 17, color: colors.white },
+  ctaText: { fontFamily: fonts.uiBold, fontSize: 17, color: colors.onBrand },
   error: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.alert, marginTop: spacing.sm },
   hint: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: spacing.xxl },
 });

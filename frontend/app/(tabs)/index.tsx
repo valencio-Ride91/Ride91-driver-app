@@ -224,7 +224,7 @@ export default function Home() {
               disabled={starting}
             >
               {starting
-                ? <ActivityIndicator color={colors.white} />
+                ? <ActivityIndicator color={colors.onBrand} />
                 : <Text style={styles.startBtnText}>{c.start_duty}</Text>}
             </TouchableOpacity>
           )}
@@ -480,18 +480,18 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: 999,
   },
-  dutyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.white },
-  dutyPillText: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.white },
+  dutyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.onBrand },
+  dutyPillText: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.onBrand },
   startBtn: {
-    backgroundColor: colors.live,
+    backgroundColor: colors.brand,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     alignItems: "center",
   },
-  startBtnText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.white },
+  startBtnText: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.onBrand },
   endBtn: {
     borderWidth: 1,
     borderColor: colors.line,

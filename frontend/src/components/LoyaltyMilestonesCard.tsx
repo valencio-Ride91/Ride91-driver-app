@@ -32,7 +32,7 @@ export interface LoyaltyState {
   vested_total: number;
 }
 
-const LIVE_TINT = "#E3F1EA";
+const LIVE_TINT = colors.brandTint;
 const AMBER_TINT = "#FCF2D9";
 const AMBER_INK = "#8A5D00";
 
@@ -96,7 +96,7 @@ export const LoyaltyMilestonesCard: React.FC<{ data: LoyaltyState; style?: ViewS
                     <Text
                       style={[
                         styles.nodeText,
-                        m.vested || m.forfeited ? styles.nodeTextOn : null,
+                        m.forfeited ? styles.nodeTextLost : m.vested ? styles.nodeTextOn : null,
                         isNext ? styles.nodeTextNext : null,
                       ]}
                     >
@@ -196,14 +196,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  nodeDone: { backgroundColor: colors.live, borderColor: colors.live },
+  nodeDone: { backgroundColor: colors.brand, borderColor: colors.brand },
   nodeLost: { backgroundColor: colors.alert, borderColor: colors.alert },
   nodeNext: { borderColor: colors.amber, backgroundColor: AMBER_TINT },
   nodeText: { fontFamily: fonts.dataMed, fontSize: 12, color: colors.muted },
-  nodeTextOn: { color: colors.white, fontFamily: fonts.uiBold },
+  nodeTextOn: { color: colors.onBrand, fontFamily: fonts.uiBold },
+  nodeTextLost: { color: colors.white, fontFamily: fonts.uiBold },
   nodeTextNext: { color: AMBER_INK },
   rail: { flex: 1, width: 2, backgroundColor: colors.line, marginVertical: 2 },
-  railDone: { backgroundColor: colors.live },
+  railDone: { backgroundColor: colors.brand },
 
   body: { flex: 1, marginLeft: spacing.md, paddingBottom: spacing.lg, paddingTop: 3 },
   bodyNext: {
