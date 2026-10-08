@@ -29,6 +29,11 @@ export interface HubDriver {
   working_seconds: number;
   tracking: "live" | "stopped" | null;
   tracking_reason: string | null;
+  // Where the driver's phone was last heard from (absent on an older server).
+  lat?: number | null;
+  lng?: number | null;
+  seen_at?: string | null;
+  seen_minutes?: number | null;
   you_owe: number;
   over_limit: boolean;
 }
@@ -47,7 +52,7 @@ export interface Attention {
 }
 
 export interface HubToday {
-  hub: { id: string; name: string | null };
+  hub: { id: string; name: string | null; lat?: number | null; lng?: number | null };
   business_date: string;
   server_ts: string;
   drivers: HubDriver[];

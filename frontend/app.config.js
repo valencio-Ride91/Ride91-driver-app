@@ -7,8 +7,9 @@
 //
 // The hub manager's app shares the design, text helpers and API code in ./src
 // but few of the driver app's phone features: it uses the camera (photos of a
-// car at shift change) and asks for no location, no microphone and no alarms,
-// and has no map. Set APP_VARIANT=hub for BOTH `expo prebuild` and the Gradle
+// car at shift change) and asks for no location, no microphone and no alarms.
+// Its map of the hub's drivers is OpenStreetMap in a web view, so it needs no
+// Maps key either. Set APP_VARIANT=hub for BOTH `expo prebuild` and the Gradle
 // build (the JS bundle is made during the Gradle build and picks its routes
 // folder from this file).
 //

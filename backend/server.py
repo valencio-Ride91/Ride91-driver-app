@@ -3379,7 +3379,7 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
     scope = hub_scope(admin)
     if scope and scope != hub_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
-    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1, "name": 1})
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1, "name": 1, "lat": 1, "lng": 1})
     if not hub:
         raise HTTPException(404, "hub_not_found")
     ids = await _hub_driver_ids(hub_id)
@@ -3398,7 +3398,13 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
         did = d["id"]
         shift = await _shift_status(d, now)
         duty = await _duty_summary(did, d.get("vehicle_id"), bd)
-        track = await _tracking_status(did, duty["on_duty"], await _last_phone_ping(did))
+        # Where the driver's own phone was last seen — the dot on the app's map.
+        seen = await _last_phone_ping(did)
+        track = await _tracking_status(did, duty["on_duty"], seen)
+        try:
+            seen_min = round((now - _parse_iso(seen["recorded_at"])).total_seconds() / 60, 1)
+        except Exception:
+            seen_min = None
         bal = balances.get(did, {})
         shift_counts[shift["status"]] = shift_counts.get(shift["status"], 0) + 1
         row = {
@@ -3415,6 +3421,8 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
             "current_state": duty["current_state"],
             "on_duty_seconds": duty["on_duty_seconds"], "working_seconds": duty["working_seconds"],
             "tracking": track.get("tracking"), "tracking_reason": track.get("reason"),
+            "lat": seen.get("lat"), "lng": seen.get("lng"),
+            "seen_at": seen.get("recorded_at"), "seen_minutes": seen_min,
             "you_owe": bal.get("you_owe", 0.0), "over_limit": bal.get("over_limit", False),
         }
         rows.append(row)
@@ -3431,7 +3439,7 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
 
     in_hub = {"driver_id": {"$in": live_ids or ["_none"]}}
     return {
-        "hub": {"id": hub["id"], "name": hub.get("name")},
+        "hub": {"id": hub["id"], "name": hub.get("name"), "lat": hub.get("lat"), "lng": hub.get("lng")},
         "business_date": bd,
         "server_ts": iso(now),
         "drivers": rows,

@@ -4,7 +4,17 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, HubRow } from "../api";
 
-interface EditState { id: string; name: string; city: string; capacity: string }
+interface EditState { id: string; name: string; city: string; capacity: string; place: string }
+
+// "18.5975, 73.7654" (as copied from Google Maps) -> the two numbers. Returns
+// null for an empty box and "bad" for anything that is not a place on Earth.
+function parsePlace(text: string): { lat: number; lng: number } | null | "bad" {
+  if (!text.trim()) return null;
+  const parts = text.split(/[\s,]+/).filter(Boolean).map(Number);
+  if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) return "bad";
+  const [lat, lng] = parts;
+  return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat, lng } : "bad";
+}
 
 export default function Hubs() {
   const [rows, setRows] = useState<HubRow[]>([]);
@@ -49,11 +59,14 @@ export default function Hubs() {
 
   const saveEdit = async () => {
     if (!edit) return;
+    const place = parsePlace(edit.place);
+    if (place === "bad") return setErr("Location should be two numbers, like 18.5975, 73.7654.");
     setSaving(true);
     setErr(null);
     try {
       await api.patch(`/admin/hubs/${edit.id}`, {
         name: edit.name.trim(), city: edit.city.trim() || null, capacity: Number(edit.capacity) || 12,
+        ...(place ?? {}),
       });
       setEdit(null);
       await load();
@@ -130,7 +143,7 @@ export default function Hubs() {
                   <span className={`tag ${h.seats_left === 0 ? "alert" : h.seats_left <= 2 ? "amber" : "muted"}`}>{h.seats_left} left</span>
                 </td>
                 <td style={{ whiteSpace: "nowrap" }}>
-                  <button className="ghost" onClick={() => setEdit({ id: h.id, name: h.name, city: h.city ?? "", capacity: String(h.capacity) })}>Edit</button>
+                  <button className="ghost" onClick={() => setEdit({ id: h.id, name: h.name, city: h.city ?? "", capacity: String(h.capacity), place: h.lat != null && h.lng != null ? `${h.lat}, ${h.lng}` : "" })}>Edit</button>
                   <button className="ghost danger-ghost" onClick={() => del(h)}>Delete</button>
                 </td>
               </tr>
@@ -147,7 +160,9 @@ export default function Hubs() {
               <label>Name *<input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
               <label>City<input value={edit.city} onChange={(e) => setEdit({ ...edit, city: e.target.value })} /></label>
               <label>Capacity<input type="number" min={1} max={100} value={edit.capacity} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} /></label>
+              <label>Location<input value={edit.place} placeholder="18.5975, 73.7654" onChange={(e) => setEdit({ ...edit, place: e.target.value })} /></label>
             </div>
+            <div className="muted-sm">Location puts the hub on the map in the Ride91 Hub app. In Google Maps, right-click the hub and click the two numbers to copy them, then paste here.</div>
             {err ? <div className="err">{err}</div> : null}
             <div className="form-actions">
               <button className="ghost" onClick={() => setEdit(null)} disabled={saving}>Cancel</button>

@@ -4,7 +4,7 @@ import { formatDuration } from "@/src/i18n";
 import { HubText } from "@/src/hub/text";
 import { HubDriver } from "@/src/hub/today";
 import { STATUS_TONE, Tone } from "@/src/hub/ui";
-import { platformLabels } from "@/src/theme";
+import { colors, platformLabels } from "@/src/theme";
 
 // One line saying what the driver is doing, for the list and the driver page.
 export function doing(d: HubDriver, t: HubText): string {
@@ -21,4 +21,23 @@ export function tagFor(d: HubDriver, t: HubText): { tone: Tone; label: string } 
   if (d.on_duty) return { tone: d.tracking === "stopped" ? "warn" : "ok", label: t.on_duty };
   if (d.shift_status === "alarm_pending" || d.shift_status === "no_shift_time") return { tone: "mute", label: t.off_duty };
   return { tone: STATUS_TONE[d.shift_status] ?? "mute", label: t.status[d.shift_status] ?? d.shift_status };
+}
+
+// "Seen 4 min ago" — how old a driver's last known position is.
+export function seenText(minutes: number | null | undefined, t: HubText): string {
+  if (minutes == null) return "";
+  if (minutes < 1) return t.seen_now;
+  if (minutes < 60) return t.seen_min(Math.round(minutes));
+  if (minutes < 48 * 60) return t.seen_hr(Math.round(minutes / 60));
+  return t.seen_day(Math.round(minutes / 1440));
+}
+
+// The colours of the dots on the map, also used by its legend.
+export const MAP_COLORS = { live: colors.live, quiet: "#C98A00", off: colors.muted };
+
+// A driver's dot: green while on duty and reporting, amber when on duty but
+// the phone has gone quiet, grey (and faded) for an off-duty last position.
+export function dotFor(d: HubDriver): { color: string; faded: boolean } {
+  if (!d.on_duty) return { color: MAP_COLORS.off, faded: true };
+  return { color: d.tracking === "stopped" ? MAP_COLORS.quiet : MAP_COLORS.live, faded: false };
 }
