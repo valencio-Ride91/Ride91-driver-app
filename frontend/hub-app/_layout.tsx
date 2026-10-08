@@ -40,6 +40,9 @@ const Router: React.FC = () => {
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="driver/[id]" options={{ presentation: "card" }} />
           <Stack.Screen name="driver-form" options={{ presentation: "card" }} />
+          <Stack.Screen name="car/[id]" options={{ presentation: "card" }} />
+          <Stack.Screen name="car-check" options={{ presentation: "card" }} />
+          <Stack.Screen name="settings" options={{ presentation: "card" }} />
           <Stack.Screen name="handover/[vehicleId]" options={{ presentation: "card" }} />
           <Stack.Screen name="earnings" options={{ presentation: "card" }} />
         </Stack>

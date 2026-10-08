@@ -131,6 +131,13 @@ gcloud services api-keys update <key id> \
 A hub shows on the map once it has a location: admin panel → Hubs → Edit →
 Location.
 
+**What else it does.** Add, edit and remove drivers and cars; inspect a car
+and keep its service history (collections `car_checks` and `car_services`,
+shown in the admin panel under a hub's "Vehicle checks" tab); record "coming"
+or "not coming" for a driver who phoned in; list the cash it took in and undo
+a wrong entry (a hub manager within 48 hours; nothing is deleted, an opposite
+entry is added); message every driver at once; bring back a removed driver.
+
 ---
 
 ## Prerequisites (once per machine / account)

@@ -5,7 +5,9 @@
 //   2. the drivers who need a call right now;
 //   3. the four things a manager does most (shift change, cash, earnings, map);
 //   4. what is waiting on them (withdrawals, requests, messages);
-//   5. who is out on the road.
+//   5. who is out on the road;
+//   6. the way into Hub settings (shift times for all, removed drivers,
+//      password, sign out).
 import React, { useCallback, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -16,7 +18,7 @@ import { useHubSession } from "@/src/hub/session";
 import { doing } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
 import { Attention, HubDriver, useHubToday } from "@/src/hub/today";
-import { Btn, Empty, HubHeader, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
+import { Empty, HubHeader, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 // The line under the driver's name: why they are on the list.
@@ -57,7 +59,7 @@ const URGENT: Record<string, boolean> = { not_coming: true, not_started: true, o
 export default function Today() {
   const t = useHubText();
   const router = useRouter();
-  const { session, signOut, chooseHub } = useHubSession();
+  const { session } = useHubSession();
   const { today, refresh } = useHubToday();
   const [refreshing, setRefreshing] = useState(false);
 
@@ -118,8 +120,6 @@ export default function Today() {
     { key: "earnings", title: t.enter_earnings, sub: t.qa_earn_sub, go: () => router.push("/earnings" as never) },
     { key: "map", title: t.view_map, sub: t.qa_map_sub, go: openMap },
   ];
-  // A fleet manager or owner can hop to another hub; a hub manager cannot.
-  const canChangeHub = session?.role !== "hub_manager";
 
   return (
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
@@ -234,13 +234,13 @@ export default function Today() {
           </>
         )}
 
-        <View style={styles.footer}>
-          <Text style={styles.who}>{session?.username}</Text>
-          <View style={{ flexDirection: "row", gap: spacing.sm }}>
-            {canChangeHub ? <Btn label={t.change_hub} small kind="ghost" onPress={() => chooseHub("", "")} testID="hub-change-hub" /> : null}
-            <Btn label={t.sign_out} small kind="ghost" onPress={signOut} testID="hub-sign-out" />
+        <TouchableOpacity style={[hubStyles.card, styles.footer]} onPress={() => router.push("/settings" as never)} testID="hub-settings-link">
+          <View style={{ flex: 1 }}>
+            <Text style={hubStyles.name}>{t.settings_title}</Text>
+            <Text style={hubStyles.sub} numberOfLines={1}>{session?.username}</Text>
           </View>
-        </View>
+          <Text style={styles.chevron}>›</Text>
+        </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
   );
@@ -291,6 +291,5 @@ const styles = StyleSheet.create({
   chevron: { fontFamily: fonts.uiBold, fontSize: 18, lineHeight: 20, color: colors.muted },
   link: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.live },
   liveDot: { width: 10, height: 10, borderRadius: 5 },
-  footer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.xl },
-  who: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
+  footer: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.xl },
 });

@@ -7,6 +7,7 @@ import { useRouter } from "expo-router";
 
 import { formatIST, formatINR } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
+import { BroadcastSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
 import { Btn, Empty, HubHeader, SectionTitle, Tag, hubStyles } from "@/src/hub/ui";
@@ -56,6 +57,7 @@ export default function Inbox() {
   const [notes, setNotes] = useState<Note[] | null>(null);
   const [reqs, setReqs] = useState<Req[] | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  const [toAll, setToAll] = useState(false);       // the "message all drivers" sheet
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -119,7 +121,7 @@ export default function Inbox() {
 
   return (
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
-      <HubHeader title={t.tab_inbox} />
+      <HubHeader title={t.tab_inbox} right={<Btn label={t.msg_all} small onPress={() => setToAll(true)} testID="hub-msg-all" />} />
       <ScrollView contentContainerStyle={hubStyles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
         <View style={styles.filters}>
           {(["all", "messages", "requests"] as Filter[]).map((f) => (
@@ -175,6 +177,11 @@ export default function Inbox() {
           </>
         ) : null}
       </ScrollView>
+      <BroadcastSheet visible={toAll} hubId={hubId ?? ""} onClose={() => setToAll(false)} onDone={(m) => {
+        setToAll(false);
+        setMsg(m);
+        setTimeout(() => setMsg(null), 5000);
+      }} />
     </SafeAreaView>
   );
 }

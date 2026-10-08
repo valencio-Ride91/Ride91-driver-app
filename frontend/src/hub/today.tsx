@@ -20,6 +20,7 @@ export interface HubDriver {
   reason_code?: string | null;
   reason_note?: string | null;
   back_by?: string | null;
+  answered_by?: string | null;       // set when the hub recorded the answer for them
   duty_started_at?: string | null;
   late_minutes?: number | null;
   on_duty: boolean;

@@ -8,6 +8,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { formatDuration, formatINR, formatIST, formatISTTime } from "@/src/i18n";
 import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
 import { hubApi } from "@/src/hub/session";
+import { NotComingSheet } from "@/src/hub/sheets";
 import { doing, tagFor } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
@@ -57,6 +58,8 @@ export default function DriverPage() {
   const [sending, setSending] = useState(false);
   const [savingShift, setSavingShift] = useState(false);
   const [cash, setCash] = useState<CashTarget | null>(null);
+  const [notComing, setNotComing] = useState(false);     // the "not coming: why?" sheet
+  const [marking, setMarking] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -90,6 +93,22 @@ export default function DriverPage() {
     if (msgTimer.current) clearTimeout(msgTimer.current);
     setMsg(m);
     msgTimer.current = setTimeout(() => setMsg(null), 5000);
+  };
+
+  // The driver phoned to say they are coming: record it as their answer.
+  const markComing = async () => {
+    if (marking) return;
+    setMarking(true);
+    setErr(null);
+    try {
+      await hubApi.post(`/admin/drivers/${id}/shift-answer`, { response: "coming" });
+      say(t.answer_saved);
+      await refresh();
+    } catch {
+      setErr(t.action_fail);
+    } finally {
+      setMarking(false);
+    }
   };
 
   const saveShift = async () => {
@@ -153,6 +172,7 @@ export default function DriverPage() {
                     {t.status[d.shift_status]}
                     {d.shift_status === "not_coming" && d.reason_code ? ` · ${d.reason_code === "other" && d.reason_note ? d.reason_note : t.reasons[d.reason_code] ?? d.reason_code}` : ""}
                     {d.back_by ? ` · ${t.back_by(d.back_by)}` : ""}
+                    {d.answered_by ? ` · ${t.answered_by_hub(d.answered_by)}` : ""}
                   </Text>
                 ) : null}
                 {d.tracking === "stopped" ? (
@@ -173,6 +193,15 @@ export default function DriverPage() {
                     {d.you_owe > 0 ? <Btn label={t.received} small onPress={() => setCash({ driver_id: d.driver_id, name: d.name, you_owe: d.you_owe })} testID="hub-driver-cash" /> : null}
                   </View>
                 </View>
+                {d.shift_status !== "no_shift_time" && d.shift_status !== "started" && !d.on_duty ? (
+                  <View style={styles.phoned} testID="hub-driver-phoned">
+                    <Text style={styles.k}>{t.phoned_in}</Text>
+                    <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm }}>
+                      <Btn label={t.mark_coming} small kind="ghost" onPress={markComing} busy={marking} style={{ flex: 1 }} testID="hub-driver-mark-coming" />
+                      <Btn label={t.mark_not_coming} small kind="danger" onPress={() => setNotComing(true)} disabled={marking} style={{ flex: 1 }} testID="hub-driver-mark-not-coming" />
+                    </View>
+                  </View>
+                ) : null}
                 <View style={styles.kv}>
                   <Text style={styles.k}>{t.shift_time}</Text>
                   {shift === null ? (
@@ -229,6 +258,8 @@ export default function DriverPage() {
         </ScrollView>
 
         <CashSheet target={cash} onClose={() => setCash(null)} onDone={(m) => { setCash(null); say(m); refresh(); }} />
+        <NotComingSheet visible={notComing} driverId={id as string} name={d?.name ?? ""} onClose={() => setNotComing(false)}
+          onDone={(m) => { setNotComing(false); say(m); refresh(); }} />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -248,6 +279,7 @@ const styles = StyleSheet.create({
   title: { flex: 1, fontFamily: fonts.display, fontSize: 22, color: colors.ink },
   actions: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.md },
   kv: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.line, minHeight: 44 },
+  phoned: { paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.line, marginTop: spacing.md },
   k: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.muted },
   v: { fontFamily: fonts.dataMed, fontSize: 15, color: colors.ink },
   link: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.live, textDecorationLine: "underline" },

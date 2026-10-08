@@ -32,9 +32,10 @@ let currentToken: string | null = null;
 let onUnauthorised: (() => void) | null = null;
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const sentToken = currentToken;      // what this request actually carried
   const res = await fetch(`${BASE}/api${path}`, {
     method,
-    headers: { "Content-Type": "application/json", ...(currentToken ? { Authorization: `Bearer ${currentToken}` } : {}) },
+    headers: { "Content-Type": "application/json", ...(sentToken ? { Authorization: `Bearer ${sentToken}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -47,8 +48,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
   }
   if (!res.ok) {
-    // The 12-hour session ran out: back to the sign-in screen.
-    if (res.status === 401 && currentToken) onUnauthorised?.();
+    // The 12-hour session ran out: back to the sign-in screen. Only when the
+    // refused request carried the session that is still current — a request
+    // sent before the saved session was read back must not sign anyone out.
+    if (res.status === 401 && sentToken && sentToken === currentToken) onUnauthorised?.();
     const err = new Error(`api ${res.status}`) as ApiError;
     err.status = res.status;
     err.body = data;

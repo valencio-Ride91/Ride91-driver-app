@@ -1,17 +1,18 @@
-// Money — cash the hub still has to collect, and salary withdrawals waiting
-// to be paid or turned down.
+// Money — cash the hub still has to collect, the cash it has taken in (with
+// Undo for an entry made by mistake), and salary withdrawals waiting to be
+// paid or turned down.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshControl, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { BottomSheet } from "@/src/components/ui";
-import { formatINR, formatISTDate } from "@/src/i18n";
+import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
 import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Btn, Empty, HubHeader, SectionTitle, Tile, hubStyles } from "@/src/hub/ui";
+import { Btn, Empty, HubHeader, SectionTitle, Tag, Tile, hubStyles } from "@/src/hub/ui";
 import { colors, spacing } from "@/src/theme";
 
 interface Withdrawal {
@@ -24,6 +25,18 @@ interface Withdrawal {
   bank_kind: "bank_account" | "vpa" | null;
   bank_masked: string | null;
   payable_now?: number;
+}
+
+// Cash a driver handed in and staff recorded.
+interface Received {
+  id: string;
+  driver_name: string | null;
+  amount: number;
+  reference: string | null;
+  recorded_by: string | null;
+  created_at: string;
+  undone: boolean;
+  can_undo: boolean;
 }
 
 // What the manager is doing to a withdrawal: paying by hand (needs a
@@ -46,6 +59,17 @@ export default function Money() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [received, setReceived] = useState<Received[] | null>(null);
+  const [undoing, setUndoing] = useState<string | null>(null);     // the entry being asked about
+
+  const loadReceived = useCallback(async () => {
+    if (!hubId) return;
+    try {
+      setReceived((await hubApi.get<{ items: Received[] }>(`/admin/hubs/${hubId}/cash-received?limit=20`)).items);
+    } catch {
+      setReceived((r) => r ?? []);      // an older server has no such list
+    }
+  }, [hubId]);
 
   const loadWds = useCallback(async () => {
     if (!hubId) return;
@@ -75,11 +99,11 @@ export default function Money() {
     }
   }, [hubId]);
   // Refresh when coming back from the earnings screen.
-  useFocusEffect(useCallback(() => { loadEarn(); }, [loadEarn]));
+  useFocusEffect(useCallback(() => { loadEarn(); loadReceived(); }, [loadEarn, loadReceived]));
 
   const reload = useCallback(async () => {
-    await Promise.all([refresh(), loadWds()]);
-  }, [refresh, loadWds]);
+    await Promise.all([refresh(), loadWds(), loadReceived()]);
+  }, [refresh, loadWds, loadReceived]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -108,6 +132,11 @@ export default function Money() {
     } finally {
       setBusyId(null);
     }
+  };
+
+  const undo = async (r: Received) => {
+    await run(r.id, () => hubApi.post(`/admin/cash-received/${r.id}/undo`, {}), t.undo_done);
+    setUndoing(null);
   };
 
   const payNow = (w: Withdrawal) => run(w.id, () => hubApi.post(`/admin/withdrawals/${w.id}/pay`, { method: "razorpayx" }), t.pay_sent);
@@ -157,6 +186,34 @@ export default function Money() {
                 </Text>
               </View>
               <Btn label={t.received} small onPress={() => setCash({ driver_id: d.driver_id, name: d.name, you_owe: d.you_owe })} testID={`hub-cash-btn-${d.driver_id}`} />
+            </View>
+          ))}
+        </View>
+
+        <SectionTitle>{t.cash_received_title}</SectionTitle>
+        <View style={hubStyles.card} testID="hub-received-list">
+          {received === null ? <Empty>{t.loading}</Empty> : received.length === 0 ? <Empty>{t.cash_received_none}</Empty> : received.map((r, i) => (
+            <View key={r.id} style={{ paddingVertical: 10, borderTopWidth: i === 0 ? 0 : 1, borderTopColor: colors.line }} testID={`hub-received-${r.id}`}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[hubStyles.name, r.undone ? { textDecorationLine: "line-through", color: colors.muted } : null]}>
+                    {r.driver_name ?? "—"} · {formatINR(r.amount)}
+                  </Text>
+                  <Text style={hubStyles.sub}>{[formatIST(r.created_at), r.reference, r.recorded_by ? t.by_who(r.recorded_by) : null].filter(Boolean).join(" · ")}</Text>
+                </View>
+                {r.undone ? <Tag tone="mute">{t.undone}</Tag>
+                  : r.can_undo && undoing !== r.id ? <Btn label={t.undo} small kind="ghost" onPress={() => { setErr(null); setUndoing(r.id); }} testID={`hub-undo-${r.id}`} />
+                  : null}
+              </View>
+              {undoing === r.id ? (
+                <View style={{ marginTop: spacing.sm }} testID="hub-undo-confirm">
+                  <Text style={hubStyles.subAlert}>{t.undo_sure(formatINR(r.amount), r.driver_name ?? "")}</Text>
+                  <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm }}>
+                    <Btn label={t.cancel} small kind="ghost" onPress={() => setUndoing(null)} disabled={busyId === r.id} style={{ flex: 1 }} />
+                    <Btn label={t.undo_yes} small kind="danger" onPress={() => undo(r)} busy={busyId === r.id} style={{ flex: 1 }} testID="hub-undo-yes" />
+                  </View>
+                </View>
+              ) : null}
             </View>
           ))}
         </View>

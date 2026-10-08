@@ -1831,6 +1831,8 @@ async def _shift_status(driver: Dict, now: datetime) -> Dict[str, Any]:
         "shift_start": iso(start),
         "alarm_at": iso(alarm_at),
         "answered_at": (answer or {}).get("responded_at") or (answer or {}).get("created_at"),
+        # Set when the hub recorded the answer for a driver who phoned in.
+        "answered_by": (answer or {}).get("recorded_by"),
         "reason_code": (answer or {}).get("reason_code"),
         "reason_note": (answer or {}).get("reason_note"),
         "back_by": (answer or {}).get("back_by"),
@@ -3415,7 +3417,7 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
             "shift_status": shift["status"],
             "shift_start": shift.get("shift_start"),
             "reason_code": shift.get("reason_code"), "reason_note": shift.get("reason_note"),
-            "back_by": shift.get("back_by"),
+            "back_by": shift.get("back_by"), "answered_by": shift.get("answered_by"),
             "duty_started_at": shift.get("duty_started_at"), "late_minutes": shift.get("late_minutes"),
             "on_duty": duty["on_duty"], "current_platforms": duty["current_platforms"],
             "current_state": duty["current_state"],
@@ -3524,12 +3526,21 @@ async def admin_hub_cars(hub_id: str, admin: Dict = Depends(require_ops)):
     last: Dict[str, Dict] = {}
     async for h in db.handovers.find({"hub_id": hub_id}, {"_id": 0}).sort("created_at", -1).limit(400):
         last.setdefault(h["vehicle_id"], h)
+    checked: Dict[str, Dict] = {}
+    async for c in db.car_checks.find({"hub_id": hub_id}, {"_id": 0}).sort("created_at", -1).limit(400):
+        checked.setdefault(c["vehicle_id"], c)
+    serviced: Dict[str, str] = {}
+    async for sv in db.car_services.find({"hub_id": hub_id}, {"_id": 0}).sort("service_date", -1).limit(400):
+        serviced.setdefault(sv["vehicle_id"], sv["service_date"])
     return {
         "cars": [{
             "id": v["id"], "number": v.get("number"), "model": v.get("model"),
             "current_soc": v.get("current_soc"), "odometer_km": v.get("odometer_km"),
             "day_driver": slot.get(f"{v['id']}:day"), "night_driver": slot.get(f"{v['id']}:night"),
             "last_handover": _handover_out(last[v["id"]]) if v["id"] in last else None,
+            "last_check": ({"created_at": checked[v["id"]]["created_at"], "attention": checked[v["id"]].get("attention") or []}
+                           if v["id"] in checked else None),
+            "last_service_date": serviced.get(v["id"]),
         } for v in vehicles],
         "drivers": sorted([{
             "driver_id": d["id"], "name": d.get("name"), "shift_type": d.get("shift_type") or "day",
@@ -3771,6 +3782,361 @@ async def admin_restore_driver(driver_id: str, admin: Dict = Depends(require_ops
          "$unset": {"archived_at": "", "archived_by": ""}},
     )
     return {"ok": True, "id": driver_id, "archived": False}
+
+
+# ---------------------------------------------------------------------------
+# HUB DESK — the rest of what a hub manager does from the Ride91 Hub app:
+# record a driver's answer when they phone in instead of answering the alarm,
+# see the cash they took in and undo a wrong entry, message every driver at
+# once, bring back a driver who was removed, and keep each car's inspection
+# and service history.
+# ---------------------------------------------------------------------------
+class HubShiftAnswerIn(BaseModel):
+    response: Literal["coming", "not_coming"]
+    reason_code: Optional[str] = None                     # required for not_coming
+    reason_note: Optional[str] = Field(default=None, max_length=200)
+    back_by: Optional[str] = None                         # YYYY-MM-DD
+
+
+def _ymd_or_400(value: str) -> str:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+    except Exception:
+        raise HTTPException(400, "bad_date")
+
+
+@api.post("/admin/drivers/{driver_id}/shift-answer")
+async def admin_record_shift_answer(
+    driver_id: str, body: HubShiftAnswerIn, admin: Dict = Depends(require_ops)
+):
+    """The hub records "coming" or "not coming" for a driver's nearest shift,
+    for a driver who phoned in. It is stored beside the driver's own alarm
+    answers (the latest one counts), marked with who recorded it."""
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "password_hash": 0})
+    if not driver:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(driver, hub_scope(admin))
+    if body.response == "not_coming" and body.reason_code not in ALARM_REASONS:
+        raise HTTPException(400, "reason_required")
+    back_by = _ymd_or_400(body.back_by) if body.back_by else None
+    now = now_utc()
+    occ = _shift_occurrence(driver, now)
+    if not occ:
+        raise HTTPException(400, "no_shift_time")
+    not_coming = body.response == "not_coming"
+    await db.alarm_responses.insert_one({
+        "id": str(uuid.uuid4()),
+        "driver_id": driver_id,
+        "schedule_id": occ["schedule_id"],
+        "phase": "start",
+        "response": "not_coming" if not_coming else "awake",
+        "reason_code": body.reason_code if not_coming else None,
+        "reason_note": (body.reason_note or "").strip() or None if not_coming and body.reason_code == "other" else None,
+        "back_by": back_by if not_coming else None,
+        "eta_minutes": None,
+        "fired_at": iso(occ["alarm_at"]),
+        "responded_at": iso(now),
+        "created_at": iso(now),
+        "client_action_id": f"hub:{uuid.uuid4()}",
+        "recorded_by": admin["username"],
+    })
+    await _audit(admin, "shift_answer", driver_id,
+                 {"response": body.response, "reason_code": body.reason_code if not_coming else None})
+    return {"ok": True, "shift": await _shift_status(driver, now)}
+
+
+# ---- cash taken in at the hub: the list, and undoing a wrong entry ---------
+CASH_UNDO_HOURS = 48      # a hub manager can undo their hub's entries this long
+
+
+def _cash_can_undo(row: Dict, admin: Dict, now: datetime) -> bool:
+    if row.get("reversed_at"):
+        return False
+    if hub_scope(admin) is None:
+        return True       # fleet managers and owners: any time
+    try:
+        return now - _parse_iso(row["created_at"]) <= timedelta(hours=CASH_UNDO_HOURS)
+    except Exception:
+        return False
+
+
+@api.get("/admin/hubs/{hub_id}/cash-received")
+async def admin_hub_cash_received(hub_id: str, limit: int = 30, admin: Dict = Depends(require_ops)):
+    """Cash handed in by this hub's drivers and recorded by staff, newest
+    first, each marked if it was later undone."""
+    _assert_my_hub(hub_id, admin)
+    ids = await _hub_driver_ids(hub_id)
+    names = {d["id"]: d.get("name") async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}}, {"_id": 0, "id": 1, "name": 1})}
+    now = now_utc()
+    items: List[Dict[str, Any]] = []
+    async for r in db.qr_payments.find(
+        {"driver_id": {"$in": ids or ["_none"]}, "type": "deposit", "source": "admin_manual", "reverses": None},
+        {"_id": 0},
+    ).sort("created_at", -1).limit(max(1, min(int(limit), 100))):
+        items.append({
+            "id": r["id"], "driver_id": r["driver_id"], "driver_name": names.get(r["driver_id"]),
+            "amount": r["amount"], "reference": r.get("reference"), "reason": r.get("reason"),
+            "recorded_by": r.get("recorded_by"), "occurred_at": r.get("occurred_at"),
+            "created_at": r.get("created_at"),
+            "undone": bool(r.get("reversed_at")), "undone_by": r.get("reversed_by"),
+            "can_undo": _cash_can_undo(r, admin, now),
+        })
+    return {"items": items, "count": len(items), "undo_hours": CASH_UNDO_HOURS}
+
+
+class CashUndoIn(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=200)
+
+
+@api.post("/admin/cash-received/{payment_id}/undo")
+async def admin_undo_cash_received(payment_id: str, body: CashUndoIn, admin: Dict = Depends(require_ops)):
+    """Take back a hand-in that was entered by mistake. Nothing is deleted:
+    the entry is marked undone and an equal, opposite entry is added for the
+    same day, so every balance nets out and the trail shows both."""
+    row = await db.qr_payments.find_one({"id": payment_id}, {"_id": 0})
+    if not row or row.get("type") != "deposit" or row.get("source") != "admin_manual" or row.get("reverses"):
+        raise HTTPException(404, "cash_entry_not_found")
+    driver = await db.drivers.find_one({"id": row["driver_id"]}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
+    await _assert_driver_in_scope(driver or {}, hub_scope(admin))
+    if row.get("reversed_at"):
+        return {"ok": True, "duplicate": True}
+    now = now_utc()
+    if not _cash_can_undo(row, admin, now):
+        raise HTTPException(409, "too_old_to_undo")
+    # Claim it first, so two taps cannot undo the same entry twice.
+    claimed = await db.qr_payments.update_one(
+        {"id": payment_id, "reversed_at": None},
+        {"$set": {"reversed_at": iso(now), "reversed_by": admin["username"]}})
+    if not claimed.modified_count:
+        return {"ok": True, "duplicate": True}
+    await db.qr_payments.insert_one({
+        "id": str(uuid.uuid4()),
+        "driver_id": row["driver_id"],
+        "amount": -round(float(row["amount"]), 2),
+        "type": "deposit",
+        "reference": f"undo:{row.get('reference')}",
+        "platform": None,
+        "occurred_at": row.get("occurred_at"),
+        "business_date": row.get("business_date"),
+        "source": "admin_manual",
+        "reason": (body.note or "").strip() or "Entered by mistake",
+        "recorded_by": admin["username"],
+        "reverses": payment_id,
+        "client_action_id": f"admin-undo:{payment_id}",
+        "created_at": iso(now),
+    })
+    await _audit(admin, "cash_deposit_undo", row["driver_id"],
+                 {"amount": row["amount"], "reference": row.get("reference")})
+    return {"ok": True, "duplicate": False}
+
+
+# ---- one message to every driver in the hub --------------------------------
+class HubBroadcastIn(BaseModel):
+    body: str = Field(min_length=1, max_length=1000)
+    shift_type: Literal["all", "day", "night"] = "all"
+    client_action_id: str = Field(min_length=6)
+
+
+@api.post("/admin/hubs/{hub_id}/broadcast")
+async def admin_hub_broadcast(hub_id: str, body: HubBroadcastIn, admin: Dict = Depends(require_ops)):
+    """Send one message to every driver of the hub (or only its day or night
+    drivers). Each driver gets it on their app's bell like any other message.
+    Idempotent on client_action_id."""
+    _assert_my_hub(hub_id, admin)
+    text = body.body.strip()
+    if not text:
+        raise HTTPException(400, "empty_message")
+    if await db.notifications.find_one({"broadcast_id": body.client_action_id}, {"_id": 0, "id": 1}):
+        return {"ok": True, "duplicate": True, "sent": 0}
+    ids = await _hub_driver_ids(hub_id)
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}, "archived": {"$ne": True}}, {"_id": 0, "id": 1, "shift_type": 1})]
+    if body.shift_type != "all":
+        drivers = [d for d in drivers if (d.get("shift_type") or "day") == body.shift_type]
+    now = iso(now_utc())
+    rows = [{
+        "id": str(uuid.uuid4()), "driver_id": d["id"], "direction": "to_driver", "body": text,
+        "created_at": now, "created_by": admin["username"], "read": False, "read_at": None,
+        "broadcast_id": body.client_action_id,
+    } for d in drivers]
+    if rows:
+        await db.notifications.insert_many(rows)
+    await _audit(admin, "broadcast", hub_id, {"drivers": len(rows), "shift_type": body.shift_type})
+    return {"ok": True, "duplicate": False, "sent": len(rows)}
+
+
+# ---- drivers who were removed, so they can be brought back -----------------
+@api.get("/admin/hubs/{hub_id}/removed-drivers")
+async def admin_hub_removed_drivers(hub_id: str, admin: Dict = Depends(require_ops)):
+    """Drivers removed from this hub. Their phone number stays theirs, so a
+    returning driver is restored (POST /admin/drivers/<id>/restore), not
+    added again."""
+    _assert_my_hub(hub_id, admin)
+    rows = [d async for d in db.drivers.find(
+        {"hub_id": hub_id, "archived": True},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "shift_type": 1, "archived_at": 1},
+    ).sort("archived_at", -1).limit(100)]
+    return {"items": [{
+        "driver_id": d["id"], "name": d.get("name"), "phone": d.get("phone"),
+        "shift_type": d.get("shift_type") or "day", "removed_at": d.get("archived_at"),
+    } for d in rows], "count": len(rows)}
+
+
+# ---- each car's inspection and service history ------------------------------
+# An inspection is the hub manager walking round a car and marking each point
+# OK or "needs attention", with a note where it helps. A service entry is work
+# that was done on the car, with its date. Both are kept for the life of the
+# car; nothing here is linked to the odometer or to any other record.
+CAR_CHECK_ITEMS = ("tyres", "spare_tyre", "brake_fluid", "coolant", "motor_oil",
+                   "wipers", "headlights", "dash_camera", "gps")
+CAR_SERVICE_KINDS = ("service", "tyres", "wipers", "brakes", "battery", "other")
+
+
+class CarCheckItemIn(BaseModel):
+    status: Literal["ok", "attention", "not_checked"] = "not_checked"
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
+class CarCheckIn(BaseModel):
+    items: Dict[str, CarCheckItemIn] = {}
+    battery_note: Optional[str] = Field(default=None, max_length=1000)   # battery performance report
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    client_action_id: str = Field(min_length=6)
+
+
+class CarServiceIn(BaseModel):
+    kind: Literal["service", "tyres", "wipers", "brakes", "battery", "other"] = "service"
+    service_date: str                                                     # YYYY-MM-DD
+    note: Optional[str] = Field(default=None, max_length=1000)
+    cost: Optional[float] = Field(default=None, ge=0)
+    client_action_id: str = Field(min_length=6)
+
+
+async def _car_in_scope(vehicle_id: str, admin: Dict) -> Dict:
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0})
+    if not veh:
+        raise HTTPException(404, "vehicle_not_found")
+    await _assert_vehicle_in_scope(veh, hub_scope(admin))
+    return veh
+
+
+def _car_check_out(c: Dict) -> Dict[str, Any]:
+    return {k: c.get(k) for k in (
+        "id", "vehicle_id", "vehicle_number", "items", "attention", "battery_note", "notes",
+        "created_at", "created_by")}
+
+
+def _car_service_out(sv: Dict) -> Dict[str, Any]:
+    return {k: sv.get(k) for k in (
+        "id", "vehicle_id", "vehicle_number", "kind", "service_date", "note", "cost",
+        "created_at", "created_by")}
+
+
+@api.post("/admin/vehicles/{vehicle_id}/checks")
+async def admin_record_car_check(vehicle_id: str, body: CarCheckIn, admin: Dict = Depends(require_ops)):
+    """Record an inspection of one car. Idempotent on client_action_id."""
+    veh = await _car_in_scope(vehicle_id, admin)
+    existing = await db.car_checks.find_one({"client_action_id": body.client_action_id}, {"_id": 0})
+    if existing:
+        return {"ok": True, "duplicate": True, "check": _car_check_out(existing)}
+    if set(body.items) - set(CAR_CHECK_ITEMS):
+        raise HTTPException(400, "unknown_check_item")
+    items: Dict[str, Dict[str, Any]] = {}
+    for key in CAR_CHECK_ITEMS:
+        it = body.items.get(key)
+        items[key] = {"status": it.status if it else "not_checked",
+                      "note": ((it.note or "").strip() or None) if it else None}
+    battery_note = (body.battery_note or "").strip() or None
+    notes = (body.notes or "").strip() or None
+    if not battery_note and not notes and all(i["status"] == "not_checked" for i in items.values()):
+        raise HTTPException(400, "nothing_checked")
+    row = {
+        "id": str(uuid.uuid4()),
+        "vehicle_id": vehicle_id,
+        "vehicle_number": veh.get("number"),
+        "hub_id": veh.get("hub_id"),
+        "items": items,
+        "attention": [k for k in CAR_CHECK_ITEMS if items[k]["status"] == "attention"],
+        "battery_note": battery_note,
+        "notes": notes,
+        "created_at": iso(now_utc()),
+        "created_by": admin["username"],
+        "client_action_id": body.client_action_id,
+    }
+    await db.car_checks.insert_one(row.copy())
+    await _audit(admin, "car_check", vehicle_id, {"attention": row["attention"]})
+    return {"ok": True, "duplicate": False, "check": _car_check_out(row)}
+
+
+@api.post("/admin/vehicles/{vehicle_id}/services")
+async def admin_record_car_service(vehicle_id: str, body: CarServiceIn, admin: Dict = Depends(require_ops)):
+    """Record work done on one car (a service, new tyres, wipers changed…),
+    with the date it was done. Idempotent on client_action_id."""
+    veh = await _car_in_scope(vehicle_id, admin)
+    existing = await db.car_services.find_one({"client_action_id": body.client_action_id}, {"_id": 0})
+    if existing:
+        return {"ok": True, "duplicate": True, "service": _car_service_out(existing)}
+    day = _ymd_or_400(body.service_date)
+    if day > now_utc().astimezone(IST).strftime("%Y-%m-%d"):
+        raise HTTPException(400, "date_in_future")
+    note = (body.note or "").strip() or None
+    if body.kind == "other" and not note:
+        raise HTTPException(400, "note_required")
+    row = {
+        "id": str(uuid.uuid4()),
+        "vehicle_id": vehicle_id,
+        "vehicle_number": veh.get("number"),
+        "hub_id": veh.get("hub_id"),
+        "kind": body.kind,
+        "service_date": day,
+        "note": note,
+        "cost": round(body.cost, 2) if body.cost is not None else None,
+        "created_at": iso(now_utc()),
+        "created_by": admin["username"],
+        "client_action_id": body.client_action_id,
+    }
+    await db.car_services.insert_one(row.copy())
+    await _audit(admin, "car_service", vehicle_id, {"kind": body.kind, "service_date": day})
+    return {"ok": True, "duplicate": False, "service": _car_service_out(row)}
+
+
+@api.get("/admin/vehicles/{vehicle_id}/history")
+async def admin_car_history(vehicle_id: str, admin: Dict = Depends(require_ops)):
+    """Everything on file for one car: its inspections, the work done on it
+    (with the latest date of each kind), and its shift changes."""
+    veh = await _car_in_scope(vehicle_id, admin)
+    checks = [_car_check_out(c) async for c in db.car_checks.find(
+        {"vehicle_id": vehicle_id}, {"_id": 0}).sort("created_at", -1).limit(60)]
+    services = [_car_service_out(sv) async for sv in db.car_services.find(
+        {"vehicle_id": vehicle_id}, {"_id": 0}).sort("service_date", -1).limit(200)]
+    last_done: Dict[str, str] = {}
+    for sv in services:                      # newest first, so the first of each kind wins
+        last_done.setdefault(sv["kind"], sv["service_date"])
+    handovers = [_handover_out(h) async for h in db.handovers.find(
+        {"vehicle_id": vehicle_id}, {"_id": 0}).sort("created_at", -1).limit(30)]
+    return {
+        "vehicle": {"id": veh["id"], "number": veh.get("number"), "model": veh.get("model"),
+                    "hub_id": veh.get("hub_id"), "current_soc": veh.get("current_soc"),
+                    "odometer_km": veh.get("odometer_km")},
+        "check_items": list(CAR_CHECK_ITEMS),
+        "checks": checks,
+        "services": services,
+        "last_done": last_done,
+        "handovers": handovers,
+    }
+
+
+@api.get("/admin/hubs/{hub_id}/car-checks")
+async def admin_hub_car_checks(hub_id: str, limit: int = 100, admin: Dict = Depends(require_ops)):
+    """The hub's recent inspections and service entries across all its cars."""
+    _assert_my_hub(hub_id, admin)
+    n = max(1, min(int(limit), 300))
+    checks = [_car_check_out(c) async for c in db.car_checks.find(
+        {"hub_id": hub_id}, {"_id": 0}).sort("created_at", -1).limit(n)]
+    services = [_car_service_out(sv) async for sv in db.car_services.find(
+        {"hub_id": hub_id}, {"_id": 0}).sort("service_date", -1).limit(n)]
+    return {"checks": checks, "services": services, "check_items": list(CAR_CHECK_ITEMS)}
 
 
 # ---- Live map --------------------------------------------------------------
@@ -5358,9 +5724,11 @@ async def money_ledger(days: int = 14, driver: Dict = Depends(get_driver)):
         events.append({
             "business_date": r["business_date"],
             "at": r.get("occurred_at") or r.get("created_at"),
-            "kind": "deposit" if r["type"] == "deposit" else "digital_fare",
-            "direction": "-",                      # reduces cash in hand
-            "amount": round(float(r.get("amount", 0)), 2),
+            # An undone hand-in is its own row with a negative amount: show it
+            # as the cash coming back, not as a negative deposit.
+            "kind": "deposit_undone" if r.get("reverses") else "deposit" if r["type"] == "deposit" else "digital_fare",
+            "direction": "+" if r.get("reverses") else "-",   # "-" reduces cash in hand
+            "amount": round(abs(float(r.get("amount", 0))), 2),
             "platform": r.get("platform"),
             "status": "settled",
             "source": r.get("source"),
@@ -8554,6 +8922,10 @@ async def _on_startup() -> None:
     await db.vehicle_pings.create_index([("vehicle_id", 1), ("recorded_at", 1)])
     # Latest phone fix / heartbeat per driver (tracking-stopped flag, live map).
     await db.phone_pings.create_index([("driver_id", 1), ("recorded_at", -1)])
+    await db.car_checks.create_index([("vehicle_id", 1), ("created_at", -1)])
+    await db.car_checks.create_index([("hub_id", 1), ("created_at", -1)])
+    await db.car_services.create_index([("vehicle_id", 1), ("service_date", -1)])
+    await db.car_services.create_index([("hub_id", 1), ("service_date", -1)])
     await db.heartbeats.create_index([("driver_id", 1), ("received_at", -1)])
     # Latest-ping-per-vehicle windows on recorded_at across all vehicles, so
     # it needs the timestamp leading. At ~200 vehicles pinging every 4
