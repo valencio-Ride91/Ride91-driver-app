@@ -742,7 +742,7 @@ export interface ShiftBoardRow {
   duty_started_at?: string | null;
   late_minutes?: number | null;
   // Is the alarm really set on the driver's phone?
-  phone?: "ready" | "unknown" | "not_picked_up" | "notifications_off" | "no_alarm_in_app";
+  phone?: "ready" | "unknown" | "not_picked_up" | "notifications_off" | "no_alarm_in_app" | "may_ring_late";
 }
 export interface ShiftBoardData {
   items: ShiftBoardRow[];

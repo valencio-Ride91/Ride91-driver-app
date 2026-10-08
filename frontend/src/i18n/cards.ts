@@ -365,6 +365,16 @@ const en = {
   start_loc_body: "Ride91 needs your location to start duty. Switch location on and allow it for Ride91.",
   open_settings: "Open settings",
   start_fail: "Could not start duty. Please try again.",
+  // ---- location notice, shown before Android's permission prompt ----
+  loc_disc_title: "Ride91 uses your location",
+  loc_disc_lead: "Ride91 Driver collects location data to enable live fleet tracking and duty records, even when the app is closed or not in use.",
+  loc_disc_point_office: "Your fleet office sees where you are on its map.",
+  loc_disc_point_duty: "The place is saved when you start or end duty, switch apps, or charge.",
+  loc_disc_point_always: "This runs all the time while you are signed in. Sign out to stop it.",
+  loc_disc_foot: "Your location is shared only with your fleet office. It is not used for ads.",
+  loc_disc_allow: "Allow location",
+  loc_disc_later: "Not now",
+  alarm_exact_off: "Allow alarms, or your wake-up alarm may ring a few minutes late.",
 
   // ---- shift alarm card (Profile) ----
   alarm_on: "Alarm on",
@@ -792,6 +802,16 @@ const hi: CardText = {
   start_loc_body: "ड्यूटी शुरू करने के लिए Ride91 को आपकी लोकेशन चाहिए। लोकेशन चालू करें और Ride91 को अनुमति दें।",
   open_settings: "सेटिंग खोलें",
   start_fail: "ड्यूटी शुरू नहीं हो सकी। फिर कोशिश करें।",
+  // ---- location notice, shown before Android's permission prompt ----
+  loc_disc_title: "Ride91 आपकी लोकेशन इस्तेमाल करता है",
+  loc_disc_lead: "Ride91 Driver लाइव फ़्लीट ट्रैकिंग और ड्यूटी रिकॉर्ड के लिए लोकेशन डेटा लेता है, ऐप बंद होने या इस्तेमाल में न होने पर भी।",
+  loc_disc_point_office: "आपका फ़्लीट ऑफ़िस नक्शे पर देखता है कि आप कहाँ हैं।",
+  loc_disc_point_duty: "ड्यूटी शुरू या खत्म करने, ऐप बदलने या चार्ज करने की जगह सेव होती है।",
+  loc_disc_point_always: "साइन इन रहने तक यह हर समय चलता है। रोकने के लिए साइन आउट करें।",
+  loc_disc_foot: "आपकी लोकेशन सिर्फ़ आपके फ़्लीट ऑफ़िस के साथ साझा होती है। इसका विज्ञापन के लिए इस्तेमाल नहीं होता।",
+  loc_disc_allow: "लोकेशन की अनुमति दें",
+  loc_disc_later: "अभी नहीं",
+  alarm_exact_off: "अलार्म की अनुमति दें, वरना आपका अलार्म कुछ मिनट देर से बज सकता है।",
 
   // ---- shift alarm card (Profile) ----
   alarm_on: "अलार्म चालू",

@@ -25,6 +25,8 @@ const RN = NativeModules.Ride91Alarms as
       cancel: (scheduleId: string) => Promise<boolean>;
       fireNow: (meta: Record<string, string>) => Promise<boolean>;
       drainPending?: () => Promise<string>;
+      canScheduleExact?: () => Promise<boolean>;
+      openExactAlarmSettings?: () => Promise<boolean>;
       addListener: (name: string) => void;
       removeListeners: (n: number) => void;
     }
@@ -103,6 +105,27 @@ export const alarms = {
       return Array.isArray(list) ? (list as AlarmResponse[]) : [];
     } catch {
       return [];
+    }
+  },
+
+  // May the app ring at the exact minute? On Android 14+ the driver has to
+  // switch this on ("Alarms & reminders"). Without it the alarm still rings,
+  // but Android may hold it back a few minutes.
+  async exactAllowed(): Promise<boolean> {
+    if (!RN?.canScheduleExact) return true;
+    try {
+      return await RN.canScheduleExact();
+    } catch {
+      return true;
+    }
+  },
+
+  // Take the driver to that switch.
+  async openExactSettings(): Promise<void> {
+    try {
+      await RN?.openExactAlarmSettings?.();
+    } catch {
+      // nothing more we can do from here
     }
   },
 

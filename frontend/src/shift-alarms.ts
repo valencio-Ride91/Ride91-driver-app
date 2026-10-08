@@ -118,10 +118,11 @@ export const ShiftAlarmProvider: React.FC<{ children: React.ReactNode; enabled: 
   // something about it changes.
   const reportArmed = useCallback(async (scheduleId: string, native: boolean) => {
     const notifications_ok = await notificationsAllowed();
-    const key = `${scheduleId}|${native}|${notifications_ok}`;
+    const exact_ok = await alarms.exactAllowed();
+    const key = `${scheduleId}|${native}|${notifications_ok}|${exact_ok}`;
     if (lastReportedRef.current === key) return;
     try {
-      await api.post("/shift-alarm/armed", { schedule_id: scheduleId, native, notifications_ok });
+      await api.post("/shift-alarm/armed", { schedule_id: scheduleId, native, notifications_ok, exact_ok });
       lastReportedRef.current = key;
     } catch {
       // older server or offline — try again on the next refresh

@@ -38,6 +38,7 @@ const PHONE: Record<string, { label: string; tone: string; hint: string }> = {
   not_picked_up: { label: "Not on phone yet", tone: "amber", hint: "The app has not fetched this shift. The driver must open the app once after the shift time is set." },
   notifications_off: { label: "Notifications off", tone: "alert", hint: "Notifications are switched off for the app, so the alarm cannot show. The driver must allow them (Profile > Shift alarm)." },
   no_alarm_in_app: { label: "Old app, no alarm", tone: "alert", hint: "This phone has an app version without the alarm. Install the latest app." },
+  may_ring_late: { label: "Set, may ring late", tone: "amber", hint: "The alarm is set, but the phone has not allowed exact alarms, so Android may ring it a few minutes late. The driver should tap Allow under Profile > Shift alarm." },
 };
 
 function clock(iso?: string | null) {

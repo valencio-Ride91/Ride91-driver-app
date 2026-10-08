@@ -33,6 +33,7 @@ import * as Location from "expo-location";
 import NetInfo from "@react-native-community/netinfo";
 
 import { api } from "@/src/api";
+import { LocationDisclosure } from "@/src/components/LocationDisclosure";
 import { LOCATION_TASK } from "@/src/locationTask";
 import { getCardText } from "@/src/i18n/cards";
 
@@ -45,7 +46,9 @@ interface TrackingCtx {
   permissionOk: boolean;
   /** Permission granted AND location switched on in the phone. */
   locationOk: boolean;
-  requestPermission: () => Promise<boolean>;
+  /** Ask for location. `byDriver` false = the app's own ask on sign-in, which
+   *  shows the notice at most once per run so it never nags. */
+  requestPermission: (byDriver?: boolean) => Promise<boolean>;
   /** Get location working, asking the driver for whatever is missing.
    *  Resolves true once permission is granted and location is on. */
   ensureLocation: () => Promise<boolean>;
@@ -76,6 +79,28 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const askedBackground = useRef(false);
   const webOk = useRef(false);
+
+  // The notice that must come before Android's location prompt. `answer`
+  // holds the waiting caller while the notice is on screen.
+  const [answer, setAnswer] = useState<((allow: boolean) => void) | null>(null);
+  const shownThisRun = useRef(false);
+  const disclose = useCallback(async (byDriver: boolean): Promise<boolean> => {
+    try {
+      if ((await Location.getForegroundPermissionsAsync()).status === "granted") return true;
+    } catch {
+      // fall through and show the notice
+    }
+    // Shown once per run when the app is asking on its own; always when the
+    // driver asked (the "Location off" pill, Start duty).
+    if (!byDriver && shownThisRun.current) return false;
+    shownThisRun.current = true;
+    return new Promise<boolean>((resolve) => {
+      setAnswer(() => (allow: boolean) => {
+        setAnswer(null);
+        resolve(allow);
+      });
+    });
+  }, []);
 
   const webLocate = useCallback(async () => {
     // Best-effort on web preview
@@ -152,8 +177,13 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     return perm && services;
   }, [enabled, startBackground]);
 
-  const requestPermission = useCallback(async () => {
+  const requestPermission = useCallback(async (byDriver = true) => {
     if (Platform.OS === "web") return webLocate();
+    // Tell the driver what is collected and why, and get a yes, first.
+    if (!(await disclose(byDriver))) {
+      setPermissionOk(false);
+      return false;
+    }
     let ok = false;
     try {
       ok = (await Location.requestForegroundPermissionsAsync()).status === "granted";
@@ -174,7 +204,7 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
       }
     }
     return ok;
-  }, [webLocate]);
+  }, [webLocate, disclose]);
 
   const ensureLocation = useCallback(async () => {
     if (Platform.OS === "web") return webLocate();
@@ -221,7 +251,7 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
       setServiceUp(null);
       return;
     }
-    requestPermission().then(() => checkStatus());
+    requestPermission(false).then(() => checkStatus());
     const sub = AppState.addEventListener("change", (s) => {
       if (s === "active") checkStatus();
     });
@@ -317,7 +347,12 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     () => ({ health, lat: pos.lat, lng: pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings }),
     [health, pos.lat, pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings],
   );
-  return React.createElement(Ctx.Provider, { value }, children);
+  return React.createElement(
+    Ctx.Provider,
+    { value },
+    children,
+    React.createElement(LocationDisclosure, { visible: answer !== null, onAnswer: (allow: boolean) => answer?.(allow) }),
+  );
 };
 
 export const useTracking = (): TrackingCtx => {

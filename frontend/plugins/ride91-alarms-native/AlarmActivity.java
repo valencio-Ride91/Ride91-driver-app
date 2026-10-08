@@ -145,8 +145,7 @@ public class AlarmActivity extends Activity {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
                 android.app.PendingIntent pi = android.app.PendingIntent.getBroadcast(this,
                         (scheduleId + "-snooze").hashCode(), i, flags);
-                am.setAlarmClock(new android.app.AlarmManager.AlarmClockInfo(
-                        System.currentTimeMillis() + SNOOZE_MS, pi), pi);
+                Ride91AlarmsModule.setAlarm(am, System.currentTimeMillis() + SNOOZE_MS, pi);
             } catch (Throwable ignored) {
                 // Could not re-arm (e.g. exact alarms disallowed); still record the snooze below.
             }

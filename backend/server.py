@@ -1816,6 +1816,8 @@ async def _shift_status(driver: Dict, now: datetime) -> Dict[str, Any]:
         phone = "no_alarm_in_app"        # an app build without the alarm
     elif arm.get("notifications_ok") is False:
         phone = "notifications_off"      # the alarm cannot show itself
+    elif arm.get("exact_ok") is False:
+        phone = "may_ring_late"          # set, but Android may hold it back a few minutes
     else:
         phone = "ready"
 
@@ -1840,6 +1842,7 @@ class AlarmArmedIn(BaseModel):
     schedule_id: str
     native: bool                          # the app build has the alarm and set it
     notifications_ok: Optional[bool] = None
+    exact_ok: Optional[bool] = None       # Android lets it ring at the exact minute
 
 
 @api.post("/shift-alarm/armed")
@@ -1851,7 +1854,7 @@ async def shift_alarm_armed(body: AlarmArmedIn, driver: Dict = Depends(get_drive
     await db.alarm_arming.update_one(
         {"driver_id": driver["id"], "schedule_id": body.schedule_id},
         {"$set": {"native": body.native, "notifications_ok": body.notifications_ok,
-                  "armed_at": iso(now_utc())}},
+                  "exact_ok": body.exact_ok, "armed_at": iso(now_utc())}},
         upsert=True,
     )
     return {"ok": True}

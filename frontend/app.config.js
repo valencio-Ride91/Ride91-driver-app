@@ -12,5 +12,11 @@ module.exports = ({ config }) => {
       config: { ...(config.android && config.android.config), googleMaps: { apiKey: key } },
     };
   }
+  // Google Play needs a higher versionCode on every upload. Set
+  // ANDROID_VERSION_CODE at prebuild to stamp one without editing app.json.
+  const code = parseInt(process.env.ANDROID_VERSION_CODE || "", 10);
+  if (code > 0) {
+    config.android = { ...config.android, versionCode: code };
+  }
   return config;
 };

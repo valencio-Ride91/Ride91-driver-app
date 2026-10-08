@@ -6,7 +6,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Modal,
   Platform,
   Pressable,
@@ -168,11 +167,8 @@ const DocEditor: React.FC<{ doc: DocRow | null; onClose: (saved: boolean) => voi
 
   const pickImage = useCallback(async () => {
     try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert(c.doc_perm_title, c.doc_perm_body);
-        return;
-      }
+      // The system photo picker hands over only the picture the driver
+      // chooses, so the app asks for no storage or media permission.
       const res = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         base64: true,

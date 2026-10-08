@@ -20,7 +20,11 @@ import org.json.JSONObject;
 
 /**
  * Native bridge for the mandatory shift alarm.
- *  - schedule(atMs, meta): AlarmManager.setAlarmClock so it survives Doze.
+ *  - schedule(atMs, meta): AlarmManager.setAlarmClock so it survives Doze;
+ *    when the driver has not allowed exact alarms it still rings, as close to
+ *    the time as Android permits (see setAlarm).
+ *  - canScheduleExact() / openExactAlarmSettings(): check that, and take the
+ *    driver to the switch.
  *  - cancel(scheduleId): cancels a pending alarm.
  *  - fireNow(meta): fires the alarm right now for testing.
  *  - drainPending(): hands JS every response the driver has given since it
@@ -56,6 +60,53 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return NAME;
+    }
+
+    /** From Android 12 exact alarms need the user's say-so; before that they are always allowed. */
+    static boolean canExact(AlarmManager am) {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms();
+    }
+
+    /**
+     * Ring at atMs. Exactly, when exact alarms are allowed. Otherwise with a
+     * wake-up alarm Android may hold back by some minutes while the phone
+     * sleeps - late is better than a wake-up call that never comes.
+     * Returns whether the exact kind was used.
+     */
+    static boolean setAlarm(AlarmManager am, long atMs, PendingIntent pi) {
+        if (canExact(am)) {
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(atMs, pi), pi);
+            return true;
+        }
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
+        return false;
+    }
+
+    @ReactMethod
+    public void canScheduleExact(Promise promise) {
+        try {
+            Context ctx = getReactApplicationContext();
+            promise.resolve(canExact((AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE)));
+        } catch (Throwable t) {
+            promise.resolve(true);   // unknown: do not nag the driver
+        }
+    }
+
+    /** Open Android's "Alarms & reminders" switch for this app. */
+    @ReactMethod
+    public void openExactAlarmSettings(Promise promise) {
+        try {
+            Context ctx = getReactApplicationContext();
+            android.net.Uri pkg = android.net.Uri.parse("package:" + ctx.getPackageName());
+            Intent i = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    ? new Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, pkg)
+                    : new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            ctx.startActivity(i);
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.resolve(false);
+        }
     }
 
     /** Record a response durably, then nudge JS if it happens to be running. */
@@ -110,8 +161,7 @@ public class Ride91AlarmsModule extends ReactContextBaseJavaModule {
             String title = meta.hasKey("title") ? meta.getString("title") : "Shift starts in 1 hour";
             String lang = meta.hasKey("lang") ? meta.getString("lang") : "en";
             PendingIntent pi = pending(ctx, scheduleId, driverId, title, lang);
-            AlarmManager.AlarmClockInfo info = new AlarmManager.AlarmClockInfo((long) atMs, pi);
-            am.setAlarmClock(info, pi);
+            setAlarm(am, (long) atMs, pi);
             promise.resolve(scheduleId);
         } catch (Throwable t) {
             promise.reject("schedule_failed", t.getMessage(), t);

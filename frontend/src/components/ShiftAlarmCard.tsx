@@ -5,13 +5,14 @@
 // and is anything stopping it (an old app build, or notifications switched
 // off). "Test the alarm" rings it once so they can hear it for themselves.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, PermissionsAndroid, Platform, StyleSheet, Text, TouchableOpacity, View, ViewStyle } from "react-native";
 
 import { Card } from "@/src/components/ui";
 import { formatDuration, formatIST, formatISTTime } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
 import { useShiftAlarm } from "@/src/shift-alarms";
+import { alarms } from "@/src/alarms";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 const LIVE_TINT = "#E3F1EA";
@@ -27,6 +28,8 @@ export const ShiftAlarmCard: React.FC<{ style?: ViewStyle }> = ({ style }) => {
   const { next, refresh, testFireNow, nativeAvailable } = useShiftAlarm();
   const [now, setNow] = useState(() => Date.now());
   const [notifOk, setNotifOk] = useState(true);
+  const [exactOk, setExactOk] = useState(true);
+  const exactWas = useRef(true);
 
   // Keep the countdown moving.
   useEffect(() => {
@@ -53,6 +56,29 @@ export const ShiftAlarmCard: React.FC<{ style?: ViewStyle }> = ({ style }) => {
       sub.remove();
     };
   }, []);
+
+  // May the alarm ring at the exact minute? Re-checked whenever the driver
+  // comes back to the app, e.g. from the phone's "Alarms & reminders" switch.
+  // Once it flips to allowed, re-arm so the alarm becomes the exact kind.
+  useEffect(() => {
+    let alive = true;
+    const check = () => {
+      alarms.exactAllowed().then((ok) => {
+        if (!alive) return;
+        if (ok && !exactWas.current) refresh();
+        exactWas.current = ok;
+        setExactOk(ok);
+      });
+    };
+    check();
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") check();
+    });
+    return () => {
+      alive = false;
+      sub.remove();
+    };
+  }, [refresh]);
 
   const allowNotif = useCallback(async () => {
     try {
@@ -113,6 +139,13 @@ export const ShiftAlarmCard: React.FC<{ style?: ViewStyle }> = ({ style }) => {
         <View style={[styles.warnRow, styles.warnAmber]} testID="alarm-notif-off">
           <Text style={styles.warnRowText}>{c.alarm_notif_off}</Text>
           <TouchableOpacity style={styles.allowBtn} onPress={allowNotif} testID="alarm-allow-notif">
+            <Text style={styles.allowBtnText}>{c.alarm_allow}</Text>
+          </TouchableOpacity>
+        </View>
+      ) : !exactOk ? (
+        <View style={[styles.warnRow, styles.warnAmber]} testID="alarm-exact-off">
+          <Text style={styles.warnRowText}>{c.alarm_exact_off}</Text>
+          <TouchableOpacity style={styles.allowBtn} onPress={() => alarms.openExactSettings()} testID="alarm-allow-exact">
             <Text style={styles.allowBtnText}>{c.alarm_allow}</Text>
           </TouchableOpacity>
         </View>

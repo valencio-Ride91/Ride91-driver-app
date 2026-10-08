@@ -18,9 +18,11 @@ const withPermissionsAndComponents = (config) => {
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(cfg.modResults);
     const manifest = cfg.modResults.manifest;
     manifest["uses-permission"] = manifest["uses-permission"] || [];
+    // SCHEDULE_EXACT_ALARM only. USE_EXACT_ALARM is reserved by Google Play
+    // for alarm-clock and calendar apps; the native module copes when the
+    // driver has not allowed exact alarms (see Ride91AlarmsModule.setAlarm).
     const perms = [
       "android.permission.SCHEDULE_EXACT_ALARM",
-      "android.permission.USE_EXACT_ALARM",
       "android.permission.USE_FULL_SCREEN_INTENT",
       "android.permission.RECEIVE_BOOT_COMPLETED",
       "android.permission.WAKE_LOCK",
