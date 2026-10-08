@@ -136,6 +136,7 @@ export default function DriverPage() {
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1} testID="hub-driver-name">{d?.name ?? "—"}</Text>
           {tag ? <Tag tone={tag.tone}>{tag.label}</Tag> : null}
+          {d ? <Btn label={t.edit} small kind="ghost" onPress={() => router.push(`/driver-form?id=${d.driver_id}` as never)} testID="hub-driver-edit" /> : null}
         </View>
 
         <ScrollView contentContainerStyle={hubStyles.scroll} keyboardShouldPersistTaps="handled">

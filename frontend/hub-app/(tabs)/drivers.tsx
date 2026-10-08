@@ -69,7 +69,7 @@ export default function Drivers() {
 
   return (
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
-      <HubHeader title={t.tab_drivers} />
+      <HubHeader title={t.tab_drivers} right={<Btn label={t.add_driver} small onPress={() => router.push("/driver-form" as never)} testID="hub-add-driver" />} />
       <View style={styles.switch}>
         {(["list", "map"] as const).map((v) => (
           <TouchableOpacity key={v} style={[styles.seg, view === v ? styles.segOn : null]} onPress={() => setView(v)} testID={`hub-drivers-${v}`}>

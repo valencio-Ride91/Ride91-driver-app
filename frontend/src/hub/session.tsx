@@ -61,6 +61,7 @@ export const hubApi = {
   get: <T,>(p: string) => request<T>("GET", p),
   post: <T,>(p: string, b?: unknown) => request<T>("POST", p, b ?? {}),
   patch: <T,>(p: string, b?: unknown) => request<T>("PATCH", p, b ?? {}),
+  del: <T,>(p: string) => request<T>("DELETE", p),
 };
 
 interface Ctx {
