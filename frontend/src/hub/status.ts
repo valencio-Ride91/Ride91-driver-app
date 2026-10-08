@@ -2,6 +2,7 @@
 // and the tag beside their name. Shared by the list and the driver's page.
 import { formatDuration } from "@/src/i18n";
 import { HubText } from "@/src/hub/text";
+import type { PinKind } from "@/src/hub/mapTypes";
 import { HubDriver } from "@/src/hub/today";
 import { STATUS_TONE, Tone } from "@/src/hub/ui";
 import { colors, platformLabels } from "@/src/theme";
@@ -32,12 +33,13 @@ export function seenText(minutes: number | null | undefined, t: HubText): string
   return t.seen_day(Math.round(minutes / 1440));
 }
 
-// The colours of the dots on the map, also used by its legend.
-export const MAP_COLORS = { live: colors.live, quiet: "#C98A00", off: colors.muted };
+// The colours of the dots on the map, as shown in its legend. The dots
+// themselves are the images in assets/images/hub-map, in the same colours.
+export const MAP_COLORS: Record<PinKind, string> = { live: colors.live, quiet: "#C98A00", off: colors.muted };
 
 // A driver's dot: green while on duty and reporting, amber when on duty but
-// the phone has gone quiet, grey (and faded) for an off-duty last position.
-export function dotFor(d: HubDriver): { color: string; faded: boolean } {
-  if (!d.on_duty) return { color: MAP_COLORS.off, faded: true };
-  return { color: d.tracking === "stopped" ? MAP_COLORS.quiet : MAP_COLORS.live, faded: false };
+// the phone has gone quiet, grey for an off-duty last position.
+export function pinKind(d: HubDriver): PinKind {
+  if (!d.on_duty) return "off";
+  return d.tracking === "stopped" ? "quiet" : "live";
 }

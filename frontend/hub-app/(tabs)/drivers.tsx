@@ -2,9 +2,10 @@
 // on a map. Tap one for their page (duty, activity, cash, shift time,
 // messages).
 //
-// The map shows where each driver's phone was last heard from: green while on
-// duty and reporting, amber when on duty but quiet for over ten minutes, grey
-// for an off-duty driver's last position. The square is the hub itself.
+// The map (Google Maps) shows where each driver's phone was last heard from:
+// green while on duty and reporting, amber when on duty but quiet for over ten
+// minutes, grey for an off-duty driver's last position. The square is the hub
+// itself. Tapping a dot brings up that driver's card, with Call and Open.
 import React, { useCallback, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -12,11 +13,11 @@ import { useRouter } from "expo-router";
 
 import { formatINR } from "@/src/i18n";
 import { HubMap } from "@/src/hub/HubMap";
-import { MapData, MapLabels } from "@/src/hub/mapHtml";
-import { MAP_COLORS, doing, dotFor, seenText, tagFor } from "@/src/hub/status";
+import type { MapData } from "@/src/hub/mapTypes";
+import { MAP_COLORS, doing, pinKind, seenText, tagFor } from "@/src/hub/status";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Btn, Empty, HubHeader, Tag, hubStyles } from "@/src/hub/ui";
+import { Btn, Empty, HubHeader, Tag, callPhone, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 export default function Drivers() {
@@ -26,8 +27,7 @@ export default function Drivers() {
   const [q, setQ] = useState("");
   const [view, setView] = useState<"list" | "map">("list");
   const [refreshing, setRefreshing] = useState(false);
-  const [mapFailed, setMapFailed] = useState(false);
-  const [mapKey, setMapKey] = useState(0);        // bumped to load the map page afresh
+  const [picked, setPicked] = useState<string | null>(null);     // the driver whose dot was tapped
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -46,19 +46,16 @@ export default function Drivers() {
   const mapData = useMemo<MapData>(() => {
     const pins = (today?.drivers ?? [])
       .filter((d) => typeof d.lat === "number" && typeof d.lng === "number")
-      .map((d) => ({
-        id: d.driver_id, lat: d.lat as number, lng: d.lng as number,
-        name: d.name ?? "—", line: doing(d, t), seen: seenText(d.seen_minutes, t), ...dotFor(d),
-      }));
+      .map((d) => ({ id: d.driver_id, lat: d.lat as number, lng: d.lng as number, kind: pinKind(d) }));
     const h = today?.hub;
-    const hub = h && typeof h.lat === "number" && typeof h.lng === "number"
-      ? { lat: h.lat, lng: h.lng, name: h.name ?? t.map_hub } : null;
+    const hub = h && typeof h.lat === "number" && typeof h.lng === "number" ? { lat: h.lat, lng: h.lng } : null;
     return { pins, hub };
-  }, [today, t]);
+  }, [today]);
 
-  const labels = useMemo<MapLabels>(() => ({ open: t.map_open, hub: t.map_hub, fit: t.map_fit, failed: t.map_failed }), [t]);
   const openDriver = useCallback((id: string) => router.push(`/driver/${id}` as never), [router]);
-  const onMapFailed = useCallback(() => setMapFailed(true), []);
+  // Read from the latest data each time, so the card keeps up while it is open.
+  const pickedDriver = (picked && today?.drivers.find((d) => d.driver_id === picked && typeof d.lat === "number")) || null;
+  const pickedTag = pickedDriver ? tagFor(pickedDriver, t) : null;
 
   return (
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
@@ -77,14 +74,23 @@ export default function Drivers() {
             {!today ? t.loading : mapData.pins.length === 0 ? t.map_none : t.map_count(mapData.pins.length, today.drivers.length)}
           </Text>
           <View style={styles.map}>
-            {mapFailed ? (
-              <View style={styles.failed}>
-                <Text style={styles.failedText} testID="hub-map-failed">{t.map_failed}</Text>
-                <Btn label={t.map_retry} small kind="ghost" onPress={() => { setMapFailed(false); setMapKey((k) => k + 1); }} testID="hub-map-retry" />
+            <HubMap data={mapData} selectedId={pickedDriver?.driver_id ?? null} onSelect={setPicked} fitLabel={t.map_fit} />
+            {pickedDriver && pickedTag ? (
+              <View style={styles.picked} testID="hub-map-card">
+                <View style={styles.pickedTop}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={hubStyles.name}>{pickedDriver.name ?? "—"}</Text>
+                    <Text style={hubStyles.sub}>{doing(pickedDriver, t)}</Text>
+                    <Text style={hubStyles.sub} testID="hub-map-seen">{seenText(pickedDriver.seen_minutes, t)}</Text>
+                  </View>
+                  <Tag tone={pickedTag.tone}>{pickedTag.label}</Tag>
+                </View>
+                <View style={styles.pickedBtns}>
+                  <Btn label={t.call} small kind="ghost" onPress={() => callPhone(pickedDriver.phone)} style={{ flex: 1 }} testID="hub-map-call" />
+                  <Btn label={t.map_open} small onPress={() => openDriver(pickedDriver.driver_id)} style={{ flex: 1 }} testID="hub-map-open" />
+                </View>
               </View>
-            ) : (
-              <HubMap key={mapKey} data={mapData} labels={labels} onOpen={openDriver} onFailed={onMapFailed} />
-            )}
+            ) : null}
           </View>
           <View style={styles.legend}>
             {([["live", t.map_live], ["quiet", t.map_quiet], ["off", t.map_off]] as const).map(([k, label]) => (
@@ -148,8 +154,12 @@ const styles = StyleSheet.create({
   segTextOn: { color: colors.onBrand },
   count: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginHorizontal: spacing.md, marginTop: spacing.sm, marginBottom: 6 },
   map: { flex: 1, marginHorizontal: spacing.md, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, overflow: "hidden", backgroundColor: colors.paper },
-  failed: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.lg, gap: spacing.md },
-  failedText: { fontFamily: fonts.ui, fontSize: 14, color: colors.muted, textAlign: "center" },
+  picked: {
+    position: "absolute", left: 10, right: 10, bottom: 10, padding: spacing.md, elevation: 3,
+    backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line,
+  },
+  pickedTop: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  pickedBtns: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm },
   legend: { flexDirection: "row", flexWrap: "wrap", gap: spacing.md, rowGap: 4, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },

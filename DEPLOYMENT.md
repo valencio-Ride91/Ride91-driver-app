@@ -94,7 +94,7 @@ The same `frontend/` project builds a second app for hub managers:
 | Name / package | Ride91 Driver / `com.ride91.driver` | Ride91 Hub / `com.ride91.hub` |
 | Screens | `frontend/app/` | `frontend/hub-app/` |
 | Own code | `src/` | `src/hub/` (shares theme, text helpers, UI parts with the driver app) |
-| Permissions | location, camera, microphone, alarms, notifications | internet only |
+| Permissions | location, camera, microphone, alarms, notifications | camera only (photos at shift change) |
 | Signs in with | driver phone + password | an admin-panel account (hub manager, or any senior role, who then picks a hub) |
 
 `app.config.js` does the switching. `APP_VARIANT=hub` must be set for **both**
@@ -106,13 +106,30 @@ turn; keep each one's generated project by renaming it (`android-driver/`,
 
 ```bash
 cd frontend
-APP_VARIANT=hub ANDROID_VERSION_CODE=<n> CI=1 npx expo prebuild --platform android --clean --no-install
+APP_VARIANT=hub GOOGLE_MAPS_API_KEY=<the Maps key> ANDROID_VERSION_CODE=<n> CI=1 npx expo prebuild --platform android --clean --no-install
 cd android
 APP_VARIANT=hub EXPO_PUBLIC_BACKEND_URL=<backend url> ./gradlew assembleRelease bundleRelease   -PreactNativeArchitectures=arm64-v8a  <the same -Pandroid.injected.signing.* flags as above>
 ```
 
 Everything it shows comes from `GET /api/admin/hubs/<id>/today` plus the
 existing admin endpoints, all of which pin a hub manager to their own hub.
+
+**Its map.** The Drivers tab has a Google map of where each driver's phone was
+last heard from. It uses the same Maps key as the driver app, so the key must
+also list `com.ride91.hub` with each fingerprint the hub app is signed by (the
+upload key now, Play's app-signing key after the first upload). Until it does,
+the map is a blank grid with the dots on it. `gcloud ... update` replaces the
+whole list, so name every app each time:
+
+```bash
+gcloud services api-keys update <key id> \
+  --allowed-application=sha1_fingerprint=<upload SHA-1>,package_name=com.ride91.driver \
+  --allowed-application=sha1_fingerprint=<upload SHA-1>,package_name=com.ride91.hub \
+  --api-target=service=maps-android-backend.googleapis.com
+```
+
+A hub shows on the map once it has a location: admin panel → Hubs → Edit →
+Location.
 
 ---
 

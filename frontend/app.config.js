@@ -8,15 +8,16 @@
 // The hub manager's app shares the design, text helpers and API code in ./src
 // but few of the driver app's phone features: it uses the camera (photos of a
 // car at shift change) and asks for no location, no microphone and no alarms.
-// Its map of the hub's drivers is OpenStreetMap in a web view, so it needs no
-// Maps key either. Set APP_VARIANT=hub for BOTH `expo prebuild` and the Gradle
+// Its map of the hub's drivers is Google Maps, like the driver app's, so it
+// needs the same Maps key. Set APP_VARIANT=hub for BOTH `expo prebuild` and the Gradle
 // build (the JS bundle is made during the Gradle build and picks its routes
 // folder from this file).
 //
 // The Google Maps key is kept out of the repository: app.json carries a
 // placeholder, and the real key is read from the GOOGLE_MAPS_API_KEY
 // environment variable when the native project is generated (expo prebuild).
-// Without the variable the placeholder stays and the Home map renders blank.
+// Without the variable the placeholder stays and the maps render blank. The
+// key must list each app it is used by (package name + signing SHA-1).
 
 const HUB_BLOCKED_PERMISSIONS = [
   "android.permission.ACCESS_FINE_LOCATION",
@@ -45,6 +46,8 @@ function hubVariant(config) {
       adaptiveIcon: { ...config.android.adaptiveIcon, backgroundColor: "#434343" },
       package: "com.ride91.hub",
       versionCode: config.android.versionCode,
+      // Carries the Maps key placeholder; the real key is set below.
+      config: config.android.config,
       permissions: ["CAMERA"],
       blockedPermissions: [...(config.android.blockedPermissions || []), ...HUB_BLOCKED_PERMISSIONS],
     },
@@ -65,7 +68,7 @@ module.exports = ({ config }) => {
   if (hub) config = hubVariant(config);
 
   const key = process.env.GOOGLE_MAPS_API_KEY;
-  if (key && !hub) {
+  if (key) {
     config.android = {
       ...config.android,
       config: { ...(config.android && config.android.config), googleMaps: { apiKey: key } },
