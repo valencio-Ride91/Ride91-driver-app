@@ -84,6 +84,38 @@ draw-over-other-apps, `USE_EXACT_ALARM`.
 
 ---
 
+## The hub manager app (Ride91 Hub)
+
+The same `frontend/` project builds a second app for hub managers:
+
+| | Driver app | Hub manager app |
+|---|---|---|
+| Build switch | (none) | `APP_VARIANT=hub` |
+| Name / package | Ride91 Driver / `com.ride91.driver` | Ride91 Hub / `com.ride91.hub` |
+| Screens | `frontend/app/` | `frontend/hub-app/` |
+| Own code | `src/` | `src/hub/` (shares theme, text helpers, UI parts with the driver app) |
+| Permissions | location, camera, microphone, alarms, notifications | internet only |
+| Signs in with | driver phone + password | an admin-panel account (hub manager, or any senior role, who then picks a hub) |
+
+`app.config.js` does the switching. `APP_VARIANT=hub` must be set for **both**
+steps of a build: the prebuild (name, package, permissions, icon tile) and the
+Gradle build (the JS bundle is made there and takes its screens folder from the
+same setting). There is one `android/` folder, so the two apps are generated in
+turn; keep each one's generated project by renaming it (`android-driver/`,
+`android-hub/` are git-ignored for this) rather than regenerating every time.
+
+```bash
+cd frontend
+APP_VARIANT=hub ANDROID_VERSION_CODE=<n> CI=1 npx expo prebuild --platform android --clean --no-install
+cd android
+APP_VARIANT=hub EXPO_PUBLIC_BACKEND_URL=<backend url> ./gradlew assembleRelease bundleRelease   -PreactNativeArchitectures=arm64-v8a  <the same -Pandroid.injected.signing.* flags as above>
+```
+
+Everything it shows comes from `GET /api/admin/hubs/<id>/today` plus the
+existing admin endpoints, all of which pin a hub manager to their own hub.
+
+---
+
 ## Prerequisites (once per machine / account)
 
 ```bash

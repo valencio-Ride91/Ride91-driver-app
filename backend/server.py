@@ -3355,6 +3355,104 @@ async def admin_driver_duty(
     return summary
 
 
+async def _assert_in_my_hub(driver_id: Optional[str], admin: Dict) -> None:
+    """A hub_manager may only act on their own hub's drivers; anyone senior
+    passes. Raises 403 otherwise (also when the driver no longer exists)."""
+    scope = hub_scope(admin)
+    if not scope:
+        return
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "hub_id": 1, "vehicle_id": 1})
+    await _assert_driver_in_scope(d or {}, scope)
+
+
+# What needs the hub manager, most urgent first.
+_ATTENTION_ORDER = {"not_coming": 0, "not_started": 1, "no_answer": 2, "late": 3,
+                    "tracking_stopped": 4, "over_cash_limit": 5}
+
+
+@api.get("/admin/hubs/{hub_id}/today")
+async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
+    """Everything the hub manager's phone opens on, in one call: each driver's
+    shift, duty, tracking and cash; the short list of things that need action;
+    and the counts behind the app's badges. Hub-managers may only open their
+    own hub."""
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+    hub = await db.hubs.find_one({"id": hub_id}, {"_id": 0, "id": 1, "name": 1})
+    if not hub:
+        raise HTTPException(404, "hub_not_found")
+    ids = await _hub_driver_ids(hub_id)
+    now = now_utc()
+    bd = business_date_now()
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}, "archived": {"$ne": True}}, {"_id": 0, "password_hash": 0})]
+    live_ids = [d["id"] for d in drivers]
+    veh = {v["id"]: v async for v in db.vehicles.find({"hub_id": hub_id}, {"_id": 0, "id": 1, "number": 1})}
+    balances = await _driver_balances(live_ids)
+
+    rows: List[Dict[str, Any]] = []
+    attention: List[Dict[str, Any]] = []
+    shift_counts: Dict[str, int] = {}
+    for d in sorted(drivers, key=lambda x: (x.get("name") or "").lower()):
+        did = d["id"]
+        shift = await _shift_status(d, now)
+        duty = await _duty_summary(did, d.get("vehicle_id"), bd)
+        track = await _tracking_status(did, duty["on_duty"], await _last_phone_ping(did))
+        bal = balances.get(did, {})
+        shift_counts[shift["status"]] = shift_counts.get(shift["status"], 0) + 1
+        row = {
+            "driver_id": did, "name": d.get("name"), "phone": d.get("phone"),
+            "shift_type": d.get("shift_type") or "day", "active": d.get("active", True),
+            "shift_start_time": d.get("shift_start_time"),
+            "vehicle_number": veh.get(d.get("vehicle_id"), {}).get("number"),
+            "shift_status": shift["status"],
+            "shift_start": shift.get("shift_start"),
+            "reason_code": shift.get("reason_code"), "reason_note": shift.get("reason_note"),
+            "back_by": shift.get("back_by"),
+            "duty_started_at": shift.get("duty_started_at"), "late_minutes": shift.get("late_minutes"),
+            "on_duty": duty["on_duty"], "current_platforms": duty["current_platforms"],
+            "current_state": duty["current_state"],
+            "on_duty_seconds": duty["on_duty_seconds"], "working_seconds": duty["working_seconds"],
+            "tracking": track.get("tracking"), "tracking_reason": track.get("reason"),
+            "you_owe": bal.get("you_owe", 0.0), "over_limit": bal.get("over_limit", False),
+        }
+        rows.append(row)
+        base = {"driver_id": did, "name": d.get("name"), "phone": d.get("phone")}
+        if shift["status"] in ("not_coming", "no_answer", "late", "not_started"):
+            attention.append({**base, "kind": shift["status"], "shift_start": shift.get("shift_start"),
+                              "reason_code": shift.get("reason_code"), "reason_note": shift.get("reason_note"),
+                              "back_by": shift.get("back_by")})
+        if track.get("tracking") == "stopped":
+            attention.append({**base, "kind": "tracking_stopped", "reason": track.get("reason")})
+        if bal.get("over_limit"):
+            attention.append({**base, "kind": "over_cash_limit", "amount": bal.get("you_owe", 0.0)})
+    attention.sort(key=lambda a: _ATTENTION_ORDER.get(a["kind"], 9))
+
+    in_hub = {"driver_id": {"$in": live_ids or ["_none"]}}
+    return {
+        "hub": {"id": hub["id"], "name": hub.get("name")},
+        "business_date": bd,
+        "server_ts": iso(now),
+        "drivers": rows,
+        "attention": attention,
+        "counts": {
+            "drivers": len(rows),
+            "on_duty": sum(1 for r in rows if r["on_duty"]),
+            "shift": shift_counts,
+            "cash_owed": round(sum(r["you_owe"] for r in rows), 2),
+            "over_limit": sum(1 for r in rows if r["over_limit"]),
+            "withdrawals_pending": await db.salary_withdrawals.count_documents(
+                {**in_hub, "state": {"$in": ["pending", "paying"]}}),
+            "requests_pending": await db.requests.count_documents({**in_hub, "state": "pending"}),
+            "unread_messages": await db.notifications.count_documents(
+                {**in_hub, "direction": "from_driver", "read": False}),
+        },
+        "cash_limit": get_setting("cash_limit", CASH_LIMIT),
+        "razorpayx_ready": _razorpayx_configured(),
+    }
+
+
 @api.get("/admin/hubs/{hub_id}/activity")
 async def admin_hub_activity(
     hub_id: str, date: Optional[str] = None, admin: Dict = Depends(require_ops)
@@ -4157,17 +4255,19 @@ async def admin_set_driver_earnings(
 # ---------------------------------------------------------------------------
 @api.post("/admin/drivers/{driver_id}/cash-deposit")
 async def admin_record_cash_deposit(
-    driver_id: str, body: ManualDepositIn, admin: Dict = Depends(require_write)
+    driver_id: str, body: ManualDepositIn, admin: Dict = Depends(require_ops)
 ):
     """Record cash a driver handed over off-app (hub, ops, bank slip).
 
     Kept deliberately narrow: ops auth, a mandatory reason for the audit
     trail, and idempotent on (driver_id, reference) so a double-submit from
-    the admin panel cannot credit the same hand-in twice.
+    the admin panel cannot credit the same hand-in twice. A hub_manager may
+    record cash for their own hub's drivers only.
     """
-    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1})
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not driver:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(driver, hub_scope(admin))
     if body.amount <= 0:
         raise HTTPException(400, "amount_must_be_positive")
 
@@ -4231,7 +4331,7 @@ class RequestDecisionIn(BaseModel):
 
 
 @api.get("/admin/cash")
-async def admin_cash(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_admin)):
+async def admin_cash(hub_id: Optional[str] = None, admin: Dict = Depends(get_admin)):
     """Fleet cash reconciliation: per driver, settled platform cash collected
     (to yesterday) minus trusted deposits paid in. Reuses the single balance
     rule in `_driver_balances` so this never drifts from the driver's screen.
@@ -4279,7 +4379,7 @@ async def admin_cash(hub_id: Optional[str] = None, admin: Dict = Depends(fleet_a
 @api.get("/admin/requests")
 async def admin_requests(
     state: Optional[str] = None, hub_id: Optional[str] = None,
-    admin: Dict = Depends(fleet_admin),
+    admin: Dict = Depends(get_admin),
 ):
     """Driver requests (advance / holiday / extra hours). `?state=pending`
     filters the queue; `?hub_id=` scopes to one hub's drivers."""
@@ -4301,7 +4401,7 @@ async def admin_requests(
 
 @api.post("/admin/requests/{request_id}/decide")
 async def admin_decide_request(
-    request_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_write)
+    request_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_ops)
 ):
     """Approve or reject a driver request. Records who decided and when. An
     approved `advance` does NOT itself touch the advances ledger — that stays a
@@ -4309,6 +4409,7 @@ async def admin_decide_request(
     row = await db.requests.find_one({"id": request_id}, {"_id": 0})
     if not row:
         raise HTTPException(404, "request_not_found")
+    await _assert_in_my_hub(row.get("driver_id"), admin)
     if row.get("state") != "pending":
         raise HTTPException(409, "already_decided")
     state = "approved" if body.decision == "approve" else "rejected"
@@ -7427,7 +7528,7 @@ async def money_salary_withdraw(body: WithdrawIn, driver: Dict = Depends(get_dri
 @api.get("/admin/withdrawals")
 async def admin_withdrawals(
     state: Optional[str] = None, hub_id: Optional[str] = None,
-    admin: Dict = Depends(fleet_admin),
+    admin: Dict = Depends(get_admin),
 ):
     """Salary withdrawal requests, newest first. `?state=pending` is the hub's
     to-pay queue; `?hub_id=` scopes to one hub's drivers. Each pending row
@@ -7474,7 +7575,7 @@ class WithdrawalPayIn(BaseModel):
 
 @api.post("/admin/withdrawals/{withdrawal_id}/pay")
 async def admin_pay_withdrawal(
-    withdrawal_id: str, body: WithdrawalPayIn, admin: Dict = Depends(require_write)
+    withdrawal_id: str, body: WithdrawalPayIn, admin: Dict = Depends(require_ops)
 ):
     """Pay a pending withdrawal request. Re-checks the amount against the
     driver's salary position at this moment, so a request that has since
@@ -7487,6 +7588,7 @@ async def admin_pay_withdrawal(
     drv = await db.drivers.find_one({"id": w["driver_id"]}, {"_id": 0})
     if not drv:
         raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(drv, hub_scope(admin))
     st = await _salary_state(drv, exclude_withdrawal_id=withdrawal_id)
     if float(w["amount"]) > st["available"] + 0.005:
         raise HTTPException(409, "exceeds_available")
@@ -7536,10 +7638,14 @@ async def admin_pay_withdrawal(
 
 @api.post("/admin/withdrawals/{withdrawal_id}/reject")
 async def admin_reject_withdrawal(
-    withdrawal_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_write)
+    withdrawal_id: str, body: RequestDecisionIn, admin: Dict = Depends(require_ops)
 ):
     """Turn a pending request down; the amount goes back to the driver's
     available salary. `note` is shown to the driver."""
+    if hub_scope(admin):
+        mine = await db.salary_withdrawals.find_one({"id": withdrawal_id}, {"_id": 0, "driver_id": 1})
+        if mine:
+            await _assert_in_my_hub(mine.get("driver_id"), admin)
     res = await db.salary_withdrawals.update_one(
         {"id": withdrawal_id, "state": "pending"},
         {"$set": {"state": "rejected", "note": body.note,
