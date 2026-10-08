@@ -23,6 +23,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
+        "monochromeImage": "./assets/images/adaptive-icon-mono.png",
         "backgroundColor": "#10231C"
       },
       "package": "com.ride91.driver",
