@@ -46,7 +46,7 @@ export default function Users({ admin }: { admin: AdminIdentity }) {
   const create = async () => {
     setErr(null);
     if (uName.trim().length < 3) return setErr("Username must be at least 3 characters.");
-    if (uPw.length < 6) return setErr("Password must be at least 6 characters.");
+    if (uPw.length < 10) return setErr("Password must be at least 10 characters.");
     if (uRole === "hub_manager" && !uHub) return setErr("Pick a hub for the hub manager.");
     setSaving(true);
     try {
@@ -82,7 +82,7 @@ export default function Users({ admin }: { admin: AdminIdentity }) {
   const resetPw = async (u: AdminUserRow) => {
     const pw = window.prompt(`New password for ${u.username} (min 6 chars):`, "");
     if (!pw) return;
-    if (pw.length < 6) return setErr("Password must be at least 6 characters.");
+    if (pw.length < 10) return setErr("Password must be at least 10 characters.");
     try { await api.patch(`/admin/users/${u.id}`, { password: pw }); flash(`Password reset for ${u.username}.`); }
     catch (e: any) { setErr(mapErr(e)); }
   };

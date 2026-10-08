@@ -206,6 +206,10 @@ TRUSTED_CASH_SOURCES = {"razorpay", "admin_manual", "qr_collection"}
 STATE_LOOKBACK_DAYS = 7
 DEMO_DRIVER_PHONE = "+919900000001"
 DEMO_DRIVER_PASSWORD = "ride91"  # seed driver's admin-set password (demo only)
+# The demo driver's login is written in this (public) file, so it must never be
+# created or repaired on a real deployment. Demo seeding runs only when
+# SEED_DEMO=1 is set, i.e. on a developer's own machine.
+SEED_DEMO = os.environ.get("SEED_DEMO", "").strip().lower() in ("1", "true", "yes")
 
 # Business day runs 04:00 IST to 03:59 IST next day. Matches Uber's cut-off.
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -800,7 +804,7 @@ class AdminLoginIn(BaseModel):
 
 class AdminUserCreateIn(BaseModel):
     username: str = Field(min_length=3)
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=10)   # admin accounts move money: no short passwords
     role: Literal["viewer", "hub_manager", "manager", "owner"] = "manager"
     hub_id: Optional[str] = None   # required when role == hub_manager
 
@@ -808,13 +812,13 @@ class AdminUserCreateIn(BaseModel):
 class AdminUserUpdateIn(BaseModel):
     role: Optional[Literal["viewer", "hub_manager", "manager", "owner"]] = None
     active: Optional[bool] = None
-    password: Optional[str] = Field(default=None, min_length=6)
+    password: Optional[str] = Field(default=None, min_length=10)
     hub_id: Optional[str] = None
 
 
 class ChangePasswordIn(BaseModel):
     old_password: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=10)
 
 
 class SettingsIn(BaseModel):
@@ -6640,8 +6644,14 @@ async def razorpay_checkout_page(
     safe_action = html_lib.escape(action)
     # Only allow redirecting back into the app (ride91://) or our own https
     # origins — never an arbitrary attacker-supplied URL (open-redirect guard).
+    # "https://ride91-" used to be accepted as a prefix, which also matched any
+    # look-alike domain an attacker registers (https://ride91-anything.com).
+    # An https address must now be one of our own origins, matched whole.
+    own_https = any(
+        redirect == o or redirect.startswith((o + "/", o + "#", o + "?"))
+        for o in _cors_origins if o.startswith("https://"))
     if not (redirect.startswith("ride91://")
-            or redirect.startswith("https://ride91-")
+            or own_https
             or redirect.startswith("exp://")):   # Expo Go during dev
         redirect = "ride91://money"
     safe_redirect = html_lib.escape(redirect)
@@ -8326,8 +8336,9 @@ async def _on_startup() -> None:
         {"id": "driver_code"}, {"$setOnInsert": {"id": "driver_code", "seq": 105}}, upsert=True)
     await _seed_admin_owner()
     await load_settings()
-    await _seed_if_empty()
-    await _ensure_demo_login()
+    if SEED_DEMO:
+        await _seed_if_empty()
+        await _ensure_demo_login()
 
 
 async def _ensure_demo_login() -> None:

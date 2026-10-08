@@ -323,7 +323,7 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
 
   const changePassword = async () => {
     setPwErr(null); setPwMsg(null);
-    if (newPw.length < 6) return setPwErr("New password must be at least 6 characters.");
+    if (newPw.length < 10) return setPwErr("New password must be at least 10 characters.");
     if (newPw !== newPw2) return setPwErr("New passwords don't match.");
     setPwBusy(true);
     try {
