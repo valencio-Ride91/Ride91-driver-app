@@ -9,7 +9,7 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatINR } from "@/src/i18n";
 import { HubMap } from "@/src/hub/HubMap";
@@ -26,6 +26,16 @@ export default function Drivers() {
   const { today, refresh } = useHubToday();
   const [q, setQ] = useState("");
   const [view, setView] = useState<"list" | "map">("list");
+  // The home screen's Map button opens this tab with `view=map` (and a new
+  // `at` each tap, so it works again after the list was chosen here). Each
+  // such request is followed once.
+  const { view: wanted, at } = useLocalSearchParams<{ view?: string; at?: string }>();
+  const request = wanted === "map" || wanted === "list" ? `${wanted}:${at ?? ""}` : null;
+  const [followed, setFollowed] = useState<string | null>(null);
+  if (request && request !== followed) {
+    setFollowed(request);
+    setView(wanted as "list" | "map");
+  }
   const [refreshing, setRefreshing] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);     // the driver whose dot was tapped
 
