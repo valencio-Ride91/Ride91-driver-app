@@ -722,6 +722,25 @@ export async function uploadForm<T>(path: string, form: FormData): Promise<T> {
   return data as T;
 }
 
+// A car changing hands at the hub, recorded in the Ride91 Hub app.
+export interface HandoverRow {
+  id: string;
+  vehicle_id: string;
+  vehicle_number: string | null;
+  from_driver_name: string | null;
+  to_driver_name: string | null;
+  soc_pct: number | null;
+  odometer_km: number | null;
+  damage_note: string | null;
+  photo_count: number;
+  cash_due: number | null;
+  created_at: string;
+  created_by: string;
+}
+export interface HandoverDetail extends HandoverRow {
+  photos: { label: string; data: string }[];
+}
+
 // One driver on the hub's shift board.
 export interface ShiftBoardRow {
   driver_id: string;

@@ -1,8 +1,9 @@
 // Money — cash the hub still has to collect, and salary withdrawals waiting
 // to be paid or turned down.
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
+import { RefreshControl, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import { BottomSheet } from "@/src/components/ui";
 import { formatINR, formatISTDate } from "@/src/i18n";
@@ -34,7 +35,10 @@ export default function Money() {
   const { session } = useHubSession();
   const { today, refresh } = useHubToday();
   const hubId = session?.hubId;
+  const router = useRouter();
   const [wds, setWds] = useState<Withdrawal[] | null>(null);
+  // How far yesterday's earnings entry has got: "6 of 10 drivers entered".
+  const [earn, setEarn] = useState<{ entered: number; count: number } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [cash, setCash] = useState<CashTarget | null>(null);
   const [act, setAct] = useState<Act>(null);
@@ -58,6 +62,20 @@ export default function Money() {
     const id = setInterval(loadWds, 30000);
     return () => clearInterval(id);
   }, [loadWds]);
+
+  const loadEarn = useCallback(async () => {
+    if (!hubId) return;
+    try {
+      const probe = await hubApi.get<{ today: string }>(`/admin/hubs/${hubId}/earnings-day`);
+      const y = new Date(`${probe.today}T00:00:00Z`);
+      y.setUTCDate(y.getUTCDate() - 1);
+      setEarn(await hubApi.get<{ entered: number; count: number }>(`/admin/hubs/${hubId}/earnings-day?date=${y.toISOString().slice(0, 10)}`));
+    } catch {
+      // older server: the row simply shows no progress
+    }
+  }, [hubId]);
+  // Refresh when coming back from the earnings screen.
+  useFocusEffect(useCallback(() => { loadEarn(); }, [loadEarn]));
 
   const reload = useCallback(async () => {
     await Promise.all([refresh(), loadWds()]);
@@ -118,6 +136,15 @@ export default function Money() {
           <Tile value={formatINR(today?.counts.cash_owed ?? 0)} label={t.cash_to_collect} tone={today?.counts.over_limit ? "bad" : undefined} testID="hub-money-owed" />
           <Tile value={String(wds?.length ?? today?.counts.withdrawals_pending ?? 0)} label={t.withdrawals} testID="hub-money-wd-count" />
         </View>
+
+        <TouchableOpacity style={[hubStyles.card, { marginTop: spacing.md, flexDirection: "row", alignItems: "center" }]}
+          onPress={() => router.push("/earnings" as never)} testID="hub-earnings-link">
+          <View style={{ flex: 1 }}>
+            <Text style={hubStyles.name}>{t.enter_earnings}</Text>
+            <Text style={hubStyles.sub}>{earn ? `${t.yesterday_word} · ${t.earnings_progress(earn.entered, earn.count)}` : t.earnings_title}</Text>
+          </View>
+          <Text style={{ fontSize: 22, color: colors.muted }}>›</Text>
+        </TouchableOpacity>
 
         <SectionTitle>{t.cash_to_collect}</SectionTitle>
         <View style={hubStyles.card} testID="hub-cash-list">

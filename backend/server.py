@@ -3453,6 +3453,214 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
     }
 
 
+# ---------------------------------------------------------------------------
+# SHIFT CHANGE — a car changing hands at the hub. The hub manager records who
+# brought it back, who takes it out, the battery and odometer, photos of the
+# car, and any new damage. It is a record of the moment, for when a scratch or
+# a missing kilometre has to be traced to a shift; it does not move a car
+# between drivers (that stays with the day / night slots on the roster).
+#
+# Photos are kept in their own collection so that listing shift changes never
+# drags megabytes of images along.
+# ---------------------------------------------------------------------------
+HANDOVER_MAX_PHOTOS = 8
+HANDOVER_MAX_PHOTO_CHARS = 4_000_000     # about 3 MB of image as base64 text
+
+
+class HandoverPhotoIn(BaseModel):
+    label: str = Field(min_length=1, max_length=40)    # front / back / left / right / dashboard / damage
+    data: str = Field(min_length=20)                   # a data: URL or bare base64
+
+
+class HandoverIn(BaseModel):
+    vehicle_id: str
+    from_driver_id: Optional[str] = None     # who brought the car back
+    to_driver_id: Optional[str] = None       # who is taking it out
+    soc_pct: Optional[int] = Field(default=None, ge=0, le=100)
+    odometer_km: Optional[float] = Field(default=None, ge=0)
+    damage_note: Optional[str] = Field(default=None, max_length=500)
+    photos: List[HandoverPhotoIn] = Field(default_factory=list)
+    client_action_id: str
+
+
+def _handover_out(h: Dict) -> Dict[str, Any]:
+    return {k: h.get(k) for k in (
+        "id", "hub_id", "vehicle_id", "vehicle_number", "from_driver_id", "from_driver_name",
+        "to_driver_id", "to_driver_name", "soc_pct", "odometer_km", "damage_note", "photo_count",
+        "photo_labels", "cash_due", "created_at", "created_by")}
+
+
+def _assert_my_hub(hub_id: str, admin: Dict) -> None:
+    scope = hub_scope(admin)
+    if scope and scope != hub_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "out_of_hub_scope")
+
+
+@api.get("/admin/hubs/{hub_id}/cars")
+async def admin_hub_cars(hub_id: str, admin: Dict = Depends(require_ops)):
+    """The hub's cars for the shift-change screen: each car's day and night
+    driver, last known battery and odometer, and its last shift change; plus
+    the hub's drivers (with the cash each owes) to pick from."""
+    _assert_my_hub(hub_id, admin)
+    vehicles = [v async for v in db.vehicles.find(
+        {"hub_id": hub_id, "retired": {"$ne": True}}, {"_id": 0}).sort("number", 1)]
+    ids = await _hub_driver_ids(hub_id)
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "shift_type": 1, "vehicle_id": 1})]
+    balances = await _driver_balances([d["id"] for d in drivers])
+    slot: Dict[str, Dict[str, Any]] = {}
+    for d in drivers:
+        if d.get("vehicle_id"):
+            slot[f"{d['vehicle_id']}:{d.get('shift_type') or 'day'}"] = {"driver_id": d["id"], "name": d.get("name")}
+    last: Dict[str, Dict] = {}
+    async for h in db.handovers.find({"hub_id": hub_id}, {"_id": 0}).sort("created_at", -1).limit(400):
+        last.setdefault(h["vehicle_id"], h)
+    return {
+        "cars": [{
+            "id": v["id"], "number": v.get("number"), "model": v.get("model"),
+            "current_soc": v.get("current_soc"), "odometer_km": v.get("odometer_km"),
+            "day_driver": slot.get(f"{v['id']}:day"), "night_driver": slot.get(f"{v['id']}:night"),
+            "last_handover": _handover_out(last[v["id"]]) if v["id"] in last else None,
+        } for v in vehicles],
+        "drivers": sorted([{
+            "driver_id": d["id"], "name": d.get("name"), "shift_type": d.get("shift_type") or "day",
+            "vehicle_id": d.get("vehicle_id"), "you_owe": balances.get(d["id"], {}).get("you_owe", 0.0),
+        } for d in drivers], key=lambda x: (x["name"] or "").lower()),
+    }
+
+
+@api.post("/admin/hubs/{hub_id}/handovers")
+async def admin_record_handover(hub_id: str, body: HandoverIn, admin: Dict = Depends(require_ops)):
+    """Record a shift change for one car. Idempotent on client_action_id."""
+    _assert_my_hub(hub_id, admin)
+    existing = await db.handovers.find_one({"client_action_id": body.client_action_id}, {"_id": 0})
+    if existing:
+        return {"ok": True, "duplicate": True, "handover": _handover_out(existing)}
+    vehicle = await db.vehicles.find_one({"id": body.vehicle_id, "hub_id": hub_id}, {"_id": 0})
+    if not vehicle:
+        raise HTTPException(404, "vehicle_not_in_hub")
+    if not body.from_driver_id and not body.to_driver_id:
+        raise HTTPException(400, "driver_required")
+    if body.from_driver_id and body.from_driver_id == body.to_driver_id:
+        raise HTTPException(400, "same_driver")
+    hub_drivers = set(await _hub_driver_ids(hub_id))
+    names: Dict[str, Optional[str]] = {}
+    for did in (body.from_driver_id, body.to_driver_id):
+        if not did:
+            continue
+        if did not in hub_drivers:
+            raise HTTPException(403, "driver_not_in_hub")
+        d = await db.drivers.find_one({"id": did}, {"_id": 0, "name": 1})
+        names[did] = (d or {}).get("name")
+    # An odometer never runs backwards; a lower reading is a typing slip.
+    prev_odo = vehicle.get("odometer_km")
+    if body.odometer_km is not None and prev_odo is not None and body.odometer_km < float(prev_odo):
+        raise HTTPException(400, "odometer_lower")
+    if len(body.photos) > HANDOVER_MAX_PHOTOS:
+        raise HTTPException(400, "too_many_photos")
+    if any(len(p.data) > HANDOVER_MAX_PHOTO_CHARS for p in body.photos):
+        raise HTTPException(413, "photo_too_large")
+
+    cash_due = 0.0
+    if body.from_driver_id:
+        bal = (await _driver_balances([body.from_driver_id])).get(body.from_driver_id, {})
+        cash_due = float(bal.get("you_owe") or 0)
+    now = iso(now_utc())
+    row = {
+        "id": str(uuid.uuid4()),
+        "hub_id": hub_id,
+        "vehicle_id": vehicle["id"],
+        "vehicle_number": vehicle.get("number"),
+        "from_driver_id": body.from_driver_id,
+        "from_driver_name": names.get(body.from_driver_id) if body.from_driver_id else None,
+        "to_driver_id": body.to_driver_id,
+        "to_driver_name": names.get(body.to_driver_id) if body.to_driver_id else None,
+        "soc_pct": body.soc_pct,
+        "odometer_km": body.odometer_km,
+        "damage_note": (body.damage_note or "").strip() or None,
+        "photo_count": len(body.photos),
+        "photo_labels": [p.label for p in body.photos],
+        "cash_due": round(cash_due, 2),            # what the returning driver owed at that moment
+        "created_at": now,
+        "created_by": admin["username"],
+        "client_action_id": body.client_action_id,
+    }
+    await db.handovers.insert_one(row.copy())
+    if body.photos:
+        await db.handover_photos.insert_many([
+            {"id": str(uuid.uuid4()), "handover_id": row["id"], "label": p.label, "data": p.data, "created_at": now}
+            for p in body.photos])
+    # The car's own record follows the latest reading.
+    car_update: Dict[str, Any] = {"last_handover_at": now}
+    if body.soc_pct is not None:
+        car_update["current_soc"] = body.soc_pct
+    if body.odometer_km is not None:
+        car_update["odometer_km"] = body.odometer_km
+    await db.vehicles.update_one({"id": vehicle["id"]}, {"$set": car_update})
+    await _audit(admin, "shift_change", vehicle["id"], {
+        "from": row["from_driver_name"], "to": row["to_driver_name"], "soc_pct": body.soc_pct,
+        "odometer_km": body.odometer_km, "damage": bool(row["damage_note"]), "photos": len(body.photos)})
+    return {"ok": True, "duplicate": False, "handover": _handover_out(row)}
+
+
+@api.get("/admin/hubs/{hub_id}/handovers")
+async def admin_list_handovers(hub_id: str, limit: int = 100, admin: Dict = Depends(require_ops)):
+    """A hub's shift changes, newest first (no photos)."""
+    _assert_my_hub(hub_id, admin)
+    rows = [_handover_out(h) async for h in db.handovers.find(
+        {"hub_id": hub_id}, {"_id": 0}).sort("created_at", -1).limit(max(1, min(int(limit), 300)))]
+    return {"items": rows, "count": len(rows)}
+
+
+@api.get("/admin/handovers/{handover_id}")
+async def admin_get_handover(handover_id: str, admin: Dict = Depends(require_ops)):
+    """One shift change with its photos."""
+    h = await db.handovers.find_one({"id": handover_id}, {"_id": 0})
+    if not h:
+        raise HTTPException(404, "handover_not_found")
+    _assert_my_hub(h["hub_id"], admin)
+    photos = [{"label": p.get("label"), "data": p.get("data")} async for p in db.handover_photos.find(
+        {"handover_id": handover_id}, {"_id": 0}).sort("created_at", 1)]
+    return {**_handover_out(h), "photos": photos}
+
+
+@api.get("/admin/hubs/{hub_id}/earnings-day")
+async def admin_hub_earnings_day(hub_id: str, date: Optional[str] = None, admin: Dict = Depends(require_ops)):
+    """Every driver of the hub with what has been entered for one business day
+    on each app — the phone's earnings screen in one call. Saving still goes
+    through POST /admin/drivers/{id}/earnings, one app at a time."""
+    _assert_my_hub(hub_id, admin)
+    bd = _bd_or_400(date)
+    ids = await _hub_driver_ids(hub_id)
+    drivers = [d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "shift_type": 1})]
+    by: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    async for r in db.platform_cash.find(
+        {"driver_id": {"$in": [d["id"] for d in drivers] or ["_none"]}, "business_date": bd},
+        {"_id": 0, "driver_id": 1, "platform": 1, "gross_amount": 1, "cash_amount": 1, "source": 1}):
+        by.setdefault(r["driver_id"], {})[r.get("platform")] = {
+            "gross": r.get("gross_amount"), "cash": r.get("cash_amount"),
+            "locked": r.get("source") == "uber_report",      # an official import is never overwritten
+        }
+    items = []
+    for d in sorted(drivers, key=lambda x: (x.get("name") or "").lower()):
+        apps = {p: by.get(d["id"], {}).get(p) for p in sorted(PLATFORMS)}
+        entered = [v for v in apps.values() if v and v.get("gross") is not None]
+        items.append({
+            "driver_id": d["id"], "name": d.get("name"), "shift_type": d.get("shift_type") or "day",
+            "apps": apps,
+            "gross_total": round(sum(float(v["gross"] or 0) for v in entered), 2),
+            "cash_total": round(sum(float(v.get("cash") or 0) for v in entered), 2),
+            "entered": bool(entered),
+        })
+    return {
+        "date": bd, "today": business_date_now(), "items": items, "count": len(items),
+        "entered": sum(1 for i in items if i["entered"]),
+    }
+
+
 @api.get("/admin/hubs/{hub_id}/activity")
 async def admin_hub_activity(
     hub_id: str, date: Optional[str] = None, admin: Dict = Depends(require_ops)
@@ -8393,6 +8601,9 @@ async def _on_startup() -> None:
     )
     await db.alarm_responses.create_index([("driver_id", 1), ("schedule_id", 1)])
     await db.alarm_arming.create_index([("driver_id", 1), ("schedule_id", 1)], unique=True)
+    await db.handovers.create_index([("client_action_id", 1)], unique=True)
+    await db.handovers.create_index([("hub_id", 1), ("created_at", -1)])
+    await db.handover_photos.create_index([("handover_id", 1)])
     await db.notifications.create_index([("driver_id", 1), ("client_action_id", 1)])
     # Razorpay dedup — order per driver+action; unique order id from Razorpay.
     await db.razorpay_orders.create_index(

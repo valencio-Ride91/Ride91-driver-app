@@ -33,6 +33,7 @@ export default function HubTabs() {
     >
       <Tabs.Screen name="index" options={{ tabBarIcon: ({ focused }) => <TabIcon label={t.tab_today} focused={focused} count={today?.attention.length} />, tabBarButtonTestID: "hub-tab-today" }} />
       <Tabs.Screen name="drivers" options={{ tabBarIcon: ({ focused }) => <TabIcon label={t.tab_drivers} focused={focused} />, tabBarButtonTestID: "hub-tab-drivers" }} />
+      <Tabs.Screen name="cars" options={{ tabBarIcon: ({ focused }) => <TabIcon label={t.tab_cars} focused={focused} />, tabBarButtonTestID: "hub-tab-cars" }} />
       <Tabs.Screen name="money" options={{ tabBarIcon: ({ focused }) => <TabIcon label={t.tab_money} focused={focused} count={c?.withdrawals_pending} />, tabBarButtonTestID: "hub-tab-money" }} />
       <Tabs.Screen name="inbox" options={{ tabBarIcon: ({ focused }) => <TabIcon label={t.tab_inbox} focused={focused} count={(c?.unread_messages ?? 0) + (c?.requests_pending ?? 0)} />, tabBarButtonTestID: "hub-tab-inbox" }} />
     </Tabs>
@@ -40,9 +41,9 @@ export default function HubTabs() {
 }
 
 const styles = StyleSheet.create({
-  iconWrap: { alignItems: "center", gap: 4, width: 76 },
+  iconWrap: { alignItems: "center", gap: 4, width: 66 },
   dot: { width: 6, height: 6, borderRadius: 3 },
-  iconLabel: { fontFamily: fonts.uiMed, fontSize: 12 },
-  badge: { position: "absolute", top: -4, right: 8, minWidth: 16, height: 16, borderRadius: 8, backgroundColor: colors.alert, alignItems: "center", justifyContent: "center", paddingHorizontal: 3 },
+  iconLabel: { fontFamily: fonts.uiMed, fontSize: 11 },
+  badge: { position: "absolute", top: -4, right: 4, minWidth: 16, height: 16, borderRadius: 8, backgroundColor: colors.alert, alignItems: "center", justifyContent: "center", paddingHorizontal: 3 },
   badgeText: { fontFamily: fonts.uiBold, fontSize: 9, color: colors.white },
 });

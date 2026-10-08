@@ -39,6 +39,8 @@ const Router: React.FC = () => {
           <Stack.Screen name="login" />
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="driver/[id]" options={{ presentation: "card" }} />
+          <Stack.Screen name="handover/[vehicleId]" options={{ presentation: "card" }} />
+          <Stack.Screen name="earnings" options={{ presentation: "card" }} />
         </Stack>
       </View>
     </HubTodayProvider>
