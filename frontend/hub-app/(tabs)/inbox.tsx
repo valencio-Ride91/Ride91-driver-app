@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatIST, formatINR } from "@/src/i18n";
 import { Avatar, Icon, Segmented, useToast } from "@/src/hub/kit";
@@ -62,6 +62,17 @@ export default function Inbox() {
   const [notes, setNotes] = useState<Note[] | null>(null);
   const [reqs, setReqs] = useState<Req[] | null>(null);
   const [view, setView] = useState<View_>("messages");
+  // The home screen opens this tab on a view (`view=requests`, with a new `at`
+  // each tap). Each such request is followed once.
+  const { view: wanted, at } = useLocalSearchParams<{ view?: string; at?: string }>();
+  const request = wanted === "messages" || wanted === "requests" ? `${wanted}:${at ?? ""}` : null;
+  const [followed, setFollowed] = useState<string | null>(null);
+  if (request && request !== followed) {
+    setFollowed(request);
+    setView(wanted as View_);
+  }
+  // The decision being asked about: one tap asks, the second decides.
+  const [asking, setAsking] = useState<{ id: string; decision: "approve" | "reject" } | null>(null);
   const [toAll, setToAll] = useState(false);       // the "message all drivers" sheet
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -113,6 +124,7 @@ export default function Inbox() {
       say(t.action_fail, "bad");
     } finally {
       setBusyId(null);
+      setAsking(null);
     }
   };
 
@@ -146,10 +158,21 @@ export default function Inbox() {
                     <Text style={hubStyles.sub}>{formatIST(r.created_at)}</Text>
                   </View>
                 </View>
-                <View style={styles.reqBtns}>
-                  <Btn label={t.reject} small kind="danger" onPress={() => decide(r, "reject")} disabled={busyId === r.id} style={{ flex: 1 }} testID={`hub-req-reject-${r.id}`} />
-                  <Btn label={t.approve} small onPress={() => decide(r, "approve")} busy={busyId === r.id} style={{ flex: 1 }} testID={`hub-req-approve-${r.id}`} />
-                </View>
+                {asking?.id === r.id ? (
+                  <View style={styles.sure} testID="hub-req-sure">
+                    <Text style={styles.sureText}>{asking.decision === "approve" ? t.approve_sure(r.driver_name ?? "") : t.reject_sure(r.driver_name ?? "")}</Text>
+                    <View style={styles.reqBtns}>
+                      <Btn label={t.cancel} small kind="ghost" onPress={() => setAsking(null)} disabled={busyId === r.id} style={{ flex: 1 }} testID="hub-req-no" />
+                      <Btn label={asking.decision === "approve" ? t.approve : t.reject} small kind={asking.decision === "approve" ? "primary" : "danger"}
+                        onPress={() => decide(r, asking.decision)} busy={busyId === r.id} style={{ flex: 1 }} testID="hub-req-yes" />
+                    </View>
+                  </View>
+                ) : (
+                  <View style={styles.reqBtns}>
+                    <Btn label={t.reject} small kind="danger" onPress={() => setAsking({ id: r.id, decision: "reject" })} style={{ flex: 1 }} testID={`hub-req-reject-${r.id}`} />
+                    <Btn label={t.approve} small onPress={() => setAsking({ id: r.id, decision: "approve" })} style={{ flex: 1 }} testID={`hub-req-approve-${r.id}`} />
+                  </View>
+                )}
               </View>
             ))}
           </View>
@@ -201,6 +224,8 @@ const styles = StyleSheet.create({
   reqTop: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md },
   reqWhat: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, marginTop: 2 },
   reqBtns: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.md },
+  sure: { marginTop: spacing.md, padding: spacing.md, borderRadius: 12, backgroundColor: colors.paper },
+  sureText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   blank: { alignItems: "center", gap: spacing.sm, paddingVertical: spacing.xxl },
   blankText: { fontFamily: fonts.ui, fontSize: 14, color: colors.muted },
 });

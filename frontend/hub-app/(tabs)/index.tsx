@@ -81,11 +81,14 @@ export default function Today() {
 
   // Each tap is a new request (`at`), so the map opens even if the list was
   // chosen on the Drivers tab since the last one.
-  const [mapTaps, setMapTaps] = useState(0);
-  const openMap = useCallback(() => {
-    setMapTaps(mapTaps + 1);
-    router.push({ pathname: "/(tabs)/drivers", params: { view: "map", at: String(mapTaps + 1) } } as never);
-  }, [router, mapTaps]);
+  // Open a tab on one of its views (Drivers on the map, Inbox on requests…).
+  // Each tap is a new request (`at`), so it works again even if another view
+  // was chosen on that tab since the last one.
+  const [taps, setTaps] = useState(0);
+  const openOn = useCallback((tab: "drivers" | "money" | "inbox", view: string) => {
+    setTaps(taps + 1);
+    router.push({ pathname: `/(tabs)/${tab}`, params: { view, at: String(taps + 1) } } as never);
+  }, [router, taps]);
 
   const onDuty = useMemo(
     () => (today?.drivers ?? []).filter((d) => d.on_duty).sort((a, b) => b.on_duty_seconds - a.on_duty_seconds),
@@ -97,19 +100,19 @@ export default function Today() {
   const noTime = c?.shift?.no_shift_time ?? 0;
   const labels: Record<Bucket, string> = { on_duty: t.on_duty, coming: t.coming, silent: t.no_answer, not_coming: t.not_coming, off: t.off_duty };
   const waiting = [
-    { key: "withdrawals", label: t.withdrawals, n: c?.withdrawals_pending ?? 0, to: "/(tabs)/money" },
-    { key: "requests", label: t.requests, n: c?.requests_pending ?? 0, to: "/(tabs)/inbox" },
-    { key: "messages", label: t.messages, n: c?.unread_messages ?? 0, to: "/(tabs)/inbox" },
+    { key: "withdrawals", label: t.withdrawals, n: c?.withdrawals_pending ?? 0, go: () => openOn("money", "withdrawals") },
+    { key: "requests", label: t.requests, n: c?.requests_pending ?? 0, go: () => openOn("inbox", "requests") },
+    { key: "messages", label: t.messages, n: c?.unread_messages ?? 0, go: () => openOn("inbox", "messages") },
   ].filter((w) => w.n > 0);
   const actions = [
     { key: "shift", icon: "swap-horizontal" as IconName, title: t.shift_change, sub: t.qa_shift_sub, go: () => router.push("/(tabs)/cars" as never) },
     {
       key: "cash", icon: "cash-outline" as IconName, title: t.record_cash, alert: !!c?.over_limit,
       sub: c?.cash_owed ? t.qa_cash_sub(formatINR(c.cash_owed)) : t.nobody_owes,
-      go: () => router.push("/(tabs)/money" as never),
+      go: () => openOn("money", "collect"),
     },
     { key: "earnings", icon: "create-outline" as IconName, title: t.enter_earnings, sub: t.qa_earn_sub, go: () => router.push("/earnings" as never) },
-    { key: "map", icon: "map-outline" as IconName, title: t.view_map, sub: t.qa_map_sub, go: openMap },
+    { key: "map", icon: "map-outline" as IconName, title: t.view_map, sub: t.qa_map_sub, go: () => openOn("drivers", "map") },
   ];
 
   return (
@@ -198,7 +201,7 @@ export default function Today() {
                 <SectionTitle>{t.waiting_title}</SectionTitle>
                 <View style={hubStyles.card} testID="hub-waiting">
                   {waiting.map((w, i) => (
-                    <TouchableOpacity key={w.key} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} onPress={() => router.push(w.to as never)} testID={`hub-waiting-${w.key}`}>
+                    <TouchableOpacity key={w.key} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} onPress={w.go} testID={`hub-waiting-${w.key}`}>
                       <Text style={[hubStyles.name, { flex: 1 }]}>{w.label}</Text>
                       <View style={styles.count}><Text style={styles.countText}>{w.n}</Text></View>
                       <Icon name="chevron-forward" size={18} color={colors.muted} />
@@ -208,7 +211,7 @@ export default function Today() {
               </>
             ) : null}
 
-            <SectionTitle right={<TouchableOpacity onPress={() => router.push("/(tabs)/drivers" as never)} testID="hub-all-drivers"><Text style={styles.link}>{t.all_drivers}</Text></TouchableOpacity>}>
+            <SectionTitle right={<TouchableOpacity onPress={() => openOn("drivers", "list")} testID="hub-all-drivers"><Text style={styles.link}>{t.all_drivers}</Text></TouchableOpacity>}>
               {t.on_duty_now}
             </SectionTitle>
             <View style={hubStyles.card} testID="hub-on-road">

@@ -1,7 +1,7 @@
 // Hub settings — the things a manager does now and then rather than every
 // day: set the shift time for all day or night drivers at once, bring back a
 // driver who was removed, change their own password, switch hub, sign out.
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -10,7 +10,7 @@ import { formatISTDate } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Icon } from "@/src/hub/kit";
+import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, spacing } from "@/src/theme";
 
@@ -22,17 +22,15 @@ export default function Settings() {
   const t = useHubText();
   const router = useRouter();
   const { session, signOut, chooseHub } = useHubSession();
-  const { refresh } = useHubToday();
+  const { today, refresh } = useHubToday();
   const hubId = session?.hubId;
   const [who, setWho] = useState<Who>("day");
   const [time, setTime] = useState("");
+  const [sure, setSure] = useState(false);          // asking before the shift time is set for everyone
   const [removed, setRemoved] = useState<Removed[] | null>(null);
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [busy, setBusy] = useState<string | null>(null);      // which action is running
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadRemoved = useCallback(async () => {
     if (!hubId) return;
@@ -45,29 +43,29 @@ export default function Settings() {
 
   useFocusEffect(useCallback(() => { loadRemoved(); }, [loadRemoved]));
 
-  const say = (m: string) => {
-    if (msgTimer.current) clearTimeout(msgTimer.current);
-    setErr(null);
-    setMsg(m);
-    msgTimer.current = setTimeout(() => setMsg(null), 6000);
-  };
+  const say = useToast();
+  const fail = (m: string) => say(m, "bad");
 
   const run = async (key: string, work: () => Promise<string>, onFail?: (e: any) => string) => {
     if (busy) return;
     setBusy(key);
-    setErr(null);
     try {
       say(await work());
     } catch (e) {
-      setMsg(null);
-      setErr(onFail ? onFail(e) : t.action_fail);
+      fail(onFail ? onFail(e) : t.action_fail);
     } finally {
       setBusy(null);
     }
   };
 
+  // How many drivers the chosen group covers (a driver with no shift type counts as day).
+  const affected = (today?.drivers ?? []).filter((d) => who === "all" || (d.shift_type === "night" ? "night" : "day") === who).length;
+  const askShift = () => {
+    if (!HHMM.test(time.trim())) return fail(t.df_bad_time);
+    setSure(true);
+  };
   const saveShift = () => {
-    if (!HHMM.test(time.trim())) return setErr(t.df_bad_time);
+    setSure(false);
     run("shift", async () => {
       const r = await hubApi.post<{ updated: number }>(`/admin/hubs/${hubId}/shift-times`, { shift_start_time: time.trim(), shift_type: who });
       await refresh();
@@ -83,7 +81,7 @@ export default function Settings() {
     });
 
   const changePassword = () => {
-    if (newPw.length < 10) return setErr(t.pw_short);
+    if (newPw.length < 10) return fail(t.pw_short);
     run("pw", async () => {
       await hubApi.post("/admin/change-password", { old_password: oldPw, new_password: newPw });
       setOldPw("");
@@ -106,8 +104,6 @@ export default function Settings() {
         </View>
 
         <ScrollView contentContainerStyle={hubStyles.scroll} keyboardShouldPersistTaps="handled">
-          {msg ? <Text style={hubStyles.done} testID="hub-set-msg">{msg}</Text> : null}
-          {err ? <Text style={[hubStyles.err, { marginTop: 0, marginBottom: spacing.sm }]} testID="hub-set-err">{err}</Text> : null}
 
           <SectionTitle>{t.set_shift_all}</SectionTitle>
           <View style={hubStyles.card}>
@@ -121,8 +117,17 @@ export default function Settings() {
             <View style={styles.inline}>
               <TextInput testID="hub-set-time" value={time} onChangeText={setTime} placeholder="07:00" placeholderTextColor={colors.muted}
                 keyboardType="numbers-and-punctuation" maxLength={5} style={[hubStyles.input, styles.mono, { width: 110 }]} />
-              <Btn label={t.save} small onPress={saveShift} busy={busy === "shift"} testID="hub-set-shift-save" />
+              <Btn label={t.save} small onPress={askShift} busy={busy === "shift"} disabled={sure} testID="hub-set-shift-save" />
             </View>
+            {sure ? (
+              <View style={styles.sure} testID="hub-set-sure">
+                <Text style={styles.sureText}>{t.set_sure(time.trim(), affected)}</Text>
+                <View style={styles.inline}>
+                  <Btn label={t.cancel} small kind="ghost" onPress={() => setSure(false)} style={{ flex: 1 }} testID="hub-set-no" />
+                  <Btn label={t.set_yes} small onPress={saveShift} style={{ flex: 1 }} testID="hub-set-yes" />
+                </View>
+              </View>
+            ) : null}
             <Text style={hubStyles.sub}>{t.set_shift_all_hint}</Text>
           </View>
 
@@ -172,5 +177,7 @@ const styles = StyleSheet.create({
   segTextOn: { color: colors.onBrand },
   inline: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.md, marginBottom: spacing.xs },
   mono: { fontFamily: fonts.dataMed },
+  sure: { marginBottom: spacing.sm, padding: spacing.md, borderRadius: 12, backgroundColor: colors.paper },
+  sureText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   account: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
 });

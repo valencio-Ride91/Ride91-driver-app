@@ -6,6 +6,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useI18n } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
+import { Icon } from "@/src/hub/kit";
 import { Btn, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -31,7 +32,8 @@ export default function Login() {
   }, [needsHub]);
 
   const submit = async () => {
-    if (busy || !username.trim() || !password) return;
+    if (busy) return;
+    if (!username.trim() || !password) return setErr(t.signin_need);
     setBusy(true);
     setErr(null);
     try {
@@ -63,10 +65,11 @@ export default function Login() {
               {hubs === null ? <Text style={styles.sub}>{t.loading}</Text> : hubs.map((h) => (
                 <TouchableOpacity key={h.id} style={styles.hubRow} onPress={() => chooseHub(h.id, h.name)} testID={`hub-pick-${h.id}`}>
                   <Text style={styles.hubName}>{h.name}</Text>
-                  <Text style={styles.chev}>›</Text>
+                  <Icon name="chevron-forward" size={18} color={colors.muted} />
                 </TouchableOpacity>
               ))}
-              <Btn label={t.sign_out} kind="ghost" onPress={signOut} style={{ marginTop: spacing.lg }} />
+              {hubs !== null && hubs.length === 0 ? <Text style={styles.sub} testID="hub-pick-none">{t.pick_none}</Text> : null}
+              <Btn label={t.sign_out} kind="ghost" onPress={signOut} style={{ marginTop: spacing.lg }} testID="hub-pick-signout" />
             </>
           ) : (
             <>

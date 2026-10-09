@@ -12,7 +12,7 @@ import { NotComingSheet } from "@/src/hub/sheets";
 import { doing, tagFor } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Icon } from "@/src/hub/kit";
+import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, platformLabels, radius, spacing } from "@/src/theme";
 
@@ -48,7 +48,7 @@ function describeTap(e: Tap, t: HubText): string {
 export default function DriverPage() {
   const t = useHubText();
   const router = useRouter();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, focus } = useLocalSearchParams<{ id: string; focus?: string }>();
   const { today, refresh } = useHubToday();
   const d = useMemo(() => today?.drivers.find((x) => x.driver_id === id) ?? null, [today, id]);
 
@@ -61,8 +61,17 @@ export default function DriverPage() {
   const [cash, setCash] = useState<CashTarget | null>(null);
   const [notComing, setNotComing] = useState(false);     // the "not coming: why?" sheet
   const [marking, setMarking] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+
+  // Opened from the Inbox (`focus=messages`): go straight to the messages, once
+  // they are on the page.
+  const scroller = useRef<ScrollView>(null);
+  const [threadY, setThreadY] = useState<number | null>(null);
+  const jumped = useRef(false);
+  useEffect(() => {
+    if (focus !== "messages" || threadY == null || notes === null || jumped.current) return;
+    jumped.current = true;
+    scroller.current?.scrollTo({ y: threadY, animated: false });
+  }, [focus, threadY, notes]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -88,25 +97,19 @@ export default function DriverPage() {
     return () => clearInterval(timer);
   }, [load]);
 
-  // One message at a time: a newer one must not be wiped by an older one's timer.
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const say = (m: string) => {
-    if (msgTimer.current) clearTimeout(msgTimer.current);
-    setMsg(m);
-    msgTimer.current = setTimeout(() => setMsg(null), 5000);
-  };
+  const say = useToast();
+  const fail = (m: string) => say(m, "bad");
 
   // The driver phoned to say they are coming: record it as their answer.
   const markComing = async () => {
     if (marking) return;
     setMarking(true);
-    setErr(null);
     try {
       await hubApi.post(`/admin/drivers/${id}/shift-answer`, { response: "coming" });
       say(t.answer_saved);
       await refresh();
     } catch {
-      setErr(t.action_fail);
+      fail(t.action_fail);
     } finally {
       setMarking(false);
     }
@@ -114,16 +117,15 @@ export default function DriverPage() {
 
   const saveShift = async () => {
     const v = (shift ?? "").trim();
-    if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return setErr(t.shift_bad);
+    if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return fail(t.shift_bad);
     setSavingShift(true);
-    setErr(null);
     try {
       await hubApi.patch(`/admin/drivers/${id}`, { shift_start_time: v });
       setShift(null);
       say(t.shift_saved);
       await refresh();
     } catch {
-      setErr(t.action_fail);
+      fail(t.action_fail);
     } finally {
       setSavingShift(false);
     }
@@ -133,13 +135,12 @@ export default function DriverPage() {
     const body = draft.trim();
     if (!body || sending) return;
     setSending(true);
-    setErr(null);
     try {
       await hubApi.post(`/admin/drivers/${id}/notifications`, { body });
       setDraft("");
       await Promise.all([load(), refresh()]);
     } catch {
-      setErr(t.action_fail);
+      fail(t.action_fail);
     } finally {
       setSending(false);
     }
@@ -159,9 +160,7 @@ export default function DriverPage() {
           {d ? <Btn label={t.edit} small kind="ghost" onPress={() => router.push(`/driver-form?id=${d.driver_id}` as never)} testID="hub-driver-edit" /> : null}
         </View>
 
-        <ScrollView contentContainerStyle={hubStyles.scroll} keyboardShouldPersistTaps="handled">
-          {msg ? <Text style={hubStyles.done} testID="hub-driver-msg">{msg}</Text> : null}
-          {err ? <Text style={[hubStyles.err, { marginBottom: spacing.sm }]}>{err}</Text> : null}
+        <ScrollView ref={scroller} contentContainerStyle={hubStyles.scroll} keyboardShouldPersistTaps="handled">
 
           {!d ? <Empty>{t.loading}</Empty> : (
             <>
@@ -206,7 +205,7 @@ export default function DriverPage() {
                 <View style={styles.kv}>
                   <Text style={styles.k}>{t.shift_time}</Text>
                   {shift === null ? (
-                    <TouchableOpacity onPress={() => { setShift(d.shift_start_time ?? ""); setErr(null); }} testID="hub-driver-shift-edit">
+                    <TouchableOpacity onPress={() => { setShift(d.shift_start_time ?? ""); }} testID="hub-driver-shift-edit">
                       <Text style={[styles.v, styles.link]}>{d.shift_start_time ?? t.none}</Text>
                     </TouchableOpacity>
                   ) : (
@@ -237,7 +236,7 @@ export default function DriverPage() {
             ))}
           </View>
 
-          <SectionTitle>{t.conversation}</SectionTitle>
+          <View onLayout={(e) => setThreadY(e.nativeEvent.layout.y)}><SectionTitle>{t.conversation}</SectionTitle></View>
           <View style={hubStyles.card} testID="hub-driver-thread">
             {notes === null ? <Empty>{t.loading}</Empty> : notes.length === 0 ? <Empty>{t.no_messages}</Empty> : [...notes].reverse().slice(-20).map((n) => {
               const mine = n.direction === "to_driver";

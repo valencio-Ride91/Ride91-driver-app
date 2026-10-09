@@ -9,7 +9,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { BottomSheet } from "@/src/components/ui";
 import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
@@ -47,7 +47,8 @@ interface Received {
 
 // What the manager is doing to a withdrawal: paying by hand (needs a
 // reference) or rejecting (needs a reason the driver will read).
-type Act = { w: Withdrawal; kind: "manual" | "reject" } | null;
+// "send" is paying through RazorpayX: real money, so it is confirmed first.
+type Act = { w: Withdrawal; kind: "manual" | "reject" | "send" } | null;
 type Tab = "collect" | "received" | "withdrawals";
 
 export default function Money() {
@@ -65,6 +66,15 @@ export default function Money() {
   const [text, setText] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("collect");
+  // The home screen opens this tab on a view (`view=withdrawals`, with a new
+  // `at` each tap). Each such request is followed once.
+  const { view: wanted, at } = useLocalSearchParams<{ view?: string; at?: string }>();
+  const request = wanted === "collect" || wanted === "received" || wanted === "withdrawals" ? `${wanted}:${at ?? ""}` : null;
+  const [followed, setFollowed] = useState<string | null>(null);
+  if (request && request !== followed) {
+    setFollowed(request);
+    setTab(wanted as Tab);
+  }
   const [err, setErr] = useState<string | null>(null);
   const [received, setReceived] = useState<Received[] | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);     // the entry being asked about
@@ -140,12 +150,12 @@ export default function Money() {
     setUndoing(null);
   };
 
-  const payNow = (w: Withdrawal) => run(w.id, () => hubApi.post(`/admin/withdrawals/${w.id}/pay`, { method: "razorpayx" }), t.pay_sent);
-
   const confirmAct = () => {
     if (!act) return;
     const value = text.trim();
-    if (act.kind === "manual") {
+    if (act.kind === "send") {
+      run(act.w.id, () => hubApi.post(`/admin/withdrawals/${act.w.id}/pay`, { method: "razorpayx" }), t.pay_sent);
+    } else if (act.kind === "manual") {
       if (value.length < 2) return setErr(t.ref_needed);
       run(act.w.id, () => hubApi.post(`/admin/withdrawals/${act.w.id}/pay`, { method: "manual", reference: value }), t.pay_done);
     } else {
@@ -277,7 +287,8 @@ export default function Money() {
                       onPress={() => { setText(""); setErr(null); setAct({ w, kind: "reject" }); }} testID={`hub-wd-reject-${w.id}`} />
                     <Btn label={t.mark_paid} small kind={canSend ? "ghost" : "primary"} disabled={short || busy} style={{ flex: 1 }}
                       onPress={() => { setText(""); setErr(null); setAct({ w, kind: "manual" }); }} testID={`hub-wd-manual-${w.id}`} />
-                    {canSend ? <Btn label={t.pay_now} small onPress={() => payNow(w)} busy={busy} disabled={short} style={{ flex: 1 }} testID={`hub-wd-pay-${w.id}`} /> : null}
+                    {canSend ? <Btn label={t.pay_now} small disabled={short || busy} style={{ flex: 1 }}
+                      onPress={() => { setErr(null); setAct({ w, kind: "send" }); }} testID={`hub-wd-pay-${w.id}`} /> : null}
                   </View>
                 </View>
               );
@@ -290,10 +301,18 @@ export default function Money() {
 
       <BottomSheet visible={!!act} onClose={() => (busyId ? undefined : setAct(null))} testID="hub-wd-sheet"
         title={act ? `${act.w.driver_name ?? ""} · ${formatINR(act.w.amount)}` : ""}>
-        <Text style={hubStyles.label}>{act?.kind === "manual" ? t.paid_ref : t.reject_why}</Text>
-        <TextInput testID="hub-wd-text" value={text} onChangeText={setText} style={hubStyles.input} placeholderTextColor={colors.muted} />
-        {err && act ? <Text style={hubStyles.err}>{err}</Text> : null}
-        <Btn label={act?.kind === "manual" ? t.mark_paid : t.reject} kind={act?.kind === "reject" ? "danger" : "primary"}
+        {act?.kind === "send" ? (
+          <Text style={styles.confirmText} testID="hub-wd-sure">
+            {t.pay_now_sure(formatINR(act.w.amount), `${act.w.bank_kind === "vpa" ? "UPI" : "bank"} ${act.w.bank_masked ?? ""}`.trim())}
+          </Text>
+        ) : (
+          <>
+            <Text style={hubStyles.label}>{act?.kind === "manual" ? t.paid_ref : t.reject_why}</Text>
+            <TextInput testID="hub-wd-text" value={text} onChangeText={setText} style={hubStyles.input} placeholderTextColor={colors.muted} />
+          </>
+        )}
+        {err && act ? <Text style={hubStyles.err} testID="hub-wd-err">{err}</Text> : null}
+        <Btn label={act?.kind === "send" ? t.pay_now : act?.kind === "manual" ? t.mark_paid : t.reject} kind={act?.kind === "reject" ? "danger" : "primary"}
           onPress={confirmAct} busy={!!busyId} style={{ marginTop: spacing.md }} testID="hub-wd-confirm" />
       </BottomSheet>
     </SafeAreaView>

@@ -16,7 +16,7 @@ import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Icon } from "@/src/hub/kit";
+import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -48,6 +48,7 @@ export default function Handover() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const say = useToast();
   const [cash, setCash] = useState<CashTarget | null>(null);
   // One id for this shift change, so a retry after a dropped connection
   // cannot record it twice.
@@ -122,7 +123,8 @@ export default function Handover() {
         photos: Object.entries(photos).map(([label, d]) => ({ label, data: d })),
         client_action_id: actionId,
       });
-      setMsg(t.handover_done(car.number ?? ""));
+      setMsg(t.handover_done(car.number ?? ""));      // also stops a second Confirm
+      say(t.handover_done(car.number ?? ""));
       refresh();
       setTimeout(() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/cars" as never)), 1200);
     } catch (e: any) {
@@ -132,7 +134,8 @@ export default function Handover() {
     }
   };
 
-  const Picker: React.FC<{ value: string | null; onChange: (id: string | null) => void; testID: string }> = ({ value, onChange, testID }) => (
+  // The list of drivers to pick from, used for "returning" and for "taking".
+  const picker = (value: string | null, onChange: (id: string | null) => void, testID: string) => (
     <View style={styles.chips} testID={testID}>
       <Chip label={t.nobody} on={value === null} onPress={() => onChange(null)} />
       {(data?.drivers ?? []).map((d) => (
@@ -159,9 +162,9 @@ export default function Handover() {
           {!data ? <Empty>{t.loading}</Empty> : !car ? <Empty>{t.cars_none}</Empty> : (
             <>
               <SectionTitle>{t.returning}</SectionTitle>
-              <Picker value={fromId} onChange={setFromId} testID="hub-ho-from" />
+              {picker(fromId, setFromId, "hub-ho-from")}
               <SectionTitle>{t.taking}</SectionTitle>
-              <Picker value={toId} onChange={setToId} testID="hub-ho-to" />
+              {picker(toId, setToId, "hub-ho-to")}
 
               <View style={[styles.two, { marginTop: spacing.lg }]}>
                 <View style={{ flex: 1 }}>

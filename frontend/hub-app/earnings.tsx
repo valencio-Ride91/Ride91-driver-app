@@ -3,7 +3,7 @@
 // driver's salary and the cash they owe, so each save is one app for one
 // driver for one day, and an official Uber-report figure can never be typed
 // over.
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -13,7 +13,7 @@ import { formatINR, formatISTDate } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Icon, IconBtn } from "@/src/hub/kit";
+import { Icon, IconBtn, useToast } from "@/src/hub/kit";
 import { Btn, Empty, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, platformColors, platformLabels, spacing } from "@/src/theme";
 
@@ -53,8 +53,7 @@ export default function Earnings() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const say = useToast();
 
   const load = useCallback(async (d: string | null) => {
     if (!hubId) return;
@@ -119,9 +118,7 @@ export default function Earnings() {
       }
       const name = editing.name ?? "";
       setEditing(null);
-      if (msgTimer.current) clearTimeout(msgTimer.current);
-      setMsg(t.earn_saved(name));
-      msgTimer.current = setTimeout(() => setMsg(null), 4000);
+      say(t.earn_saved(name));
       await Promise.all([load(day.date), refresh()]);
     } catch (e: any) {
       setErr(e?.body?.detail === "already_imported" ? t.from_report : t.action_fail);
@@ -151,7 +148,6 @@ export default function Earnings() {
           </View>
           <IconBtn icon="chevron-forward" tone="mute" disabled={atToday} onPress={() => date && setDate(shiftDate(date, 1))} testID="hub-earn-next" />
         </View>
-        {msg ? <Text style={hubStyles.done} testID="hub-earn-msg">{msg}</Text> : null}
 
         {!day ? <Empty>{t.loading}</Empty> : (
           <View style={hubStyles.card} testID="hub-earn-list">

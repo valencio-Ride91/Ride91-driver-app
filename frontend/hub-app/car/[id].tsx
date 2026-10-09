@@ -11,7 +11,7 @@
 //
 // On a server that does not have the history yet, the page still opens from
 // the hub's car list, with Shift change and Remove, and says what is missing.
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -21,7 +21,7 @@ import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, SERVICE_KINDS } from "@/sr
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { ServiceSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
-import { Icon } from "@/src/hub/kit";
+import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -46,9 +46,6 @@ export default function Car() {
   const [service, setService] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     if (!signedIn) return;          // the saved session is still being read back
@@ -79,11 +76,8 @@ export default function Car() {
   // Reload whenever the page comes back into view (after an inspection or a shift change).
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const say = (m: string) => {
-    if (msgTimer.current) clearTimeout(msgTimer.current);
-    setMsg(m);
-    msgTimer.current = setTimeout(() => setMsg(null), 4000);
-  };
+  const say = useToast();
+  const fail = (m: string) => say(m, "bad");
 
   const toggleHandover = async (hid: string, count: number) => {
     if (openHandover === hid) return setOpenHandover(null);
@@ -93,19 +87,18 @@ export default function Car() {
       const r = await hubApi.get<{ photos: Photo[] }>(`/admin/handovers/${hid}`);
       setPhotos((p) => ({ ...p, [hid]: r.photos }));
     } catch {
-      setErr(t.action_fail);
+      fail(t.action_fail);
     }
   };
 
   const remove = async () => {
     if (busy) return;
     setBusy(true);
-    setErr(null);
     try {
       await hubApi.del(`/admin/vehicles/${id}`);
       router.replace("/(tabs)/cars" as never);
     } catch (e: any) {
-      setErr(e?.body?.detail === "vehicle_in_use" ? t.car_in_use : t.action_fail);
+      fail(e?.body?.detail === "vehicle_in_use" ? t.car_in_use : t.action_fail);
       setRemoving(false);
       setBusy(false);
     }
@@ -125,8 +118,6 @@ export default function Car() {
       </View>
 
       <ScrollView contentContainerStyle={hubStyles.scroll}>
-        {msg ? <Text style={hubStyles.done} testID="hub-car-msg">{msg}</Text> : null}
-        {err ? <Text style={[hubStyles.err, { marginBottom: spacing.sm }]} testID="hub-car-page-err">{err}</Text> : null}
 
         {!h ? <Empty>{failed ? t.action_fail : t.loading}</Empty> : (
           <>
@@ -251,7 +242,7 @@ export default function Car() {
                 </View>
               </View>
             ) : (
-              <Btn label={t.car_remove} kind="danger" onPress={() => { setErr(null); setRemoving(true); }} style={{ marginTop: spacing.xl }} testID="hub-car-remove" />
+              <Btn label={t.car_remove} kind="danger" onPress={() => { setRemoving(true); }} style={{ marginTop: spacing.xl }} testID="hub-car-remove" />
             )}
           </>
         )}
