@@ -13,6 +13,7 @@ import { formatINR, formatISTDate } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
+import { Icon, IconBtn } from "@/src/hub/kit";
 import { Btn, Empty, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, platformColors, platformLabels, spacing } from "@/src/theme";
 
@@ -136,19 +137,19 @@ export default function Earnings() {
     <SafeAreaView style={hubStyles.safe} edges={["top", "bottom"]}>
       <View style={styles.bar}>
         <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/money" as never))} style={styles.back} testID="hub-earn-back">
-          <Text style={styles.backText}>‹</Text>
+          <Icon name="chevron-back" size={26} color={colors.ink} />
         </TouchableOpacity>
         <Text style={styles.title} testID="hub-earn-title">{t.earnings_title}</Text>
       </View>
 
       <ScrollView contentContainerStyle={hubStyles.scroll}>
         <View style={styles.dateRow}>
-          <Btn label="‹" small kind="ghost" onPress={() => date && setDate(shiftDate(date, -1))} testID="hub-earn-prev" />
+          <IconBtn icon="chevron-back" tone="mute" onPress={() => date && setDate(shiftDate(date, -1))} testID="hub-earn-prev" />
           <View style={{ flex: 1, alignItems: "center" }}>
             <Text style={styles.date} testID="hub-earn-date">{date ? formatISTDate(`${date}T12:00:00+05:30`) : ""}</Text>
             <Text style={hubStyles.sub}>{[dayLabel, day ? t.earnings_progress(day.entered, day.count) : ""].filter(Boolean).join(" · ")}</Text>
           </View>
-          <Btn label="›" small kind="ghost" disabled={atToday} onPress={() => date && setDate(shiftDate(date, 1))} testID="hub-earn-next" />
+          <IconBtn icon="chevron-forward" tone="mute" disabled={atToday} onPress={() => date && setDate(shiftDate(date, 1))} testID="hub-earn-next" />
         </View>
         {msg ? <Text style={hubStyles.done} testID="hub-earn-msg">{msg}</Text> : null}
 

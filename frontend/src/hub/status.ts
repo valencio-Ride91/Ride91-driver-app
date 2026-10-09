@@ -7,9 +7,26 @@ import { HubDriver } from "@/src/hub/today";
 import { STATUS_TONE, Tone } from "@/src/hub/ui";
 import { colors, platformLabels } from "@/src/theme";
 
+// Every driver falls in exactly one of these, so counts always add up to the
+// whole hub: on duty, said coming, silent (no answer, or late), not coming,
+// and off (no shift near, or its alarm has not rung yet).
+export type Bucket = "on_duty" | "coming" | "silent" | "not_coming" | "off";
+export const BUCKETS: Bucket[] = ["on_duty", "coming", "silent", "not_coming", "off"];
+export const BUCKET_TONE: Record<Bucket, Tone> = { on_duty: "ok", coming: "ok", silent: "warn", not_coming: "bad", off: "mute" };
+export function bucketOf(d: HubDriver): Bucket {
+  if (d.on_duty) return "on_duty";
+  if (d.shift_status === "not_coming") return "not_coming";
+  if (d.shift_status === "no_answer" || d.shift_status === "late" || d.shift_status === "not_started") return "silent";
+  if (d.shift_status === "coming") return "coming";
+  return "off";
+}
+
 // One line saying what the driver is doing, for the list and the driver page.
 export function doing(d: HubDriver, t: HubText): string {
-  if (!d.on_duty) return d.shift_start_time ? `${d.shift_type} · ${d.shift_start_time}` : d.shift_type;
+  if (!d.on_duty) {
+    const shift = d.shift_type === "night" ? t.night_short : t.day_short;
+    return d.shift_start_time ? `${shift} · ${d.shift_start_time}` : shift;
+  }
   const what = d.current_state === "charging" ? t.charging
     : d.current_state === "to_charger" ? t.to_charger
     : d.current_platforms.length ? d.current_platforms.map((p) => platformLabels[p] ?? p).join(" + ")

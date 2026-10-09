@@ -14,6 +14,7 @@ import * as Crypto from "expo-crypto";
 import { CHECK_ITEMS, CheckStatus } from "@/src/hub/cars";
 import { hubApi } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
+import { Icon } from "@/src/hub/kit";
 import { Btn, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -62,7 +63,7 @@ export default function CarCheckForm() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <View style={styles.bar}>
           <TouchableOpacity onPress={back} style={styles.back} testID="hub-check-back">
-            <Text style={styles.backText}>‹</Text>
+            <Icon name="chevron-back" size={26} color={colors.ink} />
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1} testID="hub-check-title">{t.car_inspect}</Text>
           <TouchableOpacity onPress={allOk} testID="hub-check-all-ok"><Text style={styles.link}>{t.check_mark_all_ok}</Text></TouchableOpacity>

@@ -18,6 +18,7 @@ import { CarsData, HubCar } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { HubDriver, useHubToday } from "@/src/hub/today";
+import { Icon } from "@/src/hub/kit";
 import { Btn, Empty, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -62,7 +63,7 @@ export default function DriverForm() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <View style={styles.bar}>
           <TouchableOpacity onPress={back} style={styles.back} testID="hub-df-back">
-            <Text style={styles.backText}>‹</Text>
+            <Icon name="chevron-back" size={26} color={colors.ink} />
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1} testID="hub-df-title">{id ? t.df_edit_title : t.df_add_title}</Text>
         </View>

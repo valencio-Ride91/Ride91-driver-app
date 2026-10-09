@@ -74,8 +74,9 @@ export const Tile: React.FC<{ value: string; label: string; tone?: Tone; onPress
   </TouchableOpacity>
 );
 
-/** Top of every tab: the hub's name (or a title), the language switch, and
- *  the "no connection" strip when the last refresh failed. */
+/** Top of every tab: a small line saying where you are (the hub, or the app
+ *  on the home tab), the tab's title, the tab's own action, the language
+ *  switch, and the "no connection" strip when the last refresh failed. */
 export const HubHeader: React.FC<{ title?: string; right?: React.ReactNode }> = ({ title, right }) => {
   const { lang, setLang } = useI18n();
   const { session } = useHubSession();
@@ -84,7 +85,10 @@ export const HubHeader: React.FC<{ title?: string; right?: React.ReactNode }> = 
   return (
     <View style={styles.header}>
       <View style={styles.headerRow}>
-        <Text style={styles.headerTitle} numberOfLines={1} testID="hub-header-title">{title ?? session?.hubName ?? t.app_name}</Text>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.headerEyebrow} numberOfLines={1}>{title ? session?.hubName ?? t.app_name : t.app_name}</Text>
+          <Text style={styles.headerTitle} numberOfLines={1} testID="hub-header-title">{title ?? session?.hubName ?? t.app_name}</Text>
+        </View>
         {right}
         <TouchableOpacity style={styles.langPill} onPress={() => setLang(lang === "hi" ? "en" : "hi")} testID="hub-lang">
           <Text style={styles.langText}>{lang === "hi" ? "हिं" : "EN"}</Text>
@@ -108,11 +112,11 @@ export const hubStyles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
   scroll: { padding: spacing.md, paddingBottom: spacing.xxl * 2 },
   card: { backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.line },
-  row: { flexDirection: "row", alignItems: "center", paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.line, gap: spacing.sm },
+  row: { flexDirection: "row", alignItems: "center", paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.line, gap: spacing.md },
   rowFirst: { borderTopWidth: 0 },
-  name: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink },
-  sub: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: 1 },
-  subAlert: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.alert, marginTop: 1 },
+  name: { fontFamily: fonts.uiBold, fontSize: 16, color: colors.ink },
+  sub: { fontFamily: fonts.ui, fontSize: 13, color: colors.muted, marginTop: 2, lineHeight: 18 },
+  subAlert: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.alert, marginTop: 2, lineHeight: 18 },
   input: {
     borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, backgroundColor: colors.card,
     paddingHorizontal: spacing.md, paddingVertical: 11, fontFamily: fonts.uiMed, fontSize: 15, color: colors.ink,
@@ -131,7 +135,7 @@ export const hubStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   tag: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, alignSelf: "flex-start" },
-  tagText: { fontFamily: fonts.uiBold, fontSize: 11 },
+  tagText: { fontFamily: fonts.uiBold, fontSize: 12 },
   btn: { borderRadius: radius.md, paddingVertical: 13, paddingHorizontal: spacing.md, alignItems: "center", justifyContent: "center" },
   btnSmall: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: radius.sm },
   btnPrimary: { backgroundColor: colors.brand },
@@ -140,13 +144,14 @@ const styles = StyleSheet.create({
   tile: { flex: 1, backgroundColor: colors.card, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, paddingVertical: 10, paddingHorizontal: 10, minWidth: 0 },
   tileValue: { fontFamily: fonts.dataMed, fontSize: 22, color: colors.ink },
   tileLabel: { fontFamily: fonts.uiMed, fontSize: 11, color: colors.muted, marginTop: 2 },
-  header: { backgroundColor: colors.paper, paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.line },
+  header: { backgroundColor: colors.paper, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.sm },
   headerRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
-  headerTitle: { flex: 1, fontFamily: fonts.display, fontSize: 22, color: colors.ink },
+  headerEyebrow: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.muted },
+  headerTitle: { fontFamily: fonts.display, fontSize: 26, lineHeight: 32, color: colors.ink },
   langPill: { paddingHorizontal: spacing.md, paddingVertical: 6, borderRadius: radius.lg, backgroundColor: colors.ink },
   langText: { fontFamily: fonts.uiBold, fontSize: 12, color: colors.white },
   offline: { fontFamily: fonts.uiMed, fontSize: 12, color: "#8A5D00", marginTop: 6 },
   sectionRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.lg, marginBottom: spacing.sm },
-  section: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.ink },
-  empty: { fontFamily: fonts.ui, fontSize: 13, color: colors.muted, paddingVertical: spacing.sm },
+  section: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.ink },
+  empty: { fontFamily: fonts.ui, fontSize: 14, color: colors.muted, paddingVertical: spacing.md, textAlign: "center" },
 });

@@ -14,10 +14,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 
 import { formatINR, formatISTDate, formatISTTime } from "@/src/i18n";
+import { Avatar, Icon, IconName } from "@/src/hub/kit";
 import { useHubSession } from "@/src/hub/session";
-import { doing } from "@/src/hub/status";
+import { BUCKETS, Bucket, bucketOf, doing } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
-import { Attention, HubDriver, useHubToday } from "@/src/hub/today";
+import { Attention, useHubToday } from "@/src/hub/today";
 import { Empty, HubHeader, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -38,20 +39,10 @@ function why(a: Attention, t: HubText): string {
   return parts.join(" · ");
 }
 
-// Every driver falls in exactly one of these, so the bar always adds up to
-// the whole hub. The colours are picked to read on the dark summary card.
-type Bucket = "on_duty" | "coming" | "silent" | "not_coming" | "off";
-const BUCKETS: Bucket[] = ["on_duty", "coming", "silent", "not_coming", "off"];
+// The bar's colours, picked to read on the dark summary card.
 const BUCKET_COLOR: Record<Bucket, string> = {
   on_duty: colors.brand, coming: "#BFE5AD", silent: colors.amber, not_coming: "#E8806F", off: "#8B8F88",
 };
-function bucketOf(d: HubDriver): Bucket {
-  if (d.on_duty) return "on_duty";
-  if (d.shift_status === "not_coming") return "not_coming";
-  if (d.shift_status === "no_answer" || d.shift_status === "late" || d.shift_status === "not_started") return "silent";
-  if (d.shift_status === "coming") return "coming";
-  return "off";
-}
 
 // Problems that lose a shift or money are red; the rest are amber.
 const URGENT: Record<string, boolean> = { not_coming: true, not_started: true, over_cash_limit: true };
@@ -111,14 +102,14 @@ export default function Today() {
     { key: "messages", label: t.messages, n: c?.unread_messages ?? 0, to: "/(tabs)/inbox" },
   ].filter((w) => w.n > 0);
   const actions = [
-    { key: "shift", title: t.shift_change, sub: t.qa_shift_sub, go: () => router.push("/(tabs)/cars" as never) },
+    { key: "shift", icon: "swap-horizontal" as IconName, title: t.shift_change, sub: t.qa_shift_sub, go: () => router.push("/(tabs)/cars" as never) },
     {
-      key: "cash", title: t.record_cash, alert: !!c?.over_limit,
+      key: "cash", icon: "cash-outline" as IconName, title: t.record_cash, alert: !!c?.over_limit,
       sub: c?.cash_owed ? t.qa_cash_sub(formatINR(c.cash_owed)) : t.nobody_owes,
       go: () => router.push("/(tabs)/money" as never),
     },
-    { key: "earnings", title: t.enter_earnings, sub: t.qa_earn_sub, go: () => router.push("/earnings" as never) },
-    { key: "map", title: t.view_map, sub: t.qa_map_sub, go: openMap },
+    { key: "earnings", icon: "create-outline" as IconName, title: t.enter_earnings, sub: t.qa_earn_sub, go: () => router.push("/earnings" as never) },
+    { key: "map", icon: "map-outline" as IconName, title: t.view_map, sub: t.qa_map_sub, go: openMap },
   ];
 
   return (
@@ -176,6 +167,7 @@ export default function Today() {
                         <Text style={[styles.attWhy, { color: urgent ? colors.alert : "#8A5D00" }]}>{why(a, t)}</Text>
                       </TouchableOpacity>
                       <TouchableOpacity style={[styles.call, !a.phone ? { opacity: 0.4 } : null]} disabled={!a.phone} onPress={() => callPhone(a.phone)} testID={`hub-call-${a.driver_id}`}>
+                        <Icon name="call" size={15} color={colors.onBrand} />
                         <Text style={styles.callText}>{t.call}</Text>
                       </TouchableOpacity>
                     </View>
@@ -190,10 +182,10 @@ export default function Today() {
                 <View key={r} style={styles.gridRow}>
                   {pair.map((a) => (
                     <TouchableOpacity key={a.key} style={styles.action} onPress={a.go} testID={`hub-action-${a.key}`}>
-                      <View style={styles.actionTop}>
-                        <Text style={styles.actionTitle} numberOfLines={1}>{a.title}</Text>
-                        <Text style={styles.chevron}>›</Text>
+                      <View style={[styles.actionIcon, a.alert ? { backgroundColor: "#F8E4E0" } : null]}>
+                        <Icon name={a.icon} size={20} color={a.alert ? colors.alert : colors.live} />
                       </View>
+                      <Text style={styles.actionTitle} numberOfLines={1}>{a.title}</Text>
                       <Text style={[styles.actionSub, a.alert ? { color: colors.alert, fontFamily: fonts.uiMed } : null]} numberOfLines={2}>{a.sub}</Text>
                     </TouchableOpacity>
                   ))}
@@ -209,21 +201,21 @@ export default function Today() {
                     <TouchableOpacity key={w.key} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} onPress={() => router.push(w.to as never)} testID={`hub-waiting-${w.key}`}>
                       <Text style={[hubStyles.name, { flex: 1 }]}>{w.label}</Text>
                       <View style={styles.count}><Text style={styles.countText}>{w.n}</Text></View>
-                      <Text style={styles.chevron}>›</Text>
+                      <Icon name="chevron-forward" size={18} color={colors.muted} />
                     </TouchableOpacity>
                   ))}
                 </View>
               </>
             ) : null}
 
-            <SectionTitle right={<TouchableOpacity onPress={() => router.push("/(tabs)/drivers" as never)} testID="hub-all-drivers"><Text style={styles.link}>{t.all_drivers} ›</Text></TouchableOpacity>}>
+            <SectionTitle right={<TouchableOpacity onPress={() => router.push("/(tabs)/drivers" as never)} testID="hub-all-drivers"><Text style={styles.link}>{t.all_drivers}</Text></TouchableOpacity>}>
               {t.on_duty_now}
             </SectionTitle>
             <View style={hubStyles.card} testID="hub-on-road">
               {onDuty.length === 0 ? <Empty>{t.nobody_on_duty}</Empty> : onDuty.map((d, i) => (
                 <TouchableOpacity key={d.driver_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} onPress={() => router.push(`/driver/${d.driver_id}` as never)} testID={`hub-road-${d.driver_id}`}>
-                  <View style={[styles.liveDot, { backgroundColor: d.tracking === "stopped" ? colors.amber : colors.brand }]} />
-                  <View style={{ flex: 1 }}>
+                  <Avatar name={d.name} tone={d.tracking === "stopped" ? "warn" : "ok"} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
                     <Text style={hubStyles.sub}>{[doing(d, t), d.vehicle_number].filter(Boolean).join(" · ")}</Text>
                   </View>
@@ -235,11 +227,12 @@ export default function Today() {
         )}
 
         <TouchableOpacity style={[hubStyles.card, styles.footer]} onPress={() => router.push("/settings" as never)} testID="hub-settings-link">
-          <View style={{ flex: 1 }}>
+          <View style={styles.actionIcon}><Icon name="settings-outline" size={20} color={colors.live} /></View>
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={hubStyles.name}>{t.settings_title}</Text>
             <Text style={hubStyles.sub} numberOfLines={1}>{session?.username}</Text>
           </View>
-          <Text style={styles.chevron}>›</Text>
+          <Icon name="chevron-forward" size={18} color={colors.muted} />
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
@@ -277,19 +270,17 @@ const styles = StyleSheet.create({
   att: { flexDirection: "row", alignItems: "center", gap: spacing.md, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.line },
   attBar: { width: 4, alignSelf: "stretch", borderRadius: 2 },
   attWhy: { fontFamily: fonts.uiMed, fontSize: 12, marginTop: 2, lineHeight: 17 },
-  call: { backgroundColor: colors.brand, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 18 },
+  call: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.brand, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 16 },
   callText: { fontFamily: fonts.uiBold, fontSize: 14, color: colors.onBrand },
   grid: { gap: spacing.sm },
   gridRow: { flexDirection: "row", gap: spacing.sm },
   action: {
-    flex: 1, minWidth: 0, minHeight: 76, padding: spacing.md,
+    flex: 1, minWidth: 0, minHeight: 112, padding: spacing.md,
     backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line,
   },
-  actionTop: { flexDirection: "row", alignItems: "center", gap: 4 },
-  actionTitle: { flex: 1, fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink },
-  actionSub: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: 4, lineHeight: 16 },
-  chevron: { fontFamily: fonts.uiBold, fontSize: 18, lineHeight: 20, color: colors.muted },
+  actionIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.brandTint, alignItems: "center", justifyContent: "center" },
+  actionTitle: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink, marginTop: spacing.sm },
+  actionSub: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: 2, lineHeight: 16 },
   link: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.live },
-  liveDot: { width: 10, height: 10, borderRadius: 5 },
-  footer: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.xl },
+  footer: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginTop: spacing.xl },
 });

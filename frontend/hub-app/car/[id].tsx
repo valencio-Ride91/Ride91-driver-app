@@ -21,6 +21,7 @@ import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, SERVICE_KINDS } from "@/sr
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { ServiceSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
+import { Icon } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -118,7 +119,7 @@ export default function Car() {
     <SafeAreaView style={hubStyles.safe} edges={["top", "bottom"]}>
       <View style={styles.bar}>
         <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/cars" as never))} style={styles.back} testID="hub-car-back">
-          <Text style={styles.backText}>‹</Text>
+          <Icon name="chevron-back" size={26} color={colors.ink} />
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1} testID="hub-car-title">{h?.vehicle.number ?? "—"}</Text>
       </View>

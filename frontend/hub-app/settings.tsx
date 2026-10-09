@@ -10,6 +10,7 @@ import { formatISTDate } from "@/src/i18n";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
+import { Icon } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, spacing } from "@/src/theme";
 
@@ -99,7 +100,7 @@ export default function Settings() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <View style={styles.bar}>
           <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)" as never))} style={styles.back} testID="hub-set-back">
-            <Text style={styles.backText}>‹</Text>
+            <Icon name="chevron-back" size={26} color={colors.ink} />
           </TouchableOpacity>
           <Text style={styles.title} testID="hub-set-title">{t.settings_title}</Text>
         </View>

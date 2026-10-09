@@ -12,6 +12,7 @@ import { NotComingSheet } from "@/src/hub/sheets";
 import { doing, tagFor } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
+import { Icon } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, platformLabels, radius, spacing } from "@/src/theme";
 
@@ -151,7 +152,7 @@ export default function DriverPage() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <View style={styles.bar}>
           <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/drivers" as never))} style={styles.back} testID="hub-driver-back">
-            <Text style={styles.backText}>‹</Text>
+            <Icon name="chevron-back" size={26} color={colors.ink} />
           </TouchableOpacity>
           <Text style={styles.title} numberOfLines={1} testID="hub-driver-name">{d?.name ?? "—"}</Text>
           {tag ? <Tag tone={tag.tone}>{tag.label}</Tag> : null}

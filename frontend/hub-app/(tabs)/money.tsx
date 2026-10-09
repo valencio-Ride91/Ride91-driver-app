@@ -1,19 +1,25 @@
-// Money — cash the hub still has to collect, the cash it has taken in (with
-// Undo for an entry made by mistake), and salary withdrawals waiting to be
-// paid or turned down.
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshControl, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
+// Money — the hub's cash and salary desk.
+//
+// The dark card on top is the cash still to collect, with how many drivers owe
+// it and how many are over the limit. Under it, the day's earnings entry with
+// its progress. Then three views, each with its count: To collect (drivers who
+// owe cash, with a Received button), Received (what was taken in, with Undo
+// for an entry made by mistake) and Withdrawals (salary requests to pay or
+// turn down).
+import React, { useCallback, useEffect, useState } from "react";
+import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { BottomSheet } from "@/src/components/ui";
 import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
 import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
+import { Avatar, Icon, ProgressBar, Segmented, useToast } from "@/src/hub/kit";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
-import { Btn, Empty, HubHeader, SectionTitle, Tag, Tile, hubStyles } from "@/src/hub/ui";
-import { colors, spacing } from "@/src/theme";
+import { Btn, Empty, HubHeader, Tag, hubStyles } from "@/src/hub/ui";
+import { colors, fonts, radius, spacing } from "@/src/theme";
 
 interface Withdrawal {
   id: string;
@@ -42,6 +48,7 @@ interface Received {
 // What the manager is doing to a withdrawal: paying by hand (needs a
 // reference) or rejecting (needs a reason the driver will read).
 type Act = { w: Withdrawal; kind: "manual" | "reject" } | null;
+type Tab = "collect" | "received" | "withdrawals";
 
 export default function Money() {
   const t = useHubText();
@@ -57,7 +64,7 @@ export default function Money() {
   const [act, setAct] = useState<Act>(null);
   const [text, setText] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("collect");
   const [err, setErr] = useState<string | null>(null);
   const [received, setReceived] = useState<Received[] | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);     // the entry being asked about
@@ -111,13 +118,7 @@ export default function Money() {
     setRefreshing(false);
   }, [reload]);
 
-  // One message at a time: a newer one must not be wiped by an older one's timer.
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const say = (m: string) => {
-    if (msgTimer.current) clearTimeout(msgTimer.current);
-    setMsg(m);
-    msgTimer.current = setTimeout(() => setMsg(null), 5000);
-  };
+  const say = useToast();
 
   const run = async (id: string, fn: () => Promise<unknown>, done: string) => {
     setBusyId(id);
@@ -154,100 +155,135 @@ export default function Money() {
 
   const owing = (today?.drivers ?? []).filter((d) => d.you_owe > 0).sort((a, b) => b.you_owe - a.you_owe);
 
+  const c = today?.counts;
+  const over = c?.over_limit ?? 0;
+  const pending = wds?.length ?? c?.withdrawals_pending ?? 0;
+
   return (
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
       <HubHeader title={t.tab_money} />
       <ScrollView contentContainerStyle={hubStyles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
-        {msg ? <Text style={hubStyles.done} testID="hub-money-msg">{msg}</Text> : null}
-        {err && !act ? <Text style={[hubStyles.err, { marginBottom: spacing.sm }]}>{err}</Text> : null}
-
-        <View style={{ flexDirection: "row", gap: spacing.sm }}>
-          <Tile value={formatINR(today?.counts.cash_owed ?? 0)} label={t.cash_to_collect} tone={today?.counts.over_limit ? "bad" : undefined} testID="hub-money-owed" />
-          <Tile value={String(wds?.length ?? today?.counts.withdrawals_pending ?? 0)} label={t.withdrawals} testID="hub-money-wd-count" />
+        <View style={styles.hero} testID="hub-money-owed">
+          <Text style={styles.heroLabel}>{t.cash_to_collect}</Text>
+          <Text style={styles.heroAmount} numberOfLines={1} adjustsFontSizeToFit>{formatINR(c?.cash_owed ?? 0)}</Text>
+          <View style={styles.heroLine}>
+            <Text style={styles.heroSub}>{t.owe_count(owing.length)}</Text>
+            {over ? <View style={styles.heroFlag}><Text style={styles.heroFlagText}>{t.over_count(over)}</Text></View> : null}
+          </View>
         </View>
 
-        <TouchableOpacity style={[hubStyles.card, { marginTop: spacing.md, flexDirection: "row", alignItems: "center" }]}
-          onPress={() => router.push("/earnings" as never)} testID="hub-earnings-link">
-          <View style={{ flex: 1 }}>
+        <TouchableOpacity style={[hubStyles.card, styles.earn]} onPress={() => router.push("/earnings" as never)} testID="hub-earnings-link">
+          <View style={styles.earnIcon}><Icon name="create-outline" size={20} color={colors.live} /></View>
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={hubStyles.name}>{t.enter_earnings}</Text>
             <Text style={hubStyles.sub}>{earn ? `${t.yesterday_word} · ${t.earnings_progress(earn.entered, earn.count)}` : t.earnings_title}</Text>
+            {earn && earn.count ? <View style={{ marginTop: 6 }}><ProgressBar value={earn.entered / earn.count} /></View> : null}
           </View>
-          <Text style={{ fontSize: 22, color: colors.muted }}>›</Text>
+          <Icon name="chevron-forward" size={18} color={colors.muted} />
         </TouchableOpacity>
 
-        <SectionTitle>{t.cash_to_collect}</SectionTitle>
-        <View style={hubStyles.card} testID="hub-cash-list">
-          {!today ? <Empty>{t.loading}</Empty> : owing.length === 0 ? <Empty>{t.nobody_owes}</Empty> : owing.map((d, i) => (
-            <View key={d.driver_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} testID={`hub-cash-${d.driver_id}`}>
-              <View style={{ flex: 1 }}>
-                <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
-                <Text style={d.over_limit ? hubStyles.subAlert : hubStyles.sub}>
-                  {t.owes(formatINR(d.you_owe))}{d.over_limit ? ` · ${t.over_limit}` : ""}
-                </Text>
-              </View>
-              <Btn label={t.received} small onPress={() => setCash({ driver_id: d.driver_id, name: d.name, you_owe: d.you_owe })} testID={`hub-cash-btn-${d.driver_id}`} />
-            </View>
-          ))}
-        </View>
+        <Segmented
+          style={{ marginTop: spacing.lg }} testID="hub-money-tab" value={tab} onChange={setTab}
+          options={[
+            { key: "collect", label: t.seg_collect, count: owing.length },
+            { key: "received", label: t.received },
+            { key: "withdrawals", label: t.withdrawals, count: pending },
+          ]}
+        />
+        {err && !act ? <Text style={hubStyles.err}>{err}</Text> : null}
 
-        <SectionTitle>{t.cash_received_title}</SectionTitle>
-        <View style={hubStyles.card} testID="hub-received-list">
-          {received === null ? <Empty>{t.loading}</Empty> : received.length === 0 ? <Empty>{t.cash_received_none}</Empty> : received.map((r, i) => (
-            <View key={r.id} style={{ paddingVertical: 10, borderTopWidth: i === 0 ? 0 : 1, borderTopColor: colors.line }} testID={`hub-received-${r.id}`}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={[hubStyles.name, r.undone ? { textDecorationLine: "line-through", color: colors.muted } : null]}>
-                    {r.driver_name ?? "—"} · {formatINR(r.amount)}
-                  </Text>
-                  <Text style={hubStyles.sub}>{[formatIST(r.created_at), r.reference, r.recorded_by ? t.by_who(r.recorded_by) : null].filter(Boolean).join(" · ")}</Text>
-                </View>
-                {r.undone ? <Tag tone="mute">{t.undone}</Tag>
-                  : r.can_undo && undoing !== r.id ? <Btn label={t.undo} small kind="ghost" onPress={() => { setErr(null); setUndoing(r.id); }} testID={`hub-undo-${r.id}`} />
-                  : null}
+        {tab === "collect" ? (
+          <View style={[hubStyles.card, styles.panel]} testID="hub-cash-list">
+            {!today ? <Empty>{t.loading}</Empty> : owing.length === 0 ? (
+              <View style={styles.blank}>
+                <Icon name="checkmark-circle-outline" size={40} color={colors.brand} />
+                <Text style={styles.blankText}>{t.nobody_owes}</Text>
               </View>
-              {undoing === r.id ? (
-                <View style={{ marginTop: spacing.sm }} testID="hub-undo-confirm">
-                  <Text style={hubStyles.subAlert}>{t.undo_sure(formatINR(r.amount), r.driver_name ?? "")}</Text>
-                  <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm }}>
-                    <Btn label={t.cancel} small kind="ghost" onPress={() => setUndoing(null)} disabled={busyId === r.id} style={{ flex: 1 }} />
-                    <Btn label={t.undo_yes} small kind="danger" onPress={() => undo(r)} busy={busyId === r.id} style={{ flex: 1 }} testID="hub-undo-yes" />
+            ) : owing.map((d, i) => (
+              <View key={d.driver_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} testID={`hub-cash-${d.driver_id}`}>
+                <Avatar name={d.name} tone={d.over_limit ? "bad" : "mute"} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={hubStyles.name} numberOfLines={1}>{d.name ?? "—"}</Text>
+                  <View style={styles.inline}>
+                    <Text style={[styles.amount, d.over_limit ? { color: colors.alert } : null]}>{formatINR(d.you_owe)}</Text>
+                    {d.over_limit ? <Tag tone="bad">{t.over_limit}</Tag> : null}
                   </View>
                 </View>
-              ) : null}
-            </View>
-          ))}
-        </View>
-
-        <SectionTitle>{t.withdrawal_requests}</SectionTitle>
-        <View style={hubStyles.card} testID="hub-wd-list">
-          {wds === null ? <Empty>{t.loading}</Empty> : wds.length === 0 ? <Empty>{t.no_withdrawals}</Empty> : wds.map((w, i) => {
-            const short = w.payable_now != null && w.amount > w.payable_now + 0.005;
-            const busy = busyId === w.id;
-            return (
-              <View key={w.id} style={[{ paddingVertical: 10, borderTopWidth: i === 0 ? 0 : 1, borderTopColor: colors.line }]} testID={`hub-wd-${w.id}`}>
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                  <Text style={hubStyles.name}>{w.driver_name ?? "—"}</Text>
-                  <Text style={hubStyles.name}>{formatINR(w.amount)}</Text>
-                </View>
-                <Text style={hubStyles.sub}>
-                  {formatISTDate(w.requested_at)} · {w.bank_kind ? t.pay_to(`${w.bank_kind === "vpa" ? "UPI" : "bank"} ${w.bank_masked ?? ""}`.trim()) : t.no_bank}
-                </Text>
-                {short
-                  ? <Text style={hubStyles.subAlert}>{t.less_than_asked} {t.payable_now(formatINR(w.payable_now ?? 0))}</Text>
-                  : null}
-                <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm, flexWrap: "wrap" }}>
-                  {today?.razorpayx_ready && w.bank_kind ? (
-                    <Btn label={t.pay_now} small onPress={() => payNow(w)} busy={busy} disabled={short} testID={`hub-wd-pay-${w.id}`} />
-                  ) : null}
-                  <Btn label={t.mark_paid} small kind={today?.razorpayx_ready && w.bank_kind ? "ghost" : "primary"} disabled={short || busy}
-                    onPress={() => { setText(""); setErr(null); setAct({ w, kind: "manual" }); }} testID={`hub-wd-manual-${w.id}`} />
-                  <Btn label={t.reject} small kind="danger" disabled={busy}
-                    onPress={() => { setText(""); setErr(null); setAct({ w, kind: "reject" }); }} testID={`hub-wd-reject-${w.id}`} />
-                </View>
+                <Btn label={t.received} small onPress={() => setCash({ driver_id: d.driver_id, name: d.name, you_owe: d.you_owe })} testID={`hub-cash-btn-${d.driver_id}`} />
               </View>
-            );
-          })}
-        </View>
+            ))}
+          </View>
+        ) : null}
+
+        {tab === "received" ? (
+          <View style={[hubStyles.card, styles.panel]} testID="hub-received-list">
+            {received === null ? <Empty>{t.loading}</Empty> : received.length === 0 ? <Empty>{t.cash_received_none}</Empty> : received.map((r, i) => (
+              <View key={r.id} style={[styles.entry, i === 0 ? { borderTopWidth: 0 } : null]} testID={`hub-received-${r.id}`}>
+                <View style={styles.entryTop}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[hubStyles.name, r.undone ? styles.struck : null]} numberOfLines={1}>{r.driver_name ?? "—"}</Text>
+                    <Text style={hubStyles.sub} numberOfLines={2}>{[formatIST(r.created_at), r.reference, r.recorded_by ? t.by_who(r.recorded_by) : null].filter(Boolean).join(" · ")}</Text>
+                  </View>
+                  <View style={{ alignItems: "flex-end", gap: 4 }}>
+                    <Text style={[styles.amount, r.undone ? styles.struck : { color: colors.live }]}>{formatINR(r.amount)}</Text>
+                    {r.undone ? <Tag tone="mute">{t.undone}</Tag>
+                      : r.can_undo && undoing !== r.id ? (
+                        <TouchableOpacity onPress={() => { setErr(null); setUndoing(r.id); }} hitSlop={8} testID={`hub-undo-${r.id}`}>
+                          <Text style={styles.link}>{t.undo}</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                  </View>
+                </View>
+                {undoing === r.id ? (
+                  <View style={styles.confirm} testID="hub-undo-confirm">
+                    <Text style={styles.confirmText}>{t.undo_sure(formatINR(r.amount), r.driver_name ?? "")}</Text>
+                    <View style={styles.btns}>
+                      <Btn label={t.cancel} small kind="ghost" onPress={() => setUndoing(null)} disabled={busyId === r.id} style={{ flex: 1 }} />
+                      <Btn label={t.undo_yes} small kind="danger" onPress={() => undo(r)} busy={busyId === r.id} style={{ flex: 1 }} testID="hub-undo-yes" />
+                    </View>
+                  </View>
+                ) : null}
+              </View>
+            ))}
+          </View>
+        ) : null}
+
+        {tab === "withdrawals" ? (
+          <View style={styles.cards} testID="hub-wd-list">
+            {wds === null ? <Empty>{t.loading}</Empty> : wds.length === 0 ? (
+              <View style={styles.blank}>
+                <Icon name="checkmark-done-circle-outline" size={40} color={colors.line} />
+                <Text style={styles.blankText}>{t.no_withdrawals}</Text>
+              </View>
+            ) : wds.map((w) => {
+              const short = w.payable_now != null && w.amount > w.payable_now + 0.005;
+              const busy = busyId === w.id;
+              const canSend = !!today?.razorpayx_ready && !!w.bank_kind;
+              return (
+                <View key={w.id} style={hubStyles.card} testID={`hub-wd-${w.id}`}>
+                  <View style={styles.entryTop}>
+                    <Avatar name={w.driver_name} tone={short ? "warn" : "ok"} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={hubStyles.name} numberOfLines={1}>{w.driver_name ?? "—"}</Text>
+                      <Text style={hubStyles.sub} numberOfLines={2}>
+                        {formatISTDate(w.requested_at)} · {w.bank_kind ? t.pay_to(`${w.bank_kind === "vpa" ? "UPI" : "bank"} ${w.bank_masked ?? ""}`.trim()) : t.no_bank}
+                      </Text>
+                    </View>
+                    <Text style={styles.amount}>{formatINR(w.amount)}</Text>
+                  </View>
+                  {short ? <Text style={[hubStyles.warn, { marginTop: spacing.md, marginBottom: 0 }]}>{t.less_than_asked} {t.payable_now(formatINR(w.payable_now ?? 0))}</Text> : null}
+                  <View style={styles.btns}>
+                    <Btn label={t.reject} small kind="danger" disabled={busy} style={{ flex: 1 }}
+                      onPress={() => { setText(""); setErr(null); setAct({ w, kind: "reject" }); }} testID={`hub-wd-reject-${w.id}`} />
+                    <Btn label={t.mark_paid} small kind={canSend ? "ghost" : "primary"} disabled={short || busy} style={{ flex: 1 }}
+                      onPress={() => { setText(""); setErr(null); setAct({ w, kind: "manual" }); }} testID={`hub-wd-manual-${w.id}`} />
+                    {canSend ? <Btn label={t.pay_now} small onPress={() => payNow(w)} busy={busy} disabled={short} style={{ flex: 1 }} testID={`hub-wd-pay-${w.id}`} /> : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
       </ScrollView>
 
       <CashSheet target={cash} onClose={() => setCash(null)} onDone={(m) => { setCash(null); say(m); reload(); }} />
@@ -263,3 +299,30 @@ export default function Money() {
     </SafeAreaView>
   );
 }
+
+const ON_DARK = "#C9CDC5";       // quiet text on the charcoal card
+
+const styles = StyleSheet.create({
+  hero: { backgroundColor: colors.ink, borderRadius: radius.xl, padding: spacing.lg },
+  heroLabel: { fontFamily: fonts.uiMed, fontSize: 13, color: ON_DARK },
+  heroAmount: { fontFamily: fonts.display, fontSize: 44, lineHeight: 52, color: colors.white, marginTop: 2 },
+  heroLine: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: 4, flexWrap: "wrap" },
+  heroSub: { fontFamily: fonts.uiMed, fontSize: 14, color: ON_DARK },
+  heroFlag: { backgroundColor: "#E8806F", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 3 },
+  heroFlagText: { fontFamily: fonts.uiBold, fontSize: 12, color: colors.onBrand },
+  earn: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginTop: spacing.md },
+  earnIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brandTint, alignItems: "center", justifyContent: "center" },
+  panel: { marginTop: spacing.md, paddingVertical: 2 },
+  cards: { marginTop: spacing.md, gap: spacing.md },
+  inline: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: 2 },
+  amount: { fontFamily: fonts.dataMed, fontSize: 16, color: colors.ink },
+  struck: { textDecorationLine: "line-through", color: colors.muted },
+  link: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.alert },
+  entry: { paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.line },
+  entryTop: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  confirm: { marginTop: spacing.md, padding: spacing.md, borderRadius: radius.md, backgroundColor: "#F8E4E0" },
+  confirmText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
+  btns: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.md },
+  blank: { alignItems: "center", gap: spacing.sm, paddingVertical: spacing.xl },
+  blankText: { fontFamily: fonts.ui, fontSize: 14, color: colors.muted, textAlign: "center" },
+});

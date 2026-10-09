@@ -16,6 +16,7 @@ import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { useHubToday } from "@/src/hub/today";
+import { Icon } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -145,7 +146,7 @@ export default function Handover() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <View style={styles.bar}>
           <TouchableOpacity onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/cars" as never))} style={styles.back} testID="hub-ho-back">
-            <Text style={styles.backText}>‹</Text>
+            <Icon name="chevron-back" size={26} color={colors.ink} />
           </TouchableOpacity>
           <View style={{ flex: 1 }}>
             <Text style={styles.title} numberOfLines={1} testID="hub-ho-title">{t.shift_change}</Text>

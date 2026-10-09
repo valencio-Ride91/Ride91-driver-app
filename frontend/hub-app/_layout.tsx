@@ -7,9 +7,12 @@ import { useEffect } from "react";
 import { LogBox, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import { useFonts } from "expo-font";
+
 import { useAppFonts } from "@/src/hooks/use-app-fonts";
 import { RootErrorBoundary } from "@/src/components/ErrorBoundary";
 import { I18nProvider } from "@/src/i18n";
+import { ToastProvider, iconFont } from "@/src/hub/kit";
 import { HubSessionProvider, useHubSession } from "@/src/hub/session";
 import { HubTodayProvider } from "@/src/hub/today";
 import { colors } from "@/src/theme";
@@ -34,6 +37,7 @@ const Router: React.FC = () => {
 
   return (
     <HubTodayProvider>
+      <ToastProvider>
       <View style={{ flex: 1, backgroundColor: colors.paper }}>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
           <Stack.Screen name="login" />
@@ -47,13 +51,17 @@ const Router: React.FC = () => {
           <Stack.Screen name="earnings" options={{ presentation: "card" }} />
         </Stack>
       </View>
+      </ToastProvider>
     </HubTodayProvider>
   );
 };
 
 export default function RootLayout() {
   const [fontLoaded, fontErr] = useAppFonts();
-  const ready = fontLoaded || !!fontErr;
+  // The icons are a font too; wait for it so no tab shows blank squares. If it
+  // cannot load, carry on without icons rather than never opening.
+  const [iconsLoaded, iconsErr] = useFonts(iconFont);
+  const ready = (fontLoaded || !!fontErr) && (iconsLoaded || !!iconsErr);
 
   useEffect(() => {
     if (ready) SplashScreen.hideAsync();
