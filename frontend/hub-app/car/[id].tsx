@@ -8,13 +8,16 @@
 //   - Shift changes: each handover, with its photos.
 //
 // Removing a car retires it; its history stays on file.
+//
+// On a server that does not have the history yet, the page still opens from
+// the hub's car list, with Shift change and Remove, and says what is missing.
 import React, { useCallback, useRef, useState } from "react";
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
-import { CHECK_ITEMS, CarCheck, CarHistory, SERVICE_KINDS } from "@/src/hub/cars";
+import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, SERVICE_KINDS } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { ServiceSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
@@ -31,9 +34,11 @@ export default function Car() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { session } = useHubSession();
-  const signedIn = !!session?.hubId;
+  const hubId = session?.hubId;
+  const signedIn = !!hubId;
   const [h, setH] = useState<CarHistory | null>(null);
   const [failed, setFailed] = useState(false);
+  const [limited, setLimited] = useState(false);      // the server has no car history yet
   const [openCheck, setOpenCheck] = useState<string | null>(null);
   const [openHandover, setOpenHandover] = useState<string | null>(null);
   const [photos, setPhotos] = useState<Record<string, Photo[]>>({});
@@ -48,11 +53,27 @@ export default function Car() {
     if (!signedIn) return;          // the saved session is still being read back
     try {
       setH(await hubApi.get<CarHistory>(`/admin/vehicles/${id}/history`));
+      setLimited(false);
+      setFailed(false);
+      return;
+    } catch (e: any) {
+      if (e?.status !== 404) return setFailed(true);
+    }
+    // An older server: show the car from the hub's list, without its history.
+    try {
+      const list = await hubApi.get<CarsData>(`/admin/hubs/${hubId}/cars`);
+      const car = list.cars.find((c) => c.id === id);
+      if (!car) return setFailed(true);
+      setH({
+        vehicle: { id: car.id, number: car.number, model: car.model, current_soc: car.current_soc, odometer_km: car.odometer_km },
+        checks: [], services: [], last_done: {}, handovers: [],
+      });
+      setLimited(true);
       setFailed(false);
     } catch {
       setFailed(true);
     }
-  }, [id, signedIn]);
+  }, [id, signedIn, hubId]);
 
   // Reload whenever the page comes back into view (after an inspection or a shift change).
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -112,13 +133,17 @@ export default function Car() {
               <Text style={hubStyles.name}>{h.vehicle.model ?? "—"}</Text>
               <Text style={hubStyles.sub}>
                 {[h.vehicle.current_soc != null ? `${t.battery} ${h.vehicle.current_soc}%` : null,
-                  h.checks[0] ? t.car_last_inspected(formatISTDate(h.checks[0].created_at)) : t.car_never_inspected].filter(Boolean).join(" · ")}
+                  limited ? null : h.checks[0] ? t.car_last_inspected(formatISTDate(h.checks[0].created_at)) : t.car_never_inspected].filter(Boolean).join(" · ")}
               </Text>
               <View style={styles.actions}>
-                <Btn label={t.shift_change} small kind="ghost" onPress={() => router.push(`/handover/${id}` as never)} style={{ flex: 1 }} testID="hub-car-handover" />
-                <Btn label={t.car_inspect} small onPress={() => router.push(`/car-check?vehicle=${id}` as never)} style={{ flex: 1 }} testID="hub-car-inspect" />
+                <Btn label={t.shift_change} small kind={limited ? "primary" : "ghost"} onPress={() => router.push(`/handover/${id}` as never)} style={{ flex: 1 }} testID="hub-car-handover" />
+                {limited ? null : <Btn label={t.car_inspect} small onPress={() => router.push(`/car-check?vehicle=${id}` as never)} style={{ flex: 1 }} testID="hub-car-inspect" />}
               </View>
             </View>
+            {limited ? <Text style={[hubStyles.warn, { marginTop: spacing.md }]} testID="hub-car-limited">{t.car_limited}</Text> : null}
+
+            {limited ? null : (
+            <>
 
             <SectionTitle right={<TouchableOpacity onPress={() => setService(true)} testID="hub-car-add-service"><Text style={styles.link}>+ {t.car_add_service}</Text></TouchableOpacity>}>
               {t.car_last_done}
@@ -212,6 +237,9 @@ export default function Car() {
                 </View>
               ))}
             </View>
+
+            </>
+            )}
 
             {removing ? (
               <View style={[hubStyles.card, styles.danger]} testID="hub-car-remove-confirm">
