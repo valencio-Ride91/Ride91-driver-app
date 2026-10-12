@@ -41,15 +41,19 @@ GOOGLE_MAPS_API_KEY=<the Maps key> ANDROID_VERSION_CODE=<last + 1> CI=1 \
 #    build.gradle is left alone.
 cd android
 EXPO_PUBLIC_BACKEND_URL=<backend url> ./gradlew bundleRelease \
-  -PreactNativeArchitectures=arm64-v8a \
+  -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
   -Pandroid.injected.signing.store.file=<path to ride91-upload.jks> \
   -Pandroid.injected.signing.store.password=<from keystore.properties> \
   -Pandroid.injected.signing.key.alias=ride91-upload \
   -Pandroid.injected.signing.key.password=<from keystore.properties>
 # -> android/app/build/outputs/bundle/release/app-release.aab
-#    (64-bit only: on this Windows machine the 32-bit armeabi-v7a native build
-#    fails in ninja, so phones that are 32-bit only cannot install it. EAS
-#    cloud builds do not have that limit.)
+#    Both architectures, so 32-bit phones (many older and cheaper ones) can
+#    install it as well as 64-bit ones.
+#
+#    On Windows, build from a SHORT folder path (a copy of frontend/ at e.g.
+#    C:\r91\frontend). Under a long path the 32-bit native build fails in ninja
+#    ("manifest 'build.ninja' still dirty") because of Windows' 260-character
+#    path limit, which is what kept earlier builds 64-bit only.
 ```
 
 **Maps key and signing.** The Maps key is locked to the app's signing
@@ -108,7 +112,7 @@ turn; keep each one's generated project by renaming it (`android-driver/`,
 cd frontend
 APP_VARIANT=hub GOOGLE_MAPS_API_KEY=<the Maps key> ANDROID_VERSION_CODE=<n> CI=1 npx expo prebuild --platform android --clean --no-install
 cd android
-APP_VARIANT=hub EXPO_PUBLIC_BACKEND_URL=<backend url> ./gradlew assembleRelease bundleRelease   -PreactNativeArchitectures=arm64-v8a  <the same -Pandroid.injected.signing.* flags as above>
+APP_VARIANT=hub EXPO_PUBLIC_BACKEND_URL=<backend url> ./gradlew assembleRelease bundleRelease   -PreactNativeArchitectures=armeabi-v7a,arm64-v8a  <the same -Pandroid.injected.signing.* flags as above>
 ```
 
 Everything it shows comes from `GET /api/admin/hubs/<id>/today` plus the
