@@ -97,7 +97,13 @@ export const DutyProvider: React.FC<{ children: React.ReactNode; enabled: boolea
   const [today, setToday] = useState<DutyToday | null>(null);
   const [loading, setLoading] = useState(true);
   const { enqueue, unsynced } = useSync();
-  const { lat, lng } = useTracking();
+  const { lat, lng, setOnDuty } = useTracking();
+  // The tracker follows duty: frequent with its notice on duty, occasional
+  // with no notice off duty.
+  const onDutyNow = !!today?.on_duty;
+  useEffect(() => {
+    setOnDuty(onDutyNow);
+  }, [onDutyNow, setOnDuty]);
   const hold = useRef<LocalHold | null>(null);
   const unsyncedRef = useRef(unsynced);
   unsyncedRef.current = unsynced;

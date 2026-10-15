@@ -2,9 +2,16 @@
 //
 // Two things run while a driver is signed in:
 //
-//   * A background tracker (Android foreground service, see locationTask.ts)
-//     that reports the phone's position to the fleet about once a minute,
-//     with the app open, closed or the screen off.
+//   * A background tracker (see locationTask.ts) that reports the phone's
+//     position to the fleet, with the app open, closed or the screen off.
+//     It has two modes:
+//       - on duty: about once a minute. Android only allows that as a
+//         "foreground service", which must show a notice; the notice is kept
+//         plain and short.
+//       - off duty: no notice at all. Android then lets the tracker report
+//         only a few times an hour, which is enough to know roughly where an
+//         off-duty driver is. This needs "Allow all the time"; without it the
+//         tracker does not run off duty (the app still reports when opened).
 //   * A foreground watcher that keeps `lat` / `lng` here fresh, for the Home
 //     map and for stamping duty actions with where they happened.
 //
@@ -54,6 +61,9 @@ interface TrackingCtx {
   ensureLocation: () => Promise<boolean>;
   /** Try to start the background tracker again; true if it is now running. */
   restartTracker: () => Promise<boolean>;
+  /** Told by the duty state: on duty = frequent tracking with its notice,
+   *  off duty = occasional tracking with no notice. */
+  setOnDuty: (onDuty: boolean) => void;
   openSettings: () => void;
 }
 
@@ -61,6 +71,9 @@ const Ctx = createContext<TrackingCtx | null>(null);
 
 const PING_MS = 4 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 1000;
+// Off duty, ask for a fix this often; Android may space them out further.
+const QUIET_INTERVAL_MS = 15 * 60 * 1000;
+type Mode = "duty" | "quiet";
 
 export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: boolean }> = ({
   children,
@@ -79,6 +92,10 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const askedBackground = useRef(false);
   const webOk = useRef(false);
+  const [onDuty, setOnDuty] = useState(false);
+  // The mode the running tracker was started in; null = not known (e.g. it was
+  // left running by an earlier launch), so it is restarted in the right mode.
+  const modeRef = useRef<Mode | null>(null);
 
   // The notice that must come before Android's location prompt. `answer`
   // holds the waiting caller while the notice is on screen.
@@ -128,25 +145,50 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
   // service). The task in locationTask.ts does the actual POST /tracking/ping.
   const startBackground = useCallback(async (): Promise<boolean> => {
     if (Platform.OS === "web") return true;
+    const want: Mode = onDuty ? "duty" : "quiet";
     try {
-      if (await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK)) return true;
-      await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-        accuracy: Location.Accuracy.Balanced,
-        timeInterval: 60000,        // ~every 60s
-        distanceInterval: 40,       // or every 40m, whichever first
-        pausesUpdatesAutomatically: false,
-        showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: getCardText().track_title,
-          notificationBody: getCardText().track_body,
-          notificationColor: "#69BC46",
-        },
-      });
+      const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
+      if (running && modeRef.current === want) return true;
+      if (want === "quiet") {
+        // Without "Allow all the time" Android gives no location in the
+        // background unless the notice is up, so off duty nothing runs.
+        // That is expected, not a fault.
+        const bg = await Location.getBackgroundPermissionsAsync();
+        if (bg.status !== "granted") {
+          if (running) await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+          modeRef.current = "quiet";
+          return true;
+        }
+      }
+      if (running) await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+      if (want === "duty") {
+        await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 60000,        // ~every 60s
+          distanceInterval: 40,       // or every 40m, whichever first
+          pausesUpdatesAutomatically: false,
+          showsBackgroundLocationIndicator: true,
+          // No colour: a plain, quiet notice rather than a bright green card.
+          foregroundService: {
+            notificationTitle: getCardText().track_title,
+            notificationBody: getCardText().track_body,
+          },
+        });
+      } else {
+        await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: QUIET_INTERVAL_MS,
+          distanceInterval: 250,
+          pausesUpdatesAutomatically: false,
+        });
+      }
+      modeRef.current = want;
       return true;
     } catch {
+      modeRef.current = null;
       return false;   // surfaced via the health pill
     }
-  }, []);
+  }, [onDuty]);
 
   const stopBackground = useCallback(async () => {
     if (Platform.OS === "web") return;
@@ -157,6 +199,7 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     } catch {
       // ignore
     }
+    modeRef.current = null;
   }, []);
 
   // Read the three facts as they are right now, and restart the background
@@ -258,6 +301,20 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     return () => sub.remove();
   }, [enabled, requestPermission, checkStatus, stopBackground]);
 
+  // Duty started or ended: switch the tracker's mode (with or without its
+  // notice). Duty changes happen in the app, so it is in the foreground,
+  // which Android requires for starting the on-duty tracker.
+  useEffect(() => {
+    if (!enabled || !permissionOk || !servicesOn) return;
+    let alive = true;
+    startBackground().then((up) => {
+      if (alive) setServiceUp(up);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [onDuty, enabled, permissionOk, servicesOn, startBackground]);
+
   // Keep lat/lng fresh while the app is open and location is usable. Seeded
   // with the last known fix so the map is right at once, even indoors.
   const usable = enabled && permissionOk && servicesOn;
@@ -344,7 +401,7 @@ export const TrackingProvider: React.FC<{ children: React.ReactNode; enabled: bo
     : "synced";
 
   const value = useMemo<TrackingCtx>(
-    () => ({ health, lat: pos.lat, lng: pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings }),
+    () => ({ health, lat: pos.lat, lng: pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings, setOnDuty }),
     [health, pos.lat, pos.lng, permissionOk, locationOk, requestPermission, ensureLocation, restartTracker, openSettings],
   );
   return React.createElement(

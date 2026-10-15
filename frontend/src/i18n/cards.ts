@@ -357,9 +357,9 @@ const en = {
   doc_number_ph: "e.g. KA01 2020 0001234",
   doc_plus_days: (d: number) => `+${d}d`,
 
-  // ---- location notice (Android notification) — shown whenever signed in ----
-  track_title: "Ride91 — location sharing on",
-  track_body: "Your location is shared with the fleet while you are signed in.",
+  // ---- location notice (Android notification) — shown only while on duty ----
+  track_title: "Ride91 · On duty",
+  track_body: "Sharing your location with your hub.",
   track_stopped: "Tracking off",
   start_loc_title: "Turn on location",
   start_loc_body: "Ride91 needs your location to start duty. Switch location on and allow it for Ride91.",
@@ -794,9 +794,9 @@ const hi: CardText = {
   doc_number_ph: "जैसे KA01 2020 0001234",
   doc_plus_days: (d) => `+${d} दिन`,
 
-  // ---- location notice (Android notification) — shown whenever signed in ----
-  track_title: "Ride91 — लोकेशन साझा हो रही है",
-  track_body: "साइन इन रहने तक आपकी लोकेशन फ़्लीट के साथ साझा होती है।",
+  // ---- location notice (Android notification) — shown only while on duty ----
+  track_title: "Ride91 · ड्यूटी पर",
+  track_body: "आपकी लोकेशन आपके हब के साथ साझा हो रही है।",
   track_stopped: "ट्रैकिंग बंद",
   start_loc_title: "लोकेशन चालू करें",
   start_loc_body: "ड्यूटी शुरू करने के लिए Ride91 को आपकी लोकेशन चाहिए। लोकेशन चालू करें और Ride91 को अनुमति दें।",
