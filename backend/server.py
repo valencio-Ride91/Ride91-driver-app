@@ -3457,6 +3457,7 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
             "requests_pending": await db.requests.count_documents({**in_hub, "state": "pending"}),
             "unread_messages": await db.notifications.count_documents(
                 {**in_hub, "direction": "from_driver", "read": False}),
+            "qr_today": await _qr_collected(live_ids, bd, bd),
         },
         "cash_limit": get_setting("cash_limit", CASH_LIMIT),
         "razorpayx_ready": _razorpayx_configured(),
@@ -7306,6 +7307,87 @@ async def admin_collections(
         "grand_total": round(grand_total, 2),
         "count": grand_count,
         "from_date": from_date, "to_date": to_date,
+    }
+
+
+# ---- QR payments for one hub ------------------------------------------------
+async def _qr_collected(driver_ids: List[str], from_d: str, to_d: str) -> Dict[str, Any]:
+    """Total and number of rider payments on these drivers' collection QRs
+    over business days [from_d, to_d]."""
+    total, count = 0.0, 0
+    async for c in db.collections.find(
+        {"driver_id": {"$in": driver_ids or ["_none"]}, "business_date": {"$gte": from_d, "$lte": to_d}},
+        {"_id": 0, "amount": 1},
+    ):
+        total += float(c.get("amount") or 0)
+        count += 1
+    return {"total": round(total, 2), "count": count}
+
+
+QR_RANGE_MAX_DAYS = 92
+
+
+@api.get("/admin/hubs/{hub_id}/qr-collections")
+async def admin_hub_qr_collections(
+    hub_id: str, from_date: Optional[str] = None, to_date: Optional[str] = None,
+    admin: Dict = Depends(require_ops),
+):
+    """What riders paid on this hub's drivers' collection QRs over a range of
+    business days (default: today): a total per driver, including drivers who
+    collected nothing (and whether they have a QR at all), and each payment,
+    newest first. Each payment already counts against the cash the driver
+    owes. Hub managers may only open their own hub."""
+    _assert_my_hub(hub_id, admin)
+    today = business_date_now()
+    to_d = _ymd_or_400(to_date) if to_date else today
+    from_d = _ymd_or_400(from_date) if from_date else to_d
+    if from_d > to_d:
+        raise HTTPException(400, "bad_range")
+    if (datetime.strptime(to_d, "%Y-%m-%d") - datetime.strptime(from_d, "%Y-%m-%d")).days >= QR_RANGE_MAX_DAYS:
+        raise HTTPException(400, "range_too_long")
+    ids = await _hub_driver_ids(hub_id)
+    drivers = {d["id"]: d async for d in db.drivers.find(
+        {"id": {"$in": ids or ["_none"]}}, {"_id": 0, "id": 1, "name": 1, "code": 1, "archived": 1})}
+    has_qr = {r["driver_id"] async for r in db.driver_collection_qrs.find(
+        {"driver_id": {"$in": ids or ["_none"]}}, {"_id": 0, "driver_id": 1})}
+
+    per: Dict[str, Dict[str, Any]] = {}
+    payments: List[Dict[str, Any]] = []
+    async for c in db.collections.find(
+        {"driver_id": {"$in": ids or ["_none"]}, "business_date": {"$gte": from_d, "$lte": to_d}},
+        {"_id": 0},
+    ).sort("occurred_at", -1):
+        did = c["driver_id"]
+        row = per.setdefault(did, {"total": 0.0, "count": 0, "last_at": None})
+        row["total"] += float(c.get("amount") or 0)
+        row["count"] += 1
+        row["last_at"] = row["last_at"] or c.get("occurred_at")      # newest first
+        if len(payments) < 300:
+            payments.append({
+                "id": c.get("id"), "driver_id": did, "driver_name": drivers.get(did, {}).get("name"),
+                "amount": round(float(c.get("amount") or 0), 2),
+                "occurred_at": c.get("occurred_at"), "business_date": c.get("business_date"),
+                "ref": (c.get("razorpay_payment_id") or "")[-6:] or None,
+            })
+
+    items = []
+    for did, d in drivers.items():
+        row = per.get(did)
+        if d.get("archived") and not row:
+            continue            # a removed driver shows only if they collected in the range
+        items.append({
+            "driver_id": did, "name": d.get("name"), "code": d.get("code"), "has_qr": did in has_qr,
+            "total": round(row["total"], 2) if row else 0.0,
+            "count": row["count"] if row else 0,
+            "last_at": row["last_at"] if row else None,
+        })
+    items.sort(key=lambda x: (-x["total"], (x["name"] or "").lower()))
+    return {
+        "from_date": from_d, "to_date": to_d, "today": today,
+        "total": round(sum(i["total"] for i in items), 2),
+        "count": sum(i["count"] for i in items),
+        "items": items,
+        "payments": payments,
     }
 
 

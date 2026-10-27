@@ -67,6 +67,8 @@ export interface HubToday {
     withdrawals_pending: number;
     requests_pending: number;
     unread_messages: number;
+    /** Rider payments on the hub's drivers' QRs today (absent on an older server). */
+    qr_today?: { total: number; count: number };
   };
   cash_limit: number;
   razorpayx_ready: boolean;

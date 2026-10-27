@@ -148,6 +148,18 @@ export default function Today() {
               ) : null}
             </View>
 
+            {c?.qr_today ? (
+              <TouchableOpacity style={[hubStyles.card, styles.qr]} onPress={() => router.push("/qr-payments" as never)} testID="hub-qr-today">
+                <View style={styles.actionIcon}><Icon name="qr-code-outline" size={20} color={colors.live} /></View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.qrLabel}>{t.qr_today_label}</Text>
+                  <Text style={hubStyles.sub}>{t.qr_count(c.qr_today.count)}</Text>
+                </View>
+                <Text style={styles.qrAmount}>{formatINR(c.qr_today.total)}</Text>
+                <Icon name="chevron-forward" size={18} color={colors.muted} />
+              </TouchableOpacity>
+            ) : null}
+
             {noTime > 0 ? <Text style={[hubStyles.warn, { marginTop: spacing.md, marginBottom: 0 }]} testID="hub-no-shift-times">{t.no_shift_times(noTime)}</Text> : null}
 
             <SectionTitle right={today.attention.length ? <View style={styles.count}><Text style={styles.countText}>{today.attention.length}</Text></View> : null}>
@@ -286,4 +298,7 @@ const styles = StyleSheet.create({
   actionSub: { fontFamily: fonts.ui, fontSize: 12, color: colors.muted, marginTop: 2, lineHeight: 16 },
   link: { fontFamily: fonts.uiBold, fontSize: 13, color: colors.live },
   footer: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginTop: spacing.xl },
+  qr: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginTop: spacing.md },
+  qrLabel: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink },
+  qrAmount: { fontFamily: fonts.dataMed, fontSize: 18, color: colors.live },
 });

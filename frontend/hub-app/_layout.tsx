@@ -47,6 +47,7 @@ const Router: React.FC = () => {
           <Stack.Screen name="car/[id]" options={{ presentation: "card" }} />
           <Stack.Screen name="car-check" options={{ presentation: "card" }} />
           <Stack.Screen name="settings" options={{ presentation: "card" }} />
+          <Stack.Screen name="qr-payments" options={{ presentation: "card" }} />
           <Stack.Screen name="handover/[vehicleId]" options={{ presentation: "card" }} />
           <Stack.Screen name="earnings" options={{ presentation: "card" }} />
         </Stack>

@@ -192,6 +192,15 @@ export default function Money() {
           <Icon name="chevron-forward" size={18} color={colors.muted} />
         </TouchableOpacity>
 
+        <TouchableOpacity style={[hubStyles.card, styles.earn]} onPress={() => router.push("/qr-payments" as never)} testID="hub-qr-link">
+          <View style={styles.earnIcon}><Icon name="qr-code-outline" size={20} color={colors.live} /></View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={hubStyles.name}>{t.qr_title}</Text>
+            <Text style={hubStyles.sub}>{c?.qr_today ? `${t.today_word} · ${formatINR(c.qr_today.total)} · ${t.qr_count(c.qr_today.count)}` : t.qr_link_sub}</Text>
+          </View>
+          <Icon name="chevron-forward" size={18} color={colors.muted} />
+        </TouchableOpacity>
+
         <Segmented
           style={{ marginTop: spacing.lg }} testID="hub-money-tab" value={tab} onChange={setTab}
           options={[
