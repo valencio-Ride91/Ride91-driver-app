@@ -8993,6 +8993,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _on_startup() -> None:
+    # Setting up the database needs writes. If it refuses them (e.g. the cluster
+    # is over its storage quota), start anyway: reads keep working, so drivers
+    # and hubs can still see their data, instead of every request failing
+    # because the server would not start.
+    try:
+        await _prepare_database()
+    except Exception:
+        logger.exception("Database setup failed at startup; starting without it")
+    await load_settings()
+    if SEED_DEMO:
+        await _seed_if_empty()
+        await _ensure_demo_login()
+
+
+async def _prepare_database() -> None:
+    """Indexes, counters and the bootstrap owner. Safe to run on every start."""
     await db.duty_states.create_index([("driver_id", 1), ("started_at", 1)])
     await db.duty_states.create_index([("driver_id", 1), ("client_action_id", 1)], unique=True)
     # The ops driver list windows both duty_states aggregations on
@@ -9114,10 +9130,6 @@ async def _on_startup() -> None:
     await db.counters.update_one(
         {"id": "driver_code"}, {"$setOnInsert": {"id": "driver_code", "seq": 105}}, upsert=True)
     await _seed_admin_owner()
-    await load_settings()
-    if SEED_DEMO:
-        await _seed_if_empty()
-        await _ensure_demo_login()
 
 
 async def _ensure_demo_login() -> None:
