@@ -161,6 +161,10 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     # key is visible to whoever loads the page, which is why it must be
     # referrer-restricted. Blank = the panel uses OpenStreetMap.
     "google_maps_web_key": "",
+    # Pre-duty inspection (dashboard photo + 15-sec car video). Off for now:
+    # the videos filled the free database. Off = duty starts without one, the
+    # app is told today's check is done, and uploads are not stored.
+    "inspection_required": False,
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -1042,6 +1046,9 @@ def _ist_day_key() -> str:
 
 @api.post("/inspection")
 async def create_inspection(body: InspectionIn, driver: Dict = Depends(get_driver)):
+    if not get_setting("inspection_required"):
+        # Switched off: accept it so an older app moves on, but keep nothing.
+        return {"completed": True, "id": None, "created_at": iso(now_utc())}
     # Dedup on client_action_id (sync-queue retry safe)
     existing = await db.inspections.find_one(
         {"driver_id": driver["id"], "client_action_id": body.client_action_id},
@@ -1074,6 +1081,9 @@ async def create_inspection(body: InspectionIn, driver: Dict = Depends(get_drive
 @api.get("/inspection/today")
 async def inspection_today(driver: Dict = Depends(get_driver)):
     day_key = _ist_day_key()
+    if not get_setting("inspection_required"):
+        # Older apps only look at `completed`, so this lets them start duty.
+        return {"completed": True, "required": False, "id": None, "created_at": None, "day_key": day_key}
     row = await db.inspections.find_one(
         {"driver_id": driver["id"], "day_key": day_key},
         {"_id": 0, "dashboard_photo_b64": 0, "exterior_video_b64": 0},
@@ -1103,7 +1113,7 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     # HARD GATE: starting duty requires today's inspection. Platform switches
     # do NOT gate — they only make sense once on-duty anyway, and the client
     # blocks them until on-duty.
-    if body.state == "start_duty":
+    if body.state == "start_duty" and get_setting("inspection_required"):
         day_key = _ist_day_key()
         insp = await db.inspections.find_one(
             {"driver_id": driver["id"], "day_key": day_key}, {"_id": 0}

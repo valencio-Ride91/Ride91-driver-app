@@ -70,8 +70,10 @@ export default function Home() {
     };
   }, []);
 
-  // Whether today's car check is on file. Only used when the phone is
-  // offline; online, the server answers that question at the moment of start.
+  // Whether today's car check is on file (the server says it is when the check
+  // is switched off). Only used when the phone is offline; online, the server
+  // answers that question at the moment of start. Unknown counts as done, so
+  // a driver who opened the app with no network is not stuck.
   const [inspectionOk, setInspectionOk] = useState<boolean | null>(null);
   const loadInspection = useCallback(async () => {
     try {
@@ -107,8 +109,8 @@ export default function Home() {
   //   2. The server is asked to start duty. If today's car check is not on
   //      file it says so, and the driver goes to the inspection; finishing the
   //      inspection starts duty by itself, with no second tap.
-  //   3. With no network, the start is kept on the phone and sent later — but
-  //      only if the car check is already known to be done.
+  //   3. With no network, the start is kept on the phone and sent later —
+  //      unless the car check is known to be still to do.
   const [starting, setStarting] = useState(false);
   const startDuty = useCallback(async () => {
     if (starting) return;
@@ -121,8 +123,8 @@ export default function Home() {
         ]);
         return;
       }
-      const r = await startDutyNow(inspectionOk === true);
-      if (r === "inspection_required" || (r === "offline" && inspectionOk !== true)) {
+      const r = await startDutyNow(inspectionOk !== false);
+      if (r === "inspection_required" || (r === "offline" && inspectionOk === false)) {
         router.push("/inspection");
       } else if (r === "error") {
         Alert.alert(c.start_fail);
