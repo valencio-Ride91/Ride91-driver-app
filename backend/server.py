@@ -165,6 +165,13 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     # the videos filled the free database. Off = duty starts without one, the
     # app is told today's check is done, and uploads are not stored.
     "inspection_required": False,
+    # WhatsApp (Meta Cloud API): tells a driver when a rider pays on their QR.
+    # Owner-editable; the access token is a secret and is never returned.
+    "whatsapp_enabled": False,
+    "whatsapp_phone_number_id": "",
+    "whatsapp_access_token": "",
+    "whatsapp_template": "qr_payment_received",
+    "whatsapp_template_lang": "en",
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -869,6 +876,12 @@ class SettingsIn(BaseModel):
     razorpayx_webhook_secret: Optional[str] = None
     # Send "" to remove the key and go back to OpenStreetMap.
     google_maps_web_key: Optional[str] = None
+    # WhatsApp (owner only; the access token is never read back).
+    whatsapp_enabled: Optional[bool] = None
+    whatsapp_phone_number_id: Optional[str] = None
+    whatsapp_access_token: Optional[str] = None
+    whatsapp_template: Optional[str] = None
+    whatsapp_template_lang: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -2476,6 +2489,7 @@ async def admin_get_settings(admin: Dict = Depends(fleet_admin)):
         "payments": _payments_status(),
         "razorpayx_ready": _razorpayx_configured(),   # direct withdrawal needs this
         "google_maps_web_key": _maps_web_key() or None,
+        "whatsapp": _whatsapp_status(),
     }
 
 
@@ -2556,6 +2570,15 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
                 secret_keys.add(k)
     if body.google_maps_web_key is not None:
         updates["google_maps_web_key"] = body.google_maps_web_key.strip()
+    if body.whatsapp_enabled is not None:
+        updates["whatsapp_enabled"] = bool(body.whatsapp_enabled)
+    for k in ("whatsapp_phone_number_id", "whatsapp_access_token",
+              "whatsapp_template", "whatsapp_template_lang"):
+        v = getattr(body, k)
+        if v is not None and v.strip() != "":
+            updates[k] = v.strip()
+            if k == "whatsapp_access_token":
+                secret_keys.add(k)
     if updates:
         updates["updated_at"] = iso(now_utc())
         updates["updated_by"] = admin["username"]
@@ -2566,7 +2589,8 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
         await _audit(admin, "update_settings", "", meta)
     return {"ok": True, **_settings_out(), "payments": _payments_status(),
             "razorpayx_ready": _razorpayx_configured(),
-            "google_maps_web_key": _maps_web_key() or None}
+            "google_maps_web_key": _maps_web_key() or None,
+            "whatsapp": _whatsapp_status()}
 
 
 @api.post("/admin/settings/razorpayx/test")
@@ -7113,7 +7137,7 @@ async def _reconcile_collection_once(
     amount = round(int(amount_paise) / 100, 2)
     now = iso(now_utc())
     bd = business_date_now()
-    await db.collections.update_one(
+    first = await db.collections.update_one(
         {"razorpay_payment_id": razorpay_payment_id},
         {"$setOnInsert": {
             "id": str(uuid.uuid4()),
@@ -7149,6 +7173,119 @@ async def _reconcile_collection_once(
         }},
         upsert=True,
     )
+    # Only a payment seen for the first time gets a message, so a replayed
+    # webhook never sends it twice. Never lets a WhatsApp problem fail this.
+    if first.upserted_id is not None:
+        try:
+            await _whatsapp_qr_paid(driver_id, amount, razorpay_payment_id)
+        except Exception:
+            logger.exception("WhatsApp message for QR payment %s failed", razorpay_payment_id)
+
+
+# ---------------------------------------------------------------------------
+# WHATSAPP (Meta Cloud API) — "₹X received on your QR" to the driver.
+# ---------------------------------------------------------------------------
+# Business-started WhatsApp messages must use a template approved in Meta's
+# WhatsApp Manager. The template's body takes three values, in this order:
+#   {{1}} amount, {{2}} time (IST), {{3}} cash the driver still owes
+# e.g. "Ride91: ₹{{1}} received on your QR at {{2}}. Cash you owe now: ₹{{3}}."
+WHATSAPP_API = "https://graph.facebook.com/v23.0"
+
+
+def _whatsapp_ready() -> bool:
+    return bool(get_setting("whatsapp_enabled") and get_setting("whatsapp_phone_number_id")
+                and get_setting("whatsapp_access_token") and get_setting("whatsapp_template"))
+
+
+def _whatsapp_status() -> Dict[str, Any]:
+    """WhatsApp STATUS for the admin — never the access token."""
+    return {
+        "enabled": bool(get_setting("whatsapp_enabled")),
+        "ready": _whatsapp_ready(),
+        "phone_number_id": get_setting("whatsapp_phone_number_id") or None,
+        "access_token_set": bool(get_setting("whatsapp_access_token")),
+        "template": get_setting("whatsapp_template") or None,
+        "template_lang": get_setting("whatsapp_template_lang") or "en",
+    }
+
+
+def _wa_number(phone: Optional[str]) -> Optional[str]:
+    """Meta wants the number as digits with the country code: 91XXXXXXXXXX."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 10:
+        digits = "91" + digits
+    return digits if len(digits) >= 11 else None
+
+
+def _wa_amount(x: float) -> str:
+    return f"{int(x):,}" if float(x) == int(x) else f"{x:,.2f}"
+
+
+async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Send the template to one number. Returns (sent, message_id, error).
+    A short timeout: this runs inside Razorpay's webhook call."""
+    import httpx
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": get_setting("whatsapp_template"),
+            "language": {"code": get_setting("whatsapp_template_lang") or "en"},
+            "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}],
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.post(f"{WHATSAPP_API}/{get_setting('whatsapp_phone_number_id')}/messages", json=body,
+                             headers={"Authorization": f"Bearer {get_setting('whatsapp_access_token')}"})
+    except Exception as e:
+        return False, None, f"network: {type(e).__name__}"
+    data: Dict[str, Any] = {}
+    try:
+        data = r.json()
+    except Exception:
+        pass
+    if r.status_code >= 400:
+        err = (data.get("error") or {}) if isinstance(data, dict) else {}
+        return False, None, f"{r.status_code}: {err.get('message') or r.text[:200]}"
+    msgs = data.get("messages") or [{}]
+    return True, msgs[0].get("id"), None
+
+
+async def _whatsapp_qr_paid(driver_id: str, amount: float, payment_id: str) -> None:
+    if not _whatsapp_ready():
+        return
+    driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "phone": 1})
+    to = _wa_number((driver or {}).get("phone"))
+    row = {"id": str(uuid.uuid4()), "kind": "qr_paid", "driver_id": driver_id,
+           "ref": payment_id, "created_at": iso(now_utc())}
+    if not to:
+        await db.whatsapp_messages.insert_one({**row, "status": "failed", "error": "no_phone"})
+        return
+    owed = float((await _driver_balance(driver_id)).get("you_owe") or 0)
+    at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
+    sent, msg_id, err = await _whatsapp_send(to, [_wa_amount(amount), at, _wa_amount(owed)])
+    await db.whatsapp_messages.insert_one({**row, "to": to, "status": "sent" if sent else "failed",
+                                           "wa_message_id": msg_id, "error": err})
+
+
+class WhatsAppTestIn(BaseModel):
+    phone: str = Field(min_length=10, max_length=20)
+
+
+@api.post("/admin/settings/whatsapp/test")
+async def admin_test_whatsapp(body: WhatsAppTestIn, admin: Dict = Depends(require_owner)):
+    """Send the QR template, with sample values, to a number the owner types."""
+    if not _whatsapp_ready():
+        return {"ok": False, "error": "WhatsApp is not set up yet: switch it on and save the phone number ID, access token and template."}
+    to = _wa_number(body.phone)
+    if not to:
+        return {"ok": False, "error": "Enter a 10-digit mobile number, or one with its country code."}
+    at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
+    sent, _, err = await _whatsapp_send(to, ["250", at, "950"])
+    await _audit(admin, "whatsapp_test", to[-4:])
+    return {"ok": True} if sent else {"ok": False, "error": f"Meta refused it ({err})."}
 
 
 # Driver codes: R91D-<4-digit running number>-<CITY>, e.g. R91D-0106-PNQ. One

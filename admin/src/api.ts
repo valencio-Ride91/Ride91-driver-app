@@ -658,6 +658,17 @@ export interface SettingsData {
   google_maps_web_key?: string | null;   // admin panel maps; null = OpenStreetMap
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
+  // WhatsApp status (never the access token). Absent on older servers.
+  whatsapp?: WhatsAppStatus;
+}
+
+export interface WhatsAppStatus {
+  enabled: boolean;
+  ready: boolean;
+  phone_number_id: string | null;
+  access_token_set: boolean;
+  template: string | null;
+  template_lang: string;
 }
 
 export interface PaymentsStatus {

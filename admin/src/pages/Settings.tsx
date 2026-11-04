@@ -41,6 +41,16 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [xMsg, setXMsg] = useState<string | null>(null);
   const [xErr, setXErr] = useState<string | null>(null);
 
+  // WhatsApp (Meta Cloud API)
+  const [waPhoneId, setWaPhoneId] = useState("");
+  const [waToken, setWaToken] = useState("");
+  const [waTemplate, setWaTemplate] = useState("");
+  const [waLang, setWaLang] = useState("");
+  const [waTestTo, setWaTestTo] = useState("");
+  const [waBusy, setWaBusy] = useState(false);
+  const [waMsg, setWaMsg] = useState<string | null>(null);
+  const [waErr, setWaErr] = useState<string | null>(null);
+
   // loyalty wallet
   const [wEnabled, setWEnabled] = useState(true);
   const [wPerDay, setWPerDay] = useState("");
@@ -231,6 +241,44 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setXErr("Could not run the test.");
     } finally {
       setXBusy(false);
+    }
+  };
+
+  const saveWhatsApp = async (enabled?: boolean) => {
+    setWaErr(null); setWaMsg(null);
+    const body: Record<string, string | boolean> = {};
+    if (waPhoneId.trim()) body.whatsapp_phone_number_id = waPhoneId.trim();
+    if (waToken.trim()) body.whatsapp_access_token = waToken.trim();
+    if (waTemplate.trim()) body.whatsapp_template = waTemplate.trim();
+    if (waLang.trim()) body.whatsapp_template_lang = waLang.trim();
+    if (enabled !== undefined) body.whatsapp_enabled = enabled;
+    if (Object.keys(body).length === 0) return setWaErr("Enter at least one value to update.");
+    setWaBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", body);
+      setData(s);
+      setWaPhoneId(""); setWaToken(""); setWaTemplate(""); setWaLang("");   // never keep the token in the form
+      setWaMsg(enabled === true ? "WhatsApp messages switched on." : enabled === false ? "WhatsApp messages switched off." : "WhatsApp details updated.");
+      setTimeout(() => setWaMsg(null), 4000);
+    } catch (e: any) {
+      setWaErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setWaBusy(false);
+    }
+  };
+
+  const testWhatsApp = async () => {
+    setWaErr(null); setWaMsg(null);
+    if (!waTestTo.trim()) return setWaErr("Enter the mobile number to send the test to.");
+    setWaBusy(true);
+    try {
+      const r = await api.post<{ ok: boolean; error?: string }>("/admin/settings/whatsapp/test", { phone: waTestTo.trim() });
+      if (r.ok) setWaMsg("Sent. It should arrive on WhatsApp within a minute.");
+      else setWaErr(r.error || "Meta did not accept it.");
+    } catch {
+      setWaErr("Could not send the test.");
+    } finally {
+      setWaBusy(false);
     }
   };
 
@@ -628,6 +676,63 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
               <button className="ghost" onClick={testPayouts} disabled={xBusy || !data?.payments?.razorpayx_enabled}
                 title={data?.payments?.razorpayx_enabled ? "Reads only; sends no money" : "Save the account number and keys first"}>
                 Test connection
+              </button>
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
+        <h2 style={{ marginTop: 0 }}>WhatsApp — QR payment messages {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          When a rider pays on a driver's QR, the driver gets a WhatsApp message with the amount and the cash they still owe. Sent through Meta's WhatsApp Cloud API.{" "}
+          Status:{" "}
+          <span className={`tag ${data?.whatsapp?.ready ? "live" : "muted"}`} data-testid="wa-status">
+            {data?.whatsapp?.ready ? "sending" : data?.whatsapp?.enabled ? "on, details missing" : "off"}
+          </span>
+        </div>
+        <table className="data" style={{ marginBottom: 12 }}>
+          <tbody>
+            <tr><td>Phone number ID</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.phone_number_id ?? <span className="muted-sm">not set</span>}</td></tr>
+            <tr><td>Access token</td><td>{data?.whatsapp?.access_token_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+            <tr><td>Template</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.template ?? "—"} <span className="muted-sm">({data?.whatsapp?.template_lang ?? "en"})</span></td></tr>
+          </tbody>
+        </table>
+
+        {isOwner ? (
+          <>
+            <div className="muted-sm" style={{ marginBottom: 6 }}>
+              From Meta → WhatsApp Manager / the app's WhatsApp → API Setup. Use a permanent (system user) access token, not the 24-hour test one. The template must be approved, in the Utility category, with three values in its body: amount, time, cash owed — e.g. <code>{"Ride91: ₹{{1}} received on your QR at {{2}}. Cash you owe now: ₹{{3}}."}</code> Leave any field blank to keep its current value.
+            </div>
+            <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+              <label>Phone number ID
+                <input value={waPhoneId} onChange={(e) => setWaPhoneId(e.target.value.replace(/\s/g, ""))} placeholder="leave blank to keep" autoComplete="off" inputMode="numeric" />
+              </label>
+              <label>Access token
+                <input type="password" value={waToken} onChange={(e) => setWaToken(e.target.value)} placeholder="•••••••• (leave blank to keep)" autoComplete="new-password" />
+              </label>
+              <label>Template name
+                <input value={waTemplate} onChange={(e) => setWaTemplate(e.target.value)} placeholder={data?.whatsapp?.template ?? "qr_payment_received"} autoComplete="off" />
+              </label>
+              <label>Template language code
+                <input value={waLang} onChange={(e) => setWaLang(e.target.value)} placeholder={data?.whatsapp?.template_lang ?? "en"} autoComplete="off" />
+              </label>
+            </div>
+            {waErr ? <div className="err">{waErr}</div> : null}
+            {waMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{waMsg}</div> : null}
+            <div className="form-actions">
+              <button className="primary" onClick={() => saveWhatsApp()} disabled={waBusy}>{waBusy ? "Working…" : "Update details"}</button>
+              {data?.whatsapp?.enabled
+                ? <button className="ghost" onClick={() => saveWhatsApp(false)} disabled={waBusy}>Switch off</button>
+                : <button className="ghost" onClick={() => saveWhatsApp(true)} disabled={waBusy}>Switch on</button>}
+            </div>
+            <div className="form-grid" style={{ gridTemplateColumns: "1fr auto", alignItems: "end", marginTop: 12 }}>
+              <label>Send a test to
+                <input value={waTestTo} onChange={(e) => setWaTestTo(e.target.value)} placeholder="your mobile number" autoComplete="off" inputMode="tel" />
+              </label>
+              <button className="ghost" onClick={testWhatsApp} disabled={waBusy || !data?.whatsapp?.ready}
+                title={data?.whatsapp?.ready ? "Sends the template with sample amounts" : "Switch on and save the details first"}>
+                Send test
               </button>
             </div>
           </>
