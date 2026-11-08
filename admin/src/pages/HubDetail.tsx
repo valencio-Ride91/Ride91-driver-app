@@ -80,11 +80,13 @@ export default function HubDetail() {
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(null), 3000); };
 
-  // Allot (or clear) a car's day/night slot to a driver — atomic on the server.
+  // Allot (or clear) a car's day/night slot to a driver. Picking someone for a
+  // slot that is taken is a deliberate swap here, so `replace` moves the old
+  // driver off the car.
   const allot = async (vehicleId: string, shift: "day" | "night", driverId: string) => {
     setErr(null);
     try {
-      await api.post(`/admin/vehicles/${vehicleId}/assign`, { shift, driver_id: driverId || null });
+      await api.post(`/admin/vehicles/${vehicleId}/assign`, { shift, driver_id: driverId || null, replace: true });
       await load();
       flash("Allotment updated.");
     } catch {

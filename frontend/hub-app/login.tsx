@@ -15,7 +15,7 @@ interface HubRow { id: string; name: string }
 export default function Login() {
   const t = useHubText();
   const { lang, setLang } = useI18n();
-  const { session, signIn, chooseHub, signOut } = useHubSession();
+  const { session, notice, signIn, chooseHub, signOut } = useHubSession();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,7 +40,8 @@ export default function Login() {
       await signIn(username, password);
       setPassword("");
     } catch (e: any) {
-      setErr(e?.status === 401 ? t.signin_bad : e?.status === 429 ? t.signin_locked : t.signin_fail);
+      setErr(e?.body?.detail === "no_access" ? t.signin_no_access
+        : e?.status === 401 ? t.signin_bad : e?.status === 429 ? t.signin_locked : t.signin_fail);
     } finally {
       setBusy(false);
     }
@@ -95,7 +96,9 @@ export default function Login() {
                 onSubmitEditing={submit}
                 style={[hubStyles.input, styles.field]}
               />
-              {err ? <Text style={hubStyles.err} testID="hub-login-err">{err}</Text> : null}
+              {err ? <Text style={hubStyles.err} testID="hub-login-err">{err}</Text>
+                : notice ? <Text style={hubStyles.err} testID="hub-login-notice">{notice === "no_access" ? t.signin_no_access : t.signed_out_changed}</Text>
+                : null}
               <Btn label={t.signin} onPress={submit} busy={busy} style={{ marginTop: spacing.md }} testID="hub-login-submit" />
             </>
           )}

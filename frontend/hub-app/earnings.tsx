@@ -3,7 +3,7 @@
 // driver's salary and the cash they owe, so each save is one app for one
 // driver for one day, and an official Uber-report figure can never be typed
 // over.
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -30,7 +30,15 @@ interface Row {
   cash_total: number;
   entered: boolean;
 }
-interface Day { date: string; today: string; items: Row[]; count: number; entered: number }
+interface Day {
+  date: string;
+  today: string;
+  items: Row[];
+  count: number;
+  entered: number;
+  /** Days before this are the office's to change (null / absent: no limit). */
+  edit_from?: string | null;
+}
 
 type Draft = Record<App, { gross: string; cash: string }>;
 
@@ -55,17 +63,22 @@ export default function Earnings() {
   const [err, setErr] = useState<string | null>(null);
   const say = useToast();
 
+  // The date the screen is showing. A reply for any other date (the manager
+  // tapped on before it came back) is dropped, so the list, the sheet and the
+  // save always belong to the date in the header.
+  const wanted = useRef<string | null>(null);
   const load = useCallback(async (d: string | null) => {
     if (!hubId) return;
     try {
       // Earnings are normally entered the morning after, so open on yesterday.
-      let target = d;
-      if (!target) {
+      if (!d) {
         const probe = await hubApi.get<Day>(`/admin/hubs/${hubId}/earnings-day`);
-        target = shiftDate(probe.today, -1);
-        setDate(target);
+        setDate(shiftDate(probe.today, -1));      // the effect below loads it
+        return;
       }
-      setDay(await hubApi.get<Day>(`/admin/hubs/${hubId}/earnings-day?date=${target}`));
+      wanted.current = d;
+      const got = await hubApi.get<Day>(`/admin/hubs/${hubId}/earnings-day?date=${d}`);
+      if (wanted.current === d && got.date === d) setDay(got);
     } catch {
       // keep what we had
     }
@@ -77,7 +90,12 @@ export default function Earnings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date, hubId]);
 
+  // The list on screen is for the date in the header (not one still loading).
+  const shown = day && date && day.date === date ? day : null;
+  const tooOld = !!shown?.edit_from && shown.date < shown.edit_from;
+
   const open = (r: Row) => {
+    if (tooOld) return say(t.earn_too_old, "bad");
     const d = {} as Draft;
     for (const a of APPS) {
       const e = r.apps[a];
@@ -89,7 +107,7 @@ export default function Earnings() {
   };
 
   const save = async () => {
-    if (!editing || !draft || !day || busy) return;
+    if (!editing || !draft || !shown || busy) return;
     setErr(null);
     // Only apps that are not locked, have a fares figure, and actually changed.
     const todo: { app: App; gross: number; cash: number }[] = [];
@@ -113,15 +131,17 @@ export default function Earnings() {
     try {
       for (const x of todo) {
         await hubApi.post(`/admin/drivers/${editing.driver_id}/earnings`, {
-          business_date: day.date, platform: x.app, gross_amount: x.gross, cash_amount: x.cash,
+          business_date: shown.date, platform: x.app, gross_amount: x.gross, cash_amount: x.cash,
         });
       }
       const name = editing.name ?? "";
       setEditing(null);
       say(t.earn_saved(name));
-      await Promise.all([load(day.date), refresh()]);
+      await Promise.all([load(shown.date), refresh()]);
     } catch (e: any) {
-      setErr(e?.body?.detail === "already_imported" ? t.from_report : t.action_fail);
+      const code = e?.body?.detail;
+      setErr(code === "already_imported" ? t.from_report : code === "too_old_to_change" ? t.earn_too_old
+        : code === "cash_more_than_fares" ? t.earn_cash_more : t.action_fail);
     } finally {
       setBusy(false);
     }
@@ -144,14 +164,15 @@ export default function Earnings() {
           <IconBtn icon="chevron-back" tone="mute" onPress={() => date && setDate(shiftDate(date, -1))} testID="hub-earn-prev" />
           <View style={{ flex: 1, alignItems: "center" }}>
             <Text style={styles.date} testID="hub-earn-date">{date ? formatISTDate(`${date}T12:00:00+05:30`) : ""}</Text>
-            <Text style={hubStyles.sub}>{[dayLabel, day ? t.earnings_progress(day.entered, day.count) : ""].filter(Boolean).join(" · ")}</Text>
+            <Text style={hubStyles.sub}>{[dayLabel, shown ? t.earnings_progress(shown.entered, shown.count) : ""].filter(Boolean).join(" · ")}</Text>
           </View>
           <IconBtn icon="chevron-forward" tone="mute" disabled={atToday} onPress={() => date && setDate(shiftDate(date, 1))} testID="hub-earn-next" />
         </View>
 
-        {!day ? <Empty>{t.loading}</Empty> : (
+        {tooOld ? <Text style={[hubStyles.sub, { marginBottom: spacing.sm, textAlign: "center" }]} testID="hub-earn-too-old">{t.earn_too_old}</Text> : null}
+        {!shown ? <Empty>{t.loading}</Empty> : (
           <View style={hubStyles.card} testID="hub-earn-list">
-            {day.items.length === 0 ? <Empty>{t.no_drivers}</Empty> : day.items.map((r, i) => (
+            {shown.items.length === 0 ? <Empty>{t.no_drivers}</Empty> : shown.items.map((r, i) => (
               <TouchableOpacity key={r.driver_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} onPress={() => open(r)} testID={`hub-earn-${r.driver_id}`}>
                 <View style={{ flex: 1 }}>
                   <Text style={hubStyles.name}>{r.name ?? "—"}</Text>
@@ -170,7 +191,7 @@ export default function Earnings() {
         )}
       </ScrollView>
 
-      <BottomSheet visible={!!editing} onClose={() => (busy ? undefined : setEditing(null))} title={editing ? `${editing.name ?? ""} · ${day?.date ?? ""}` : ""} testID="hub-earn-sheet">
+      <BottomSheet visible={!!editing} onClose={() => (busy ? undefined : setEditing(null))} title={editing ? `${editing.name ?? ""} · ${shown?.date ?? ""}` : ""} testID="hub-earn-sheet">
         <View style={styles.headRow}>
           <Text style={[styles.colApp]} />
           <Text style={styles.colHead}>{t.fares_total}</Text>

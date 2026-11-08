@@ -2869,43 +2869,64 @@ async def admin_hub_roster(hub_id: str, admin: Dict = Depends(require_ops)):
 class VehicleAssignIn(BaseModel):
     driver_id: Optional[str] = None     # None clears the slot
     shift: Literal["day", "night"] = "day"
+    # The slot already has someone else in it: True moves them off the car
+    # (the admin panel's slot picker), False refuses with shift_slot_taken (the
+    # Hub app, whose car list may be out of date).
+    replace: bool = False
+    # Clearing only: let go of the car only if this driver still holds the slot,
+    # so a stale screen cannot clear someone who was put there since.
+    release_driver_id: Optional[str] = None
 
 
 @api.post("/admin/vehicles/{vehicle_id}/assign")
 async def admin_assign_vehicle(
     vehicle_id: str, body: VehicleAssignIn, admin: Dict = Depends(require_ops)
 ):
-    """Allot a car's day/night slot to a driver (or clear it). Atomic: frees the
-    slot's current holder, moves the new driver onto this car+shift, and keeps
-    the driver in the car's hub. Hub-managers are limited to their hub."""
+    """Allot a car's day/night slot to a driver (or clear it), and keep the
+    driver in the car's hub. Everything is checked before anything changes, so
+    a refused request leaves the slot as it was. Hub-managers are limited to
+    their hub."""
     scope = hub_scope(admin)
-    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1, "retired": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
     await _assert_vehicle_in_scope(veh, scope)
-    # Free whoever currently holds this car on this shift.
+    if not body.driver_id:
+        q: Dict[str, Any] = {"vehicle_id": vehicle_id, "shift_type": body.shift}
+        if body.release_driver_id:
+            q["id"] = body.release_driver_id
+        await db.drivers.update_many(q, {"$set": {"vehicle_id": None}})
+        await _audit(admin, "clear_vehicle_slot", vehicle_id,
+                     {"shift": body.shift, "driver_id": body.release_driver_id})
+        return {"ok": True, "vehicle_id": vehicle_id, "shift": body.shift, "driver_id": None}
+
+    if veh.get("retired"):
+        raise HTTPException(409, "vehicle_retired")
+    drv = await db.drivers.find_one(
+        {"id": body.driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1, "archived": 1})
+    if not drv:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(drv, scope)
+    if drv.get("archived"):
+        raise HTTPException(409, "driver_archived")
+    if not body.replace:
+        await _check_shift_slot(vehicle_id, body.shift, body.driver_id)
+    # Free whoever else holds this car on this shift (only reached when the
+    # slot is empty, or the caller asked to replace them).
     await db.drivers.update_many(
-        {"vehicle_id": vehicle_id, "shift_type": body.shift},
+        {"vehicle_id": vehicle_id, "shift_type": body.shift, "id": {"$ne": body.driver_id}},
         {"$set": {"vehicle_id": None}},
     )
-    if body.driver_id:
-        drv = await db.drivers.find_one(
-            {"id": body.driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
-        if not drv:
-            raise HTTPException(404, "driver_not_found")
-        await _assert_driver_in_scope(drv, scope)
-        hub = await db.hubs.find_one({"id": veh.get("hub_id")}, {"_id": 0, "name": 1}) if veh.get("hub_id") else None
-        await db.drivers.update_one(
-            {"id": body.driver_id},
-            {"$set": {
-                "vehicle_id": vehicle_id, "shift_type": body.shift,
-                "hub_id": veh.get("hub_id"), "hub_name": hub.get("name") if hub else None,
-            }},
-        )
-        await _audit(admin, "assign_vehicle", vehicle_id,
-                     {"driver_id": body.driver_id, "shift": body.shift})
-    else:
-        await _audit(admin, "clear_vehicle_slot", vehicle_id, {"shift": body.shift})
+    hub = await db.hubs.find_one({"id": veh.get("hub_id")}, {"_id": 0, "name": 1}) if veh.get("hub_id") else None
+    await db.drivers.update_one(
+        {"id": body.driver_id},
+        {"$set": {
+            "vehicle_id": vehicle_id, "shift_type": body.shift,
+            "hub_id": veh.get("hub_id"), "hub_name": hub.get("name") if hub else None,
+        }},
+    )
+    await _audit(admin, "assign_vehicle", vehicle_id,
+                 {"driver_id": body.driver_id, "shift": body.shift, "replace": body.replace})
     return {"ok": True, "vehicle_id": vehicle_id, "shift": body.shift, "driver_id": body.driver_id}
 
 
@@ -3231,7 +3252,10 @@ async def admin_update_driver(
     changed = [k for k in updates if k != "password_hash"]
     if password_reset:
         changed.append("password")
-        await _audit(admin, "reset_driver_password", driver_id)
+        # A reset is how a lost phone or a departed driver's phone is shut
+        # out, so every phone signed in with the old password is signed out.
+        gone = await db.sessions.delete_many({"driver_id": driver_id})
+        await _audit(admin, "reset_driver_password", driver_id, {"signed_out": gone.deleted_count})
     return {"ok": True, "id": driver_id, "updated": changed}
 
 
@@ -3536,7 +3560,45 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
 # drags megabytes of images along.
 # ---------------------------------------------------------------------------
 HANDOVER_MAX_PHOTOS = 8
-HANDOVER_MAX_PHOTO_CHARS = 4_000_000     # about 3 MB of image as base64 text
+HANDOVER_MAX_PHOTO_CHARS = 4_000_000     # about 3 MB of image as base64 text (what the phone may send)
+# What is kept: each photo is shrunk to this long edge and JPEG quality (a
+# phone photo of several MB becomes about 100 KB, still enough to see a
+# scratch), and deleted after HANDOVER_PHOTO_KEEP_DAYS. The database is the
+# small free tier; full-size photos would fill it within days.
+HANDOVER_PHOTO_MAX_EDGE = 1024
+HANDOVER_PHOTO_QUALITY = 60
+HANDOVER_PHOTO_KEEP_DAYS = 45
+# A reading this far above the last one is more likely a typing slip (an extra
+# digit) than a day's driving; the hub is asked to confirm it.
+ODOMETER_MAX_JUMP_KM = 1500
+
+
+def _shrink_handover_photo(data: str) -> bytes:
+    """A data: URL or bare base64 picture -> a small JPEG. 400 if it is not a
+    picture."""
+    import base64 as _b64
+    import io as _io
+    from PIL import Image, ImageOps
+    raw = data.split(",", 1)[1] if data.startswith("data:") else data
+    try:
+        img = Image.open(_io.BytesIO(_b64.b64decode(raw, validate=False)))
+        img = ImageOps.exif_transpose(img)        # phones store the turn in EXIF
+        img.thumbnail((HANDOVER_PHOTO_MAX_EDGE, HANDOVER_PHOTO_MAX_EDGE))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        out = _io.BytesIO()
+        img.save(out, "JPEG", quality=HANDOVER_PHOTO_QUALITY, optimize=True)
+        return out.getvalue()
+    except Exception:
+        raise HTTPException(400, "photo_unreadable")
+
+
+def _handover_photo_data(p: Dict) -> Optional[str]:
+    """A stored photo as a data: URL (new rows keep JPEG bytes, old ones text)."""
+    if p.get("jpeg") is not None:
+        import base64 as _b64
+        return "data:image/jpeg;base64," + _b64.b64encode(bytes(p["jpeg"])).decode("ascii")
+    return p.get("data")
 
 
 class HandoverPhotoIn(BaseModel):
@@ -3552,6 +3614,9 @@ class HandoverIn(BaseModel):
     odometer_km: Optional[float] = Field(default=None, ge=0)
     damage_note: Optional[str] = Field(default=None, max_length=500)
     photos: List[HandoverPhotoIn] = Field(default_factory=list)
+    # The hub has seen the "lower than / far above the last reading" warning
+    # and says this reading is right (it corrects an earlier slip).
+    odometer_confirmed: bool = False
     client_action_id: str
 
 
@@ -3634,14 +3699,24 @@ async def admin_record_handover(hub_id: str, body: HandoverIn, admin: Dict = Dep
             raise HTTPException(403, "driver_not_in_hub")
         d = await db.drivers.find_one({"id": did}, {"_id": 0, "name": 1})
         names[did] = (d or {}).get("name")
-    # An odometer never runs backwards; a lower reading is a typing slip.
+    # An odometer never runs backwards, and does not jump a thousand km in a
+    # shift: either is usually a typing slip, so the hub is asked to confirm.
+    # Confirming a lower reading is how an earlier slip (one digit too many)
+    # gets corrected; otherwise every later shift change would be refused.
     prev_odo = vehicle.get("odometer_km")
-    if body.odometer_km is not None and prev_odo is not None and body.odometer_km < float(prev_odo):
-        raise HTTPException(400, "odometer_lower")
+    odo_corrected = False
+    if body.odometer_km is not None and prev_odo is not None:
+        if body.odometer_km < float(prev_odo):
+            if not body.odometer_confirmed:
+                raise HTTPException(400, "odometer_lower")
+            odo_corrected = True
+        elif body.odometer_km - float(prev_odo) > ODOMETER_MAX_JUMP_KM and not body.odometer_confirmed:
+            raise HTTPException(400, "odometer_jump")
     if len(body.photos) > HANDOVER_MAX_PHOTOS:
         raise HTTPException(400, "too_many_photos")
     if any(len(p.data) > HANDOVER_MAX_PHOTO_CHARS for p in body.photos):
         raise HTTPException(413, "photo_too_large")
+    shrunk = [(p.label, _shrink_handover_photo(p.data)) for p in body.photos]
 
     cash_due = 0.0
     if body.from_driver_id:
@@ -3667,11 +3742,16 @@ async def admin_record_handover(hub_id: str, body: HandoverIn, admin: Dict = Dep
         "created_by": admin["username"],
         "client_action_id": body.client_action_id,
     }
+    if odo_corrected:
+        row["odometer_corrected_from"] = prev_odo
     await db.handovers.insert_one(row.copy())
-    if body.photos:
+    if shrunk:
+        from bson import Binary
+        expire_at = now_utc() + timedelta(days=HANDOVER_PHOTO_KEEP_DAYS)
         await db.handover_photos.insert_many([
-            {"id": str(uuid.uuid4()), "handover_id": row["id"], "label": p.label, "data": p.data, "created_at": now}
-            for p in body.photos])
+            {"id": str(uuid.uuid4()), "handover_id": row["id"], "label": label, "jpeg": Binary(jpeg),
+             "bytes": len(jpeg), "created_at": now, "expire_at": expire_at}
+            for label, jpeg in shrunk])
     # The car's own record follows the latest reading.
     car_update: Dict[str, Any] = {"last_handover_at": now}
     if body.soc_pct is not None:
@@ -3681,7 +3761,8 @@ async def admin_record_handover(hub_id: str, body: HandoverIn, admin: Dict = Dep
     await db.vehicles.update_one({"id": vehicle["id"]}, {"$set": car_update})
     await _audit(admin, "shift_change", vehicle["id"], {
         "from": row["from_driver_name"], "to": row["to_driver_name"], "soc_pct": body.soc_pct,
-        "odometer_km": body.odometer_km, "damage": bool(row["damage_note"]), "photos": len(body.photos)})
+        "odometer_km": body.odometer_km, "damage": bool(row["damage_note"]), "photos": len(body.photos),
+        **({"odometer_corrected_from": prev_odo} if odo_corrected else {})})
     return {"ok": True, "duplicate": False, "handover": _handover_out(row)}
 
 
@@ -3701,7 +3782,7 @@ async def admin_get_handover(handover_id: str, admin: Dict = Depends(require_ops
     if not h:
         raise HTTPException(404, "handover_not_found")
     _assert_my_hub(h["hub_id"], admin)
-    photos = [{"label": p.get("label"), "data": p.get("data")} async for p in db.handover_photos.find(
+    photos = [{"label": p.get("label"), "data": _handover_photo_data(p)} async for p in db.handover_photos.find(
         {"handover_id": handover_id}, {"_id": 0}).sort("created_at", 1)]
     return {**_handover_out(h), "photos": photos}
 
@@ -3739,6 +3820,8 @@ async def admin_hub_earnings_day(hub_id: str, date: Optional[str] = None, admin:
     return {
         "date": bd, "today": business_date_now(), "items": items, "count": len(items),
         "entered": sum(1 for i in items if i["entered"]),
+        # Days before this are read-only for this account (None: no limit).
+        "edit_from": _earnings_edit_from(hub_scope(admin)),
     }
 
 
@@ -4792,6 +4875,18 @@ def _day_row_key(platform: str, business_date: str) -> str:
     return f"day:{platform}:{business_date}"
 
 
+HUB_EARNINGS_EDIT_DAYS = 7     # today and the 6 days before it
+
+
+def _earnings_edit_from(scope: Optional[str]) -> Optional[str]:
+    """The oldest business day a hub manager may still change (None: no limit,
+    for the office roles)."""
+    if scope is None:
+        return None
+    d = datetime.strptime(business_date_now(), "%Y-%m-%d") - timedelta(days=HUB_EARNINGS_EDIT_DAYS - 1)
+    return d.strftime("%Y-%m-%d")
+
+
 class EarningsEntryIn(BaseModel):
     business_date: Optional[str] = None          # YYYY-MM-DD; default today
     platform: Literal["uber", "rapido", "ola"] = "uber"
@@ -4849,13 +4944,21 @@ async def admin_set_driver_earnings(
         {"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not driver:
         raise HTTPException(404, "driver_not_found")
-    await _assert_driver_in_scope(driver, hub_scope(admin))
-    bd = _bd_or_400(body.business_date)          # any past day is fine; a bad date is a 400
+    scope = hub_scope(admin)
+    await _assert_driver_in_scope(driver, scope)
+    bd = _bd_or_400(body.business_date)          # a bad date is a 400
     if bd > business_date_now():
         raise HTTPException(400, "future_date")
+    # A hub manager keys in the last few days; older days are the office's to
+    # change, since salary has likely been drawn on them already.
+    edit_from = _earnings_edit_from(scope)
+    if edit_from and bd < edit_from:
+        raise HTTPException(403, "too_old_to_change")
+    if round(body.cash_amount, 2) > round(body.gross_amount, 2):
+        raise HTTPException(400, "cash_more_than_fares")
     existing = await db.platform_cash.find_one(
         {"driver_id": driver_id, "platform": body.platform, "business_date": bd},
-        {"_id": 0, "source": 1})
+        {"_id": 0, "source": 1, "gross_amount": 1, "cash_amount": 1})
     if existing and existing.get("source") == "uber_report":
         raise HTTPException(409, "already_imported")   # official report wins — don't clobber
     start, end = business_day_bounds(bd)
@@ -4876,8 +4979,11 @@ async def admin_set_driver_earnings(
                           "client_action_id": _day_row_key(body.platform, bd)}},
         upsert=True,
     )
-    await _audit(admin, "set_driver_earnings", driver_id,
-                 {"date": bd, "platform": body.platform, "gross": round(body.gross_amount, 2)})
+    await _audit(admin, "set_driver_earnings", driver_id, {
+        "date": bd, "platform": body.platform,
+        "gross": round(body.gross_amount, 2), "cash": round(body.cash_amount, 2),
+        "was_gross": (existing or {}).get("gross_amount"), "was_cash": (existing or {}).get("cash_amount"),
+    })
     return {"ok": True, "driver_id": driver_id, "business_date": bd,
             "platform": body.platform, "gross_amount": round(body.gross_amount, 2),
             "cash_amount": round(body.cash_amount, 2)}
@@ -9586,6 +9692,9 @@ async def _prepare_database() -> None:
     await db.handovers.create_index([("client_action_id", 1)], unique=True)
     await db.handovers.create_index([("hub_id", 1), ("created_at", -1)])
     await db.handover_photos.create_index([("handover_id", 1)])
+    # Shift-change photos delete themselves HANDOVER_PHOTO_KEEP_DAYS after they
+    # were taken (expire_at is set on each one).
+    await db.handover_photos.create_index([("expire_at", 1)], expireAfterSeconds=0)
     await db.notifications.create_index([("driver_id", 1), ("client_action_id", 1)])
     # Razorpay dedup — order per driver+action; unique order id from Razorpay.
     await db.razorpay_orders.create_index(

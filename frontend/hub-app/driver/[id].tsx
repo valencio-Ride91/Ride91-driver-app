@@ -1,9 +1,9 @@
 // One driver: where they stand, call them, set their shift time, take their
 // cash, see what they pressed today and where, and talk to them.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatDuration, formatINR, formatIST, formatISTTime } from "@/src/i18n";
 import { CashSheet, CashTarget } from "@/src/hub/CashSheet";
@@ -73,6 +73,17 @@ export default function DriverPage() {
     scroller.current?.scrollTo({ y: threadY, animated: false });
   }, [focus, threadY, notes]);
 
+  // Only while this page is the one on screen and the app is in front: a page
+  // left open under another screen, or with the phone in a pocket, must not
+  // mark new messages read (or keep polling).
+  const focused = useIsFocused();
+  const [appActive, setAppActive] = useState(AppState.currentState === "active");
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (st) => setAppActive(st === "active"));
+    return () => sub.remove();
+  }, []);
+  const looking = focused && appActive;
+
   const load = useCallback(async () => {
     if (!id) return;
     try {
@@ -82,7 +93,7 @@ export default function DriverPage() {
       ]);
       setTaps(duty.log ?? []);
       setNotes(thread.items);
-      // Opening the page counts as having read what the driver wrote.
+      // Looking at the page counts as having read what the driver wrote.
       if (thread.items.some((n) => n.direction === "from_driver" && !n.read)) {
         hubApi.post(`/admin/drivers/${id}/notifications/read`).then(refresh).catch(() => {});
       }
@@ -92,10 +103,11 @@ export default function DriverPage() {
   }, [id, refresh]);
 
   useEffect(() => {
+    if (!looking) return;
     load();
     const timer = setInterval(load, 20000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, looking]);
 
   const say = useToast();
   const fail = (m: string) => say(m, "bad");

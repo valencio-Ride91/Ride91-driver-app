@@ -8,7 +8,7 @@
 //
 // Removing a driver archives them: they can no longer sign in and their car is
 // freed, but their cash and salary records stay.
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -45,6 +45,16 @@ export default function DriverForm() {
   const [cars, setCars] = useState<CarsData | null>(null);
   const [failed, setFailed] = useState(false);
 
+  // Read the cars again (another manager may have filled a slot since).
+  const reloadCars = useCallback(async () => {
+    if (!hubId) return;
+    try {
+      setCars(await hubApi.get<CarsData>(`/admin/hubs/${hubId}/cars`));
+    } catch {
+      // keep the list we have
+    }
+  }, [hubId]);
+
   useEffect(() => {
     if (!hubId) return;
     let alive = true;
@@ -71,24 +81,25 @@ export default function DriverForm() {
           <View style={{ padding: spacing.md }}><Empty>{failed ? t.action_fail : t.loading}</Empty></View>
         ) : (
           // Mounted only once its data is here, so the boxes start filled in.
-          <Fields hubId={hubId as string} driver={driver} cars={cars as CarsData} />
+          <Fields hubId={hubId as string} driver={driver} cars={cars as CarsData} reloadCars={reloadCars} />
         )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData }> = ({ hubId, driver, cars }) => {
+const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData; reloadCars: () => Promise<void> }> = ({ hubId, driver, cars, reloadCars }) => {
   const t = useHubText();
   const router = useRouter();
   const { refresh } = useHubToday();
   const id = driver?.driver_id ?? null;
+  const first = useRef(cars);       // what the form opened with
   const was = {
     name: driver?.name ?? "",
     phone: localPhone(driver?.phone),
     shift: (driver?.shift_type === "night" ? "night" : "day") as Shift,
     time: driver?.shift_start_time ?? "",
-    car: cars.drivers.find((d) => d.driver_id === id)?.vehicle_id ?? null,
+    car: first.current.drivers.find((d) => d.driver_id === id)?.vehicle_id ?? null,
   };
   const [name, setName] = useState(was.name);
   const [phone, setPhone] = useState(was.phone);
@@ -116,6 +127,8 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
   const fail = (e: any) => {
     const code = e?.body?.detail;
     setErr(code === "phone_already_registered" ? t.df_phone_taken : code === "shift_slot_taken" ? t.df_slot_taken : t.action_fail);
+    // Someone else took the slot meanwhile: show the car list as it is now.
+    if (code === "shift_slot_taken") reloadCars();
   };
 
   const save = async () => {
@@ -144,7 +157,8 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
       if (car && (car !== was.car || shift !== was.shift)) {
         await hubApi.post(`/admin/vehicles/${car}/assign`, { shift, driver_id: id });
       } else if (!car) {
-        if (was.car) await hubApi.post(`/admin/vehicles/${was.car}/assign`, { shift: was.shift, driver_id: null });
+        // Only lets go of the car if this driver still holds it.
+        if (was.car) await hubApi.post(`/admin/vehicles/${was.car}/assign`, { shift: was.shift, driver_id: null, release_driver_id: id });
         if (shift !== was.shift) patch.shift_type = shift;
       }
       if (name.trim() !== was.name) patch.name = name.trim();
@@ -188,7 +202,7 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
 
         <Text style={hubStyles.label}>{id ? t.df_new_password : t.df_password}</Text>
         <TextInput testID="hub-df-password" value={password} onChangeText={setPassword} autoCapitalize="none" autoCorrect={false} placeholder={id ? t.df_password_keep : ""} placeholderTextColor={colors.muted} style={[hubStyles.input, styles.mono]} />
-        <Text style={hubStyles.sub}>{t.df_password_hint}</Text>
+        <Text style={hubStyles.sub}>{id ? t.df_password_reset_hint : t.df_password_hint}</Text>
       </View>
 
       <View style={[hubStyles.card, { marginTop: spacing.md }]}>

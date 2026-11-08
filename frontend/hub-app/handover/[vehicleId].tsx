@@ -48,6 +48,9 @@ export default function Handover() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  // The server found the odometer reading odd (lower than the car's last one,
+  // or far above it) and wants the manager to say it is right.
+  const [odoCheck, setOdoCheck] = useState<"lower" | "jump" | null>(null);
   const say = useToast();
   const [cash, setCash] = useState<CashTarget | null>(null);
   // One id for this shift change, so a retry after a dropped connection
@@ -102,9 +105,10 @@ export default function Handover() {
   const fromDriver = data?.drivers.find((d) => d.driver_id === fromId) ?? null;
   const taken = SIDES.filter((s) => photos[s]).length;
 
-  const submit = async () => {
+  const submit = async (odometerConfirmed = false) => {
     if (busy || !car) return;
     setErr(null);
+    setOdoCheck(null);
     if (!fromId && !toId) return setErr(t.ho_err.driver_required);
     if (fromId && fromId === toId) return setErr(t.ho_err.same_driver);
     const socN = soc.trim() === "" ? null : Number(soc);
@@ -121,6 +125,7 @@ export default function Handover() {
         odometer_km: odoN,
         damage_note: damage.trim() || null,
         photos: Object.entries(photos).map(([label, d]) => ({ label, data: d })),
+        odometer_confirmed: odometerConfirmed,
         client_action_id: actionId,
       });
       setMsg(t.handover_done(car.number ?? ""));      // also stops a second Confirm
@@ -128,7 +133,9 @@ export default function Handover() {
       refresh();
       setTimeout(() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/cars" as never)), 1200);
     } catch (e: any) {
-      setErr(t.ho_err[e?.body?.detail] ?? t.action_fail);
+      const code = e?.body?.detail;
+      if (code === "odometer_lower" || code === "odometer_jump") setOdoCheck(code === "odometer_lower" ? "lower" : "jump");
+      else setErr(t.ho_err[code] ?? t.action_fail);
     } finally {
       setBusy(false);
     }
@@ -174,7 +181,7 @@ export default function Handover() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={hubStyles.label}>{t.odometer_km}</Text>
-                  <TextInput testID="hub-ho-odo" value={odo} onChangeText={(v) => setOdo(v.replace(/[^0-9.]/g, ""))} keyboardType="numeric"
+                  <TextInput testID="hub-ho-odo" value={odo} onChangeText={(v) => { setOdo(v.replace(/[^0-9.]/g, "")); setOdoCheck(null); }} keyboardType="numeric"
                     style={hubStyles.input} placeholder="0" placeholderTextColor={colors.muted} />
                 </View>
               </View>
@@ -211,7 +218,19 @@ export default function Handover() {
               ) : null}
 
               {err ? <Text style={hubStyles.err} testID="hub-ho-err">{err}</Text> : null}
-              <Btn label={t.confirm_handover} onPress={submit} busy={busy} disabled={!!msg} style={{ marginTop: spacing.lg }} testID="hub-ho-submit" />
+              {odoCheck && car ? (
+                <View style={[hubStyles.card, styles.odoCheck]} testID="hub-ho-odo-check">
+                  <Text style={styles.odoCheckText}>
+                    {(odoCheck === "lower" ? t.ho_odo_lower : t.ho_odo_jump)(String(Math.round(car.odometer_km ?? 0)), odo.trim())}
+                  </Text>
+                  <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
+                    <Btn label={t.ho_odo_fix} small kind="ghost" onPress={() => setOdoCheck(null)} disabled={busy} style={{ flex: 1 }} testID="hub-ho-odo-fix" />
+                    <Btn label={t.ho_odo_yes(odo.trim())} small onPress={() => submit(true)} busy={busy} style={{ flex: 1 }} testID="hub-ho-odo-yes" />
+                  </View>
+                </View>
+              ) : (
+                <Btn label={t.confirm_handover} onPress={() => submit()} busy={busy} disabled={!!msg} style={{ marginTop: spacing.lg }} testID="hub-ho-submit" />
+              )}
             </>
           )}
         </ScrollView>
@@ -229,6 +248,8 @@ const Chip: React.FC<{ label: string; on: boolean; onPress: () => void; testID?:
 );
 
 const styles = StyleSheet.create({
+  odoCheck: { marginTop: spacing.lg, borderColor: colors.alert },
+  odoCheckText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   bar: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
   back: { paddingHorizontal: 8, paddingVertical: 2 },
   backText: { fontFamily: fonts.uiBold, fontSize: 30, color: colors.ink, lineHeight: 32 },
