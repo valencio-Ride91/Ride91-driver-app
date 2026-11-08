@@ -177,6 +177,13 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     # webhook address once with the verify token (any word the owner picks).
     "whatsapp_app_secret": "",
     "whatsapp_verify_token": "",
+    # Who carries the messages: "meta" (Cloud API, token above) or "kapso"
+    # (Kapso's proxy to the same API, with a Kapso API key and Kapso's own
+    # number). The Meta details stay saved, so switching back is one click.
+    "whatsapp_provider": "meta",
+    "kapso_api_key": "",
+    "kapso_phone_number_id": "",
+    "kapso_webhook_secret": "",       # signs Kapso's delivery reports
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -889,6 +896,10 @@ class SettingsIn(BaseModel):
     whatsapp_template_lang: Optional[str] = None
     whatsapp_app_secret: Optional[str] = None
     whatsapp_verify_token: Optional[str] = None
+    whatsapp_provider: Optional[str] = None
+    kapso_api_key: Optional[str] = None
+    kapso_phone_number_id: Optional[str] = None
+    kapso_webhook_secret: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -2579,13 +2590,19 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
         updates["google_maps_web_key"] = body.google_maps_web_key.strip()
     if body.whatsapp_enabled is not None:
         updates["whatsapp_enabled"] = bool(body.whatsapp_enabled)
+    if body.whatsapp_provider is not None:
+        if body.whatsapp_provider not in ("meta", "kapso"):
+            raise HTTPException(422, "bad_whatsapp_provider")
+        updates["whatsapp_provider"] = body.whatsapp_provider
     for k in ("whatsapp_phone_number_id", "whatsapp_access_token",
               "whatsapp_template", "whatsapp_template_lang",
-              "whatsapp_app_secret", "whatsapp_verify_token"):
+              "whatsapp_app_secret", "whatsapp_verify_token",
+              "kapso_api_key", "kapso_phone_number_id", "kapso_webhook_secret"):
         v = getattr(body, k)
         if v is not None and v.strip() != "":
             updates[k] = v.strip()
-            if k in ("whatsapp_access_token", "whatsapp_app_secret", "whatsapp_verify_token"):
+            if k in ("whatsapp_access_token", "whatsapp_app_secret", "whatsapp_verify_token",
+                     "kapso_api_key", "kapso_webhook_secret"):
                 secret_keys.add(k)
     if updates:
         updates["updated_at"] = iso(now_utc())
@@ -7206,13 +7223,29 @@ async def _reconcile_collection_once(
 # later; there is no clock on the server, so the retries run when the panel
 # or a driver's phone next checks in (see _whatsapp_retry_due).
 WHATSAPP_API = "https://graph.facebook.com/v23.0"
+KAPSO_API = "https://api.kapso.ai/meta/whatsapp/v23.0"   # Kapso's proxy, same body as Meta
 WHATSAPP_RETRY_MINUTES = (2, 10, 30)      # waits before the 2nd, 3rd and 4th try
 WHATSAPP_STATUS_RANK = {"sending": 0, "retry": 0, "sent": 1, "delivered": 2, "read": 3}
 
 
+def _wa_kapso() -> bool:
+    return get_setting("whatsapp_provider") == "kapso"
+
+
+def _wa_route() -> Tuple[str, Optional[str], Dict[str, str]]:
+    """(messages URL base, phone number ID, auth headers) for the chosen carrier."""
+    if _wa_kapso():
+        return KAPSO_API, get_setting("kapso_phone_number_id"), {"X-API-Key": get_setting("kapso_api_key") or ""}
+    return (WHATSAPP_API, get_setting("whatsapp_phone_number_id"),
+            {"Authorization": f"Bearer {get_setting('whatsapp_access_token')}"})
+
+
 def _whatsapp_ready() -> bool:
-    return bool(get_setting("whatsapp_enabled") and get_setting("whatsapp_phone_number_id")
-                and get_setting("whatsapp_access_token") and get_setting("whatsapp_template"))
+    if not (get_setting("whatsapp_enabled") and get_setting("whatsapp_template")):
+        return False
+    if _wa_kapso():
+        return bool(get_setting("kapso_api_key") and get_setting("kapso_phone_number_id"))
+    return bool(get_setting("whatsapp_phone_number_id") and get_setting("whatsapp_access_token"))
 
 
 def _whatsapp_status() -> Dict[str, Any]:
@@ -7228,6 +7261,10 @@ def _whatsapp_status() -> Dict[str, Any]:
         "app_secret_set": bool(get_setting("whatsapp_app_secret")),
         "verify_token_set": bool(get_setting("whatsapp_verify_token")),
         "webhook_url": "/api/webhooks/whatsapp",
+        "provider": "kapso" if _wa_kapso() else "meta",
+        "kapso_api_key_set": bool(get_setting("kapso_api_key")),
+        "kapso_phone_number_id": get_setting("kapso_phone_number_id") or None,
+        "kapso_webhook_secret_set": bool(get_setting("kapso_webhook_secret")),
     }
 
 
@@ -7257,10 +7294,10 @@ async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str
             "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}],
         },
     }
+    base, phone_id, headers = _wa_route()
     try:
         async with httpx.AsyncClient(timeout=3.0) as c:
-            r = await c.post(f"{WHATSAPP_API}/{get_setting('whatsapp_phone_number_id')}/messages", json=body,
-                             headers={"Authorization": f"Bearer {get_setting('whatsapp_access_token')}"})
+            r = await c.post(f"{base}/{phone_id}/messages", json=body, headers=headers)
     except Exception as e:
         return False, None, f"network: {type(e).__name__}", True
     data: Dict[str, Any] = {}
@@ -7370,7 +7407,8 @@ async def admin_test_whatsapp(body: WhatsAppTestIn, admin: Dict = Depends(requir
     at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
     sent, _, err, _ = await _whatsapp_send(to, ["250", at, "950"])
     await _audit(admin, "whatsapp_test", to[-4:])
-    return {"ok": True} if sent else {"ok": False, "error": f"Meta refused it ({err})."}
+    who = "Kapso" if _wa_kapso() else "Meta"
+    return {"ok": True} if sent else {"ok": False, "error": f"{who} refused it ({err})."}
 
 
 # Meta checks the webhook address once, when it is saved in the Meta app.
@@ -7386,13 +7424,24 @@ async def whatsapp_webhook_verify(req: Request):
 @api.post("/webhooks/whatsapp")
 async def whatsapp_webhook(req: Request):
     """Meta → us: what became of each message (sent, delivered, read, failed).
-    Signed with the Meta app's secret; checked on the raw body."""
+    Straight from Meta it is signed with the app secret (X-Hub-Signature-256);
+    forwarded by Kapso (a "meta" kind webhook, same body) it is signed with
+    the Kapso webhook secret (X-Webhook-Signature). Checked on the raw body."""
     raw = await req.body()
-    secret = get_setting("whatsapp_app_secret") or ""
-    if not secret:
+    meta_secret = get_setting("whatsapp_app_secret") or ""
+    kapso_secret = get_setting("kapso_webhook_secret") or ""
+    if not meta_secret and not kapso_secret:
         raise HTTPException(503, "webhook_not_configured")
-    want = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(req.headers.get("X-Hub-Signature-256", ""), want):
+    ok = False
+    kapso_sig = req.headers.get("X-Webhook-Signature")
+    if kapso_sig is not None:
+        ok = bool(kapso_secret) and hmac.compare_digest(
+            kapso_sig, hmac.new(kapso_secret.encode(), raw, hashlib.sha256).hexdigest())
+    else:
+        ok = bool(meta_secret) and hmac.compare_digest(
+            req.headers.get("X-Hub-Signature-256", ""),
+            "sha256=" + hmac.new(meta_secret.encode(), raw, hashlib.sha256).hexdigest())
+    if not ok:
         raise HTTPException(400, "bad_signature")
     event = _json.loads(raw)
     for entry in event.get("entry") or []:

@@ -10,6 +10,7 @@ type Milestone = { key: string; label: string; amount: number; reward: number };
 export default function Settings({ admin }: { admin: AdminIdentity }) {
   const isOwner = admin.role === "owner";
   const [data, setData] = useState<SettingsData | null>(null);
+  const kapso = data?.whatsapp?.provider === "kapso";
   const [cashLimit, setCashLimit] = useState("");
   const [share, setShare] = useState("");
   const [saving, setSaving] = useState(false);
@@ -48,6 +49,9 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [waLang, setWaLang] = useState("");
   const [waAppSecret, setWaAppSecret] = useState("");
   const [waVerify, setWaVerify] = useState("");
+  const [kPhoneId, setKPhoneId] = useState("");
+  const [kKey, setKKey] = useState("");
+  const [kHookSecret, setKHookSecret] = useState("");
   const [waList, setWaList] = useState<WhatsAppMessages | null>(null);
   const [waFailedOnly, setWaFailedOnly] = useState(false);
   const [waRetrying, setWaRetrying] = useState<string | null>(null);
@@ -249,9 +253,13 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     }
   };
 
-  const saveWhatsApp = async (enabled?: boolean) => {
+  const saveWhatsApp = async (enabled?: boolean, provider?: "meta" | "kapso") => {
     setWaErr(null); setWaMsg(null);
     const body: Record<string, string | boolean> = {};
+    if (provider) body.whatsapp_provider = provider;
+    if (kPhoneId.trim()) body.kapso_phone_number_id = kPhoneId.trim();
+    if (kKey.trim()) body.kapso_api_key = kKey.trim();
+    if (kHookSecret.trim()) body.kapso_webhook_secret = kHookSecret.trim();
     if (waPhoneId.trim()) body.whatsapp_phone_number_id = waPhoneId.trim();
     if (waToken.trim()) body.whatsapp_access_token = waToken.trim();
     if (waTemplate.trim()) body.whatsapp_template = waTemplate.trim();
@@ -265,7 +273,8 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       const s = await api.put<SettingsData>("/admin/settings", body);
       setData(s);
       setWaPhoneId(""); setWaToken(""); setWaTemplate(""); setWaLang(""); setWaAppSecret(""); setWaVerify("");   // never keep secrets in the form
-      setWaMsg(enabled === true ? "WhatsApp messages switched on." : enabled === false ? "WhatsApp messages switched off." : "WhatsApp details updated.");
+      setKPhoneId(""); setKKey(""); setKHookSecret("");
+      setWaMsg(provider ? `Now sending through ${provider === "kapso" ? "Kapso" : "Meta directly"}.` : enabled === true ? "WhatsApp messages switched on." : enabled === false ? "WhatsApp messages switched off." : "WhatsApp details updated.");
       setTimeout(() => setWaMsg(null), 4000);
     } catch (e: any) {
       setWaErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
@@ -281,7 +290,7 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     try {
       const r = await api.post<{ ok: boolean; error?: string }>("/admin/settings/whatsapp/test", { phone: waTestTo.trim() });
       if (r.ok) setWaMsg("Sent. It should arrive on WhatsApp within a minute.");
-      else setWaErr(r.error || "Meta did not accept it.");
+      else setWaErr(r.error || "It was not accepted.");
     } catch {
       setWaErr("Could not send the test.");
     } finally {
@@ -716,7 +725,7 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       <div className="card" style={{ marginTop: 20, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>WhatsApp — QR payment messages {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
         <div className="muted-sm" style={{ marginBottom: 10 }}>
-          When a rider pays on a driver's QR, the driver gets a WhatsApp message with the amount and the cash they still owe. Sent through Meta's WhatsApp Cloud API.{" "}
+          When a rider pays on a driver's QR, the driver gets a WhatsApp message with the amount and the cash they still owe. Sent through {kapso ? "Kapso" : "Meta's WhatsApp Cloud API"}.{" "}
           Status:{" "}
           <span className={`tag ${data?.whatsapp?.ready ? "live" : "muted"}`} data-testid="wa-status">
             {data?.whatsapp?.ready ? "sending" : data?.whatsapp?.enabled ? "on, details missing" : "off"}
@@ -724,14 +733,58 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
         </div>
         <table className="data" style={{ marginBottom: 12 }}>
           <tbody>
-            <tr><td>Phone number ID</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.phone_number_id ?? <span className="muted-sm">not set</span>}</td></tr>
-            <tr><td>Access token</td><td>{data?.whatsapp?.access_token_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+            <tr><td>Sent through</td><td><span className={`tag ${kapso ? "live" : "muted"}`} data-testid="wa-provider">{kapso ? "Kapso" : "Meta directly"}</span></td></tr>
+            {kapso ? (
+              <>
+                <tr><td>Kapso phone number ID</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.kapso_phone_number_id ?? <span className="muted-sm">not set</span>}</td></tr>
+                <tr><td>Kapso API key</td><td>{data?.whatsapp?.kapso_api_key_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+              </>
+            ) : (
+              <>
+                <tr><td>Phone number ID</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.phone_number_id ?? <span className="muted-sm">not set</span>}</td></tr>
+                <tr><td>Access token</td><td>{data?.whatsapp?.access_token_set ? <span className="tag ok">set</span> : <span className="muted-sm">not set</span>}</td></tr>
+              </>
+            )}
             <tr><td>Template</td><td style={{ fontFamily: "ui-monospace, monospace" }}>{data?.whatsapp?.template ?? "—"} <span className="muted-sm">({data?.whatsapp?.template_lang ?? "en"})</span></td></tr>
           </tbody>
         </table>
 
         {isOwner ? (
           <>
+            <div className="form-actions" style={{ marginTop: 0, marginBottom: 10 }}>
+              {kapso
+                ? <button className="ghost" onClick={() => saveWhatsApp(undefined, "meta")} disabled={waBusy}>Send through Meta directly instead</button>
+                : <button className="ghost" onClick={() => saveWhatsApp(undefined, "kapso")} disabled={waBusy}>Send through Kapso instead</button>}
+            </div>
+            {kapso ? (
+              <>
+                <div className="muted-sm" style={{ marginBottom: 6 }}>
+                  From Kapso: the phone number ID is in WhatsApp → Numbers (or <code>kapso whatsapp numbers list</code>); the API key from Settings → API keys. The template must be approved on Kapso's number. Leave any field blank to keep its current value.
+                </div>
+                <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+                  <label>Kapso phone number ID
+                    <input value={kPhoneId} onChange={(e) => setKPhoneId(e.target.value.replace(/\s/g, ""))} placeholder={data?.whatsapp?.kapso_phone_number_id ?? "leave blank to keep"} autoComplete="off" inputMode="numeric" />
+                  </label>
+                  <label>Kapso API key
+                    <input type="password" value={kKey} onChange={(e) => setKKey(e.target.value)} placeholder={data?.whatsapp?.kapso_api_key_set ? "•••••••• set (leave blank to keep)" : "Kapso → Settings → API keys"} autoComplete="new-password" />
+                  </label>
+                  <label>Template name
+                    <input value={waTemplate} onChange={(e) => setWaTemplate(e.target.value)} placeholder={data?.whatsapp?.template ?? "qr_payment_received"} autoComplete="off" />
+                  </label>
+                  <label>Template language code
+                    <input value={waLang} onChange={(e) => setWaLang(e.target.value)} placeholder={data?.whatsapp?.template_lang ?? "en"} autoComplete="off" />
+                  </label>
+                  <label>Kapso webhook secret <span className="muted-sm">(for delivery reports)</span>
+                    <input type="password" value={kHookSecret} onChange={(e) => setKHookSecret(e.target.value)} placeholder={data?.whatsapp?.kapso_webhook_secret_set ? "•••••••• set (leave blank to keep)" : "shown when the Kapso webhook is created"} autoComplete="new-password" />
+                  </label>
+                </div>
+                <div className="muted-sm" style={{ marginTop: 6 }}>
+                  Delivery reports: in Kapso, add a webhook of kind <code>meta</code> on this number pointing at the API address followed by <code>{data?.whatsapp?.webhook_url ?? "/api/webhooks/whatsapp"}</code>, and paste its secret here.{" "}
+                  Reports: <span className={`tag ${data?.whatsapp?.kapso_webhook_secret_set ? "ok" : "muted"}`}>{data?.whatsapp?.kapso_webhook_secret_set ? "ready" : "not set up"}</span>
+                </div>
+              </>
+            ) : (
+            <>
             <div className="muted-sm" style={{ marginBottom: 6 }}>
               From Meta → WhatsApp Manager / the app's WhatsApp → API Setup. Use a permanent (system user) access token, not the 24-hour test one. The template must be approved, in the Utility category, with three values in its body: amount, time, cash owed — e.g. <code>{"Ride91: ₹{{1}} received on your QR at {{2}}. Cash you owe now: ₹{{3}}."}</code> Leave any field blank to keep its current value.
             </div>
@@ -759,6 +812,8 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
               Delivery reports tell Ride91 whether each message was delivered, read or failed. In the Meta app → WhatsApp → Configuration, set the callback URL to the API address followed by <code>{data?.whatsapp?.webhook_url ?? "/api/webhooks/whatsapp"}</code>, enter the same verify token, and subscribe to <code>messages</code>. Save the app secret and verify token here first.{" "}
               Reports: <span className={`tag ${data?.whatsapp?.app_secret_set && data?.whatsapp?.verify_token_set ? "ok" : "muted"}`}>{data?.whatsapp?.app_secret_set && data?.whatsapp?.verify_token_set ? "ready" : "not set up"}</span>
             </div>
+            </>
+            )}
             {waErr ? <div className="err">{waErr}</div> : null}
             {waMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{waMsg}</div> : null}
             <div className="form-actions">

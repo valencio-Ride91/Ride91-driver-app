@@ -672,6 +672,10 @@ export interface WhatsAppStatus {
   app_secret_set?: boolean;
   verify_token_set?: boolean;
   webhook_url?: string;
+  provider?: "meta" | "kapso";
+  kapso_api_key_set?: boolean;
+  kapso_phone_number_id?: string | null;
+  kapso_webhook_secret_set?: boolean;
 }
 
 export type WhatsAppState = "pending" | "sent" | "delivered" | "read" | "failed";
