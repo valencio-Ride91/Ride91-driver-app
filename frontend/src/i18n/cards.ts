@@ -112,6 +112,19 @@ const en = {
   note_car_week: (n: number) => `this week · all ${n} days needed`,
   note_driver_week: "your earnings this week",
 
+  // ---- Rewards: this week's leaders ----
+  leaders_title: "Who is winning 🥇",
+  // n counts today, so 1 means today is the last day of the week.
+  leaders_days_left: (n: number) => (n <= 1 ? "last day" : `${n} days left`),
+  leaders_drivers: "Top drivers",
+  leaders_cars: "Top cars",
+  leaders_none: "No earnings entered yet this week.",
+  leaders_you: "You",
+  leaders_your_car: "Your car",
+  leaders_your_rank: (rank: number, of: number) => `You are #${rank} of ${of}`,
+  leaders_your_car_rank: (rank: number, of: number) => `Your car is #${rank} of ${of}`,
+  leaders_note: "✅ has reached the target, so it can win. Winners are confirmed by the office at the end of the week.",
+
   // ---- Rewards: loyalty wallet ----
   wallet_title: "Loyalty wallet 💰",
   wallet_hint: "grows every day you drive",
@@ -550,6 +563,18 @@ const hi: CardText = {
   note_daily: "कल की कमाई",
   note_car_week: (n) => `इस हफ़्ते · सभी ${n} दिन ज़रूरी`,
   note_driver_week: "इस हफ़्ते आपकी कमाई",
+
+  // ---- Rewards: this week's leaders ----
+  leaders_title: "कौन आगे है 🥇",
+  leaders_days_left: (n) => (n <= 1 ? "आखिरी दिन" : `${n} दिन बाकी`),
+  leaders_drivers: "टॉप ड्राइवर",
+  leaders_cars: "टॉप गाड़ियाँ",
+  leaders_none: "इस हफ़्ते अभी कोई कमाई दर्ज नहीं हुई।",
+  leaders_you: "आप",
+  leaders_your_car: "आपकी गाड़ी",
+  leaders_your_rank: (rank, of) => `${of} में आप #${rank} पर हैं`,
+  leaders_your_car_rank: (rank, of) => `${of} में आपकी गाड़ी #${rank} पर है`,
+  leaders_note: "✅ वाले टारगेट तक पहुँच गए हैं, इसलिए जीत सकते हैं। हफ़्ते के आखिर में ऑफ़िस विजेता तय करता है।",
 
   // ---- Rewards: loyalty wallet ----
   wallet_title: "लॉयल्टी वॉलेट 💰",

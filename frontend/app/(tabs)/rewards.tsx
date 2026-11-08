@@ -20,7 +20,18 @@ interface RewardTier {
   reward: number;
   all_days?: boolean;
 }
+interface Leaders {
+  days_remaining: number | null;
+  drivers: { rank: number; name: string | null; week_gross: number; qualified: boolean; is_me: boolean }[];
+  cars: { rank: number; number: string | null; week_gross: number; drivers: string[]; qualified: boolean; is_mine: boolean }[];
+  my_rank: number | null;
+  drivers_count: number;
+  my_car_rank: number | null;
+  cars_count: number;
+}
 interface Rewards {
+  /** This week's top 3 drivers and cars in the driver's hub (absent on an older server). */
+  leaders?: Leaders | null;
   week_start: string;
   days_operated: number;
   days_required: number;
@@ -99,6 +110,8 @@ export default function RewardsTab() {
           )}
         </Card>
 
+        {rewards?.leaders ? <LeadersCard data={rewards.leaders} /> : null}
+
         {loyalty?.attendance?.enabled ? (
           <AttendanceCard data={loyalty.attendance} style={{ marginTop: spacing.md }} />
         ) : null}
@@ -133,6 +146,56 @@ export default function RewardsTab() {
     </SafeAreaView>
   );
 }
+
+const MEDALS = ["🥇", "🥈", "🥉"];
+
+// This week's top drivers and top cars in the driver's hub, so everyone can
+// see who is winning and how far they are from the top.
+const LeadersCard: React.FC<{ data: Leaders }> = ({ data }) => {
+  const c = useCardText();
+  const empty = data.drivers.length === 0 && data.cars.length === 0;
+  const meShown = data.drivers.some((d) => d.is_me);
+  const carShown = data.cars.some((x) => x.is_mine);
+  return (
+    <Card testID="rewards-leaders-card" style={{ marginTop: spacing.md }}>
+      <View style={styles.head}>
+        <Text style={styles.cardTitle}>{c.leaders_title}</Text>
+        {data.days_remaining != null ? <Text style={styles.hint}>{c.leaders_days_left(data.days_remaining)}</Text> : null}
+      </View>
+      {empty ? <Text style={styles.sub}>{c.leaders_none}</Text> : (
+        <>
+          <Text style={styles.leadHead}>{c.leaders_drivers}</Text>
+          {data.drivers.map((d) => (
+            <View key={`d${d.rank}`} style={[styles.leadRow, d.is_me ? styles.leadMine : null]} testID={`leader-driver-${d.rank}`}>
+              <Text style={styles.medal}>{MEDALS[d.rank - 1] ?? `#${d.rank}`}</Text>
+              <Text style={styles.leadName} numberOfLines={1}>
+                {d.qualified ? "✅ " : ""}{d.is_me ? `${d.name ?? ""} (${c.leaders_you})` : d.name ?? "—"}
+              </Text>
+              <Text style={styles.leadAmt}>{formatINR(d.week_gross)}</Text>
+            </View>
+          ))}
+          {!meShown && data.my_rank ? <Text style={styles.leadMe}>{c.leaders_your_rank(data.my_rank, data.drivers_count)}</Text> : null}
+
+          <Text style={[styles.leadHead, { marginTop: spacing.md }]}>{c.leaders_cars}</Text>
+          {data.cars.map((x) => (
+            <View key={`c${x.rank}`} style={[styles.leadRow, x.is_mine ? styles.leadMine : null]} testID={`leader-car-${x.rank}`}>
+              <Text style={styles.medal}>{MEDALS[x.rank - 1] ?? `#${x.rank}`}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.leadName} numberOfLines={1}>
+                  {x.qualified ? "✅ " : ""}{x.number ?? "—"}{x.is_mine ? ` (${c.leaders_your_car})` : ""}
+                </Text>
+                {x.drivers.length ? <Text style={styles.leadSub} numberOfLines={1}>{x.drivers.join(" · ")}</Text> : null}
+              </View>
+              <Text style={styles.leadAmt}>{formatINR(x.week_gross)}</Text>
+            </View>
+          ))}
+          {!carShown && data.my_car_rank ? <Text style={styles.leadMe}>{c.leaders_your_car_rank(data.my_car_rank, data.cars_count)}</Text> : null}
+          <Text style={styles.note}>{c.leaders_note}</Text>
+        </>
+      )}
+    </Card>
+  );
+};
 
 const RewardRow: React.FC<{ tier: RewardTier; label: string; note: string; testID?: string }> = ({ tier, label, note, testID }) => {
   const pctW = `${Math.round((tier.progress ?? 0) * 100)}%` as const;
@@ -175,4 +238,12 @@ const styles = StyleSheet.create({
   rewardNote: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted },
   tip: { fontFamily: fonts.uiMed, fontSize: 13, color: colors.ink, paddingVertical: 3 },
   note: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: spacing.sm },
+  leadHead: { fontFamily: fonts.uiBold, fontSize: 12, color: colors.muted, marginBottom: 2, textTransform: "uppercase" },
+  leadRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 7, paddingHorizontal: 6, borderRadius: 8 },
+  leadMine: { backgroundColor: colors.line },
+  medal: { fontSize: 18, width: 28, textAlign: "center" },
+  leadName: { flex: 1, fontFamily: fonts.uiBold, fontSize: 14, color: colors.ink },
+  leadSub: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: 1 },
+  leadAmt: { fontFamily: fonts.dataMed, fontSize: 14, color: colors.ink },
+  leadMe: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.ink, marginTop: 4, paddingHorizontal: 6 },
 });

@@ -5387,6 +5387,15 @@ async def admin_rewards(hub_id: Optional[str] = None, admin: Dict = Depends(get_
     (day+night gross combined → top car of day/week) and a DRIVERS board
     (individual gross → top driver of week). Winners are the ★ per hub; ops
     pays them (rewards are on top of the 30% share)."""
+    # A hub_manager is pinned to their hub; an owner may pass ?hub_id= to see
+    # just one hub's board (the hub-detail Rewards tab does this).
+    return await _reward_standings(_hub_target(admin, hub_id))
+
+
+async def _reward_standings(scope: Optional[str]) -> Dict[str, Any]:
+    """The weekly boards for one hub (`scope`) or every hub (None). Shared by
+    the admin Rewards page and the driver app's leaders card, so both rank the
+    same way."""
     (REWARD_DAILY_TARGET, REWARD_TOP_CAR_DAY, REWARD_WEEK_CAR_TARGET,
      REWARD_TOP_CAR_WEEK, REWARD_WEEK_DRIVER_TARGET, REWARD_TOP_DRIVER_WEEK,
      REWARD_DAYS_REQUIRED) = _weekly_reward_cfg()
@@ -5396,9 +5405,6 @@ async def admin_rewards(hub_id: Optional[str] = None, admin: Dict = Depends(get_
     mon_bd, next_mon_bd, days_remaining = week_bounds_for_business_date(today_bd)
     dweek, ddays, dyday = await _reward_gross(mon_bd, next_mon_bd, y_bd)
 
-    # A hub_manager is pinned to their hub; an owner may pass ?hub_id= to see
-    # just one hub's board (the hub-detail Rewards tab does this).
-    scope = _hub_target(admin, hub_id)
     veh_q: Dict[str, Any] = {"retired": {"$ne": True}}
     hub_q: Dict[str, Any] = {}
     if scope:
@@ -6378,6 +6384,43 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
     }
 
 
+LEADERS_SHOWN = 3
+
+
+async def _week_leaders(driver: Dict) -> Optional[Dict[str, Any]]:
+    """This week's top drivers and top cars in the driver's hub, so drivers can
+    see who is winning. Ranked exactly like the admin Rewards page (by the
+    week's gross). `qualified` means the entry has met the reward target, so
+    it can win; the office still decides and pays. No phone numbers."""
+    hub_id = driver.get("hub_id")
+    if not hub_id and driver.get("vehicle_id"):
+        v = await db.vehicles.find_one({"id": driver["vehicle_id"]}, {"_id": 0, "hub_id": 1})
+        hub_id = (v or {}).get("hub_id")
+    if not hub_id:
+        return None
+    board = await _reward_standings(hub_id)
+    hb = next((h for h in board["hubs"] if h["hub_id"] == hub_id), None) or {"drivers": [], "cars": []}
+    drivers = [d for d in hb["drivers"] if d["week_gross"] > 0]
+    cars = [c for c in hb["cars"] if c["week_gross"] > 0]
+    my_rank = next((i + 1 for i, d in enumerate(drivers) if d["driver_id"] == driver["id"]), None)
+    my_car = driver.get("vehicle_id")
+    my_car_rank = next((i + 1 for i, c in enumerate(cars) if my_car and c["vehicle_id"] == my_car), None)
+    return {
+        "days_remaining": board.get("days_remaining"),
+        "drivers": [{
+            "rank": i + 1, "name": d.get("name"), "week_gross": d["week_gross"],
+            "qualified": bool(d.get("q_driver_week")), "is_me": d["driver_id"] == driver["id"],
+        } for i, d in enumerate(drivers[:LEADERS_SHOWN])],
+        "cars": [{
+            "rank": i + 1, "number": c.get("number"), "week_gross": c["week_gross"],
+            "drivers": [x.get("name") for x in c.get("drivers") or [] if x.get("name")],
+            "qualified": bool(c.get("q_car_week")), "is_mine": bool(my_car) and c["vehicle_id"] == my_car,
+        } for i, c in enumerate(cars[:LEADERS_SHOWN])],
+        "my_rank": my_rank, "drivers_count": len(drivers),
+        "my_car_rank": my_car_rank, "cars_count": len(cars),
+    }
+
+
 @api.get("/money/rewards")
 async def money_rewards(driver: Dict = Depends(get_driver)):
     """Progress toward the weekly reward system. Rewards are additional to the
@@ -6421,7 +6464,14 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
     def pct(x: float, target: float) -> float:
         return round(min(1.0, x / target), 4) if target else 0.0
 
+    try:
+        leaders = await _week_leaders(driver)
+    except Exception:
+        logger.exception("Week leaders for %s failed", driver["id"])
+        leaders = None      # the driver's own progress still shows
+
     return {
+        "leaders": leaders,
         "week_start": mon_bd,
         "days_operated": car_days_n,          # the car's operated days (any shift)
         "days_required": REWARD_DAYS_REQUIRED,
