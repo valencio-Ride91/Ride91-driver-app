@@ -118,7 +118,9 @@ export default function Earnings() {
       if (g === "" && c === "") continue;
       const gross = Number(g || "0"), cash = Number(c || "0");
       if (!Number.isFinite(gross) || !Number.isFinite(cash) || gross < 0 || cash < 0) return setErr(t.earn_bad);
-      if (cash > gross) return setErr(t.earn_cash_more);
+      // Uber can have the driver collect a rider's past dues in cash, so only
+      // Uber may show more cash than fares.
+      if (a !== "uber" && cash > gross) return setErr(t.earn_cash_more);
       if (was && was.gross === gross && (was.cash ?? 0) === cash) continue;
       todo.push({ app: a, gross, cash });
     }

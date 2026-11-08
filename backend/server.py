@@ -4954,7 +4954,10 @@ async def admin_set_driver_earnings(
     edit_from = _earnings_edit_from(scope)
     if edit_from and bd < edit_from:
         raise HTTPException(403, "too_old_to_change")
-    if round(body.cash_amount, 2) > round(body.gross_amount, 2):
+    # Cash above fares is a typing slip, except on Uber: Uber sometimes has the
+    # driver collect a rider's unpaid amount from an earlier trip in cash, so
+    # the cash taken can be more than the day's fares.
+    if body.platform != "uber" and round(body.cash_amount, 2) > round(body.gross_amount, 2):
         raise HTTPException(400, "cash_more_than_fares")
     existing = await db.platform_cash.find_one(
         {"driver_id": driver_id, "platform": body.platform, "business_date": bd},
