@@ -19,6 +19,7 @@ import math
 import os
 import random
 import calendar
+import asyncio
 import re
 import secrets
 import uuid
@@ -7226,6 +7227,11 @@ WHATSAPP_API = "https://graph.facebook.com/v23.0"
 KAPSO_API = "https://api.kapso.ai/meta/whatsapp/v23.0"   # Kapso's proxy, same body as Meta
 WHATSAPP_RETRY_MINUTES = (2, 10, 30)      # waits before the 2nd, 3rd and 4th try
 WHATSAPP_STATUS_RANK = {"sending": 0, "retry": 0, "sent": 1, "delivered": 2, "read": 3}
+# Sends run beside the request that causes them: Razorpay's webhook (or a
+# driver's ping) waits at most WHATSAPP_WAIT_S, and a slow carrier gets the
+# full send timeout without anyone waiting on it.
+WHATSAPP_WAIT_S = 2.5
+WHATSAPP_SEND_TIMEOUT_S = 20.0
 
 
 def _wa_kapso() -> bool:
@@ -7296,7 +7302,7 @@ async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str
     }
     base, phone_id, headers = _wa_route()
     try:
-        async with httpx.AsyncClient(timeout=3.0) as c:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(WHATSAPP_SEND_TIMEOUT_S, connect=5.0)) as c:
             r = await c.post(f"{base}/{phone_id}/messages", json=body, headers=headers)
     except Exception as e:
         return False, None, f"network: {type(e).__name__}", True
@@ -7330,6 +7336,32 @@ async def _whatsapp_attempt(row: Dict[str, Any]) -> None:
     await db.whatsapp_messages.update_one({"id": row["id"]}, {"$set": upd})
 
 
+async def _whatsapp_attempt_safe(row: Dict[str, Any]) -> None:
+    try:
+        await _whatsapp_attempt(row)
+    except Exception:
+        logger.exception("WhatsApp send %s failed", row.get("id"))
+
+
+_wa_tasks: set = set()     # sends still in flight (kept so they are not collected)
+
+
+async def _whatsapp_attempt_soon(rows: List[Dict[str, Any]]) -> None:
+    """Start sending these claimed rows and wait at most WHATSAPP_WAIT_S.
+    Whatever is still in flight carries on after the request answers. Cloud
+    Run gives it CPU again with the next request, and a row stuck mid-send
+    is taken over by the sweep after 5 minutes."""
+    if not rows:
+        return
+    t = asyncio.ensure_future(asyncio.gather(*(_whatsapp_attempt_safe(r) for r in rows)))
+    _wa_tasks.add(t)
+    t.add_done_callback(_wa_tasks.discard)
+    try:
+        await asyncio.wait_for(asyncio.shield(t), WHATSAPP_WAIT_S)
+    except asyncio.TimeoutError:
+        pass
+
+
 _wa_retry_at: Optional[datetime] = None
 
 
@@ -7346,6 +7378,7 @@ async def _whatsapp_retry_due() -> None:
     if not _whatsapp_ready():
         return
     stale = iso(now - timedelta(minutes=5))
+    rows: List[Dict[str, Any]] = []
     for _ in range(20):
         row = await db.whatsapp_messages.find_one_and_update(
             {"$or": [{"status": "retry", "next_at": {"$lte": iso(now)}},
@@ -7355,7 +7388,8 @@ async def _whatsapp_retry_due() -> None:
         )
         if not row:
             break
-        await _whatsapp_attempt(row)
+        rows.append(row)
+    await _whatsapp_attempt_soon(rows)
 
 
 async def _whatsapp_retry_due_quietly() -> None:
@@ -7389,7 +7423,7 @@ async def _notify_qr_paid(driver_id: str, amount: float, payment_id: str) -> Non
         await db.whatsapp_messages.insert_one({**row, "status": "failed", "error": "No mobile number on file"})
         return
     await db.whatsapp_messages.insert_one({**row, "status": "sending"})
-    await _whatsapp_attempt(row)
+    await _whatsapp_attempt_soon([row])
 
 
 class WhatsAppTestIn(BaseModel):
@@ -8833,6 +8867,7 @@ async def driver_send_notification(body: DriverNotifyIn, driver: Dict = Depends(
 
 @api.get("/notifications")
 async def driver_list_notifications(driver: Dict = Depends(get_driver)):
+    await _whatsapp_retry_due_quietly()
     rows = [r async for r in db.notifications.find(
         {"driver_id": driver["id"]}, {"_id": 0}
     ).sort("created_at", -1).limit(100)]
