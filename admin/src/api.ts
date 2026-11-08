@@ -669,6 +669,30 @@ export interface WhatsAppStatus {
   access_token_set: boolean;
   template: string | null;
   template_lang: string;
+  app_secret_set?: boolean;
+  verify_token_set?: boolean;
+  webhook_url?: string;
+}
+
+export type WhatsAppState = "pending" | "sent" | "delivered" | "read" | "failed";
+
+export interface WhatsAppMessage {
+  id: string;
+  kind: string | null;
+  driver_id: string | null;
+  driver_name: string | null;
+  to: string | null;              // last four digits only
+  status: WhatsAppState | null;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+  delivered_at: string | null;
+  read_at: string | null;
+}
+
+export interface WhatsAppMessages {
+  items: WhatsAppMessage[];
+  counts_7d: Record<WhatsAppState, number>;
 }
 
 export interface PaymentsStatus {

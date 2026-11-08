@@ -2,7 +2,7 @@
 // to be hardcoded, plus self-service change-password. Editing the fleet values
 // is owner-only; the backend enforces it and the form is read-only otherwise.
 import { useCallback, useEffect, useState } from "react";
-import { api, SettingsData } from "../api";
+import { api, SettingsData, WhatsAppMessages } from "../api";
 import { AdminIdentity } from "../auth";
 
 type Milestone = { key: string; label: string; amount: number; reward: number };
@@ -46,6 +46,11 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [waToken, setWaToken] = useState("");
   const [waTemplate, setWaTemplate] = useState("");
   const [waLang, setWaLang] = useState("");
+  const [waAppSecret, setWaAppSecret] = useState("");
+  const [waVerify, setWaVerify] = useState("");
+  const [waList, setWaList] = useState<WhatsAppMessages | null>(null);
+  const [waFailedOnly, setWaFailedOnly] = useState(false);
+  const [waRetrying, setWaRetrying] = useState<string | null>(null);
   const [waTestTo, setWaTestTo] = useState("");
   const [waBusy, setWaBusy] = useState(false);
   const [waMsg, setWaMsg] = useState<string | null>(null);
@@ -251,13 +256,15 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     if (waToken.trim()) body.whatsapp_access_token = waToken.trim();
     if (waTemplate.trim()) body.whatsapp_template = waTemplate.trim();
     if (waLang.trim()) body.whatsapp_template_lang = waLang.trim();
+    if (waAppSecret.trim()) body.whatsapp_app_secret = waAppSecret.trim();
+    if (waVerify.trim()) body.whatsapp_verify_token = waVerify.trim();
     if (enabled !== undefined) body.whatsapp_enabled = enabled;
     if (Object.keys(body).length === 0) return setWaErr("Enter at least one value to update.");
     setWaBusy(true);
     try {
       const s = await api.put<SettingsData>("/admin/settings", body);
       setData(s);
-      setWaPhoneId(""); setWaToken(""); setWaTemplate(""); setWaLang("");   // never keep the token in the form
+      setWaPhoneId(""); setWaToken(""); setWaTemplate(""); setWaLang(""); setWaAppSecret(""); setWaVerify("");   // never keep secrets in the form
       setWaMsg(enabled === true ? "WhatsApp messages switched on." : enabled === false ? "WhatsApp messages switched off." : "WhatsApp details updated.");
       setTimeout(() => setWaMsg(null), 4000);
     } catch (e: any) {
@@ -279,6 +286,30 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       setWaErr("Could not send the test.");
     } finally {
       setWaBusy(false);
+    }
+  };
+
+  const loadWaList = useCallback(async () => {
+    try {
+      setWaList(await api.get<WhatsAppMessages>(`/admin/whatsapp/messages?limit=30${waFailedOnly ? "&status_filter=failed" : ""}`));
+    } catch {
+      // an older server has no list; the card simply leaves it out
+    }
+  }, [waFailedOnly]);
+  useEffect(() => { loadWaList(); }, [loadWaList]);
+
+  const retryWhatsApp = async (id: string) => {
+    setWaErr(null); setWaMsg(null);
+    setWaRetrying(id);
+    try {
+      const r = await api.post<{ ok: boolean; status: string; error?: string | null }>(`/admin/whatsapp/messages/${id}/retry`);
+      if (r.status === "failed") setWaErr(`Still failing: ${r.error ?? "no reason given"}`);
+      else setWaMsg("Sent again.");
+      await loadWaList();
+    } catch (e: any) {
+      setWaErr(e?.body?.detail === "whatsapp_not_ready" ? "WhatsApp is not set up, so nothing can be sent." : "Could not send it again.");
+    } finally {
+      setWaRetrying(null);
     }
   };
 
@@ -717,6 +748,16 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
               <label>Template language code
                 <input value={waLang} onChange={(e) => setWaLang(e.target.value)} placeholder={data?.whatsapp?.template_lang ?? "en"} autoComplete="off" />
               </label>
+              <label>App secret <span className="muted-sm">(for delivery reports)</span>
+                <input type="password" value={waAppSecret} onChange={(e) => setWaAppSecret(e.target.value)} placeholder={data?.whatsapp?.app_secret_set ? "•••••••• set (leave blank to keep)" : "Meta app → App settings → Basic"} autoComplete="new-password" />
+              </label>
+              <label>Verify token <span className="muted-sm">(any word you choose; type the same in Meta)</span>
+                <input type="password" value={waVerify} onChange={(e) => setWaVerify(e.target.value)} placeholder={data?.whatsapp?.verify_token_set ? "•••••••• set (leave blank to keep)" : "e.g. ride91-wa-2026"} autoComplete="new-password" />
+              </label>
+            </div>
+            <div className="muted-sm" style={{ marginTop: 6 }}>
+              Delivery reports tell Ride91 whether each message was delivered, read or failed. In the Meta app → WhatsApp → Configuration, set the callback URL to the API address followed by <code>{data?.whatsapp?.webhook_url ?? "/api/webhooks/whatsapp"}</code>, enter the same verify token, and subscribe to <code>messages</code>. Save the app secret and verify token here first.{" "}
+              Reports: <span className={`tag ${data?.whatsapp?.app_secret_set && data?.whatsapp?.verify_token_set ? "ok" : "muted"}`}>{data?.whatsapp?.app_secret_set && data?.whatsapp?.verify_token_set ? "ready" : "not set up"}</span>
             </div>
             {waErr ? <div className="err">{waErr}</div> : null}
             {waMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{waMsg}</div> : null}
@@ -736,6 +777,46 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
               </button>
             </div>
           </>
+        ) : null}
+
+        {waList ? (
+          <div style={{ marginTop: 16 }} data-testid="wa-messages">
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+              <strong>Messages</strong>
+              <span className="muted-sm">last 7 days:</span>
+              {(["read", "delivered", "sent", "pending", "failed"] as const).map((k) => (
+                <span key={k} className={`tag ${k === "failed" && waList.counts_7d[k] ? "alert" : "muted"}`}>{waList.counts_7d[k] ?? 0} {k}</span>
+              ))}
+              <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontWeight: 400 }}>
+                <input type="checkbox" checked={waFailedOnly} onChange={(e) => setWaFailedOnly(e.target.checked)} /> failed only
+              </label>
+            </div>
+            {waList.items.length === 0 ? <div className="muted-sm">{waFailedOnly ? "No failed messages." : "No messages yet."}</div> : (
+              <table className="data">
+                <thead><tr><th>When</th><th>Driver</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                  {waList.items.map((m) => (
+                    <tr key={m.id}>
+                      <td style={{ whiteSpace: "nowrap" }}>{new Date(m.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}</td>
+                      <td>{m.driver_name ?? "—"} <span className="muted-sm">{m.to ?? ""}</span></td>
+                      <td>
+                        <span className={`tag ${m.status === "failed" ? "alert" : m.status === "read" || m.status === "delivered" ? "ok" : "muted"}`}>{m.status ?? "—"}</span>
+                        {m.status === "failed" && m.error ? <div className="muted-sm" style={{ marginTop: 2 }}>{m.error}</div> : null}
+                        {m.attempts > 1 ? <div className="muted-sm">{m.attempts} tries</div> : null}
+                      </td>
+                      <td>
+                        {isOwner && m.status === "failed" && m.to ? (
+                          <button className="ghost" onClick={() => retryWhatsApp(m.id)} disabled={!!waRetrying || !data?.whatsapp?.ready}>
+                            {waRetrying === m.id ? "Sending…" : "Retry"}
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
         ) : null}
       </div>
 

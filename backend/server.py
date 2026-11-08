@@ -41,6 +41,7 @@ from fastapi import (
     status,
 )
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
 
@@ -172,6 +173,10 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "whatsapp_access_token": "",
     "whatsapp_template": "qr_payment_received",
     "whatsapp_template_lang": "en",
+    # Delivery reports: Meta signs them with the app secret, and checks the
+    # webhook address once with the verify token (any word the owner picks).
+    "whatsapp_app_secret": "",
+    "whatsapp_verify_token": "",
 }
 _SETTINGS_CACHE: Dict[str, Any] = dict(SETTINGS_DEFAULTS)
 
@@ -882,6 +887,8 @@ class SettingsIn(BaseModel):
     whatsapp_access_token: Optional[str] = None
     whatsapp_template: Optional[str] = None
     whatsapp_template_lang: Optional[str] = None
+    whatsapp_app_secret: Optional[str] = None
+    whatsapp_verify_token: Optional[str] = None
 
 
 async def get_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -2573,11 +2580,12 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
     if body.whatsapp_enabled is not None:
         updates["whatsapp_enabled"] = bool(body.whatsapp_enabled)
     for k in ("whatsapp_phone_number_id", "whatsapp_access_token",
-              "whatsapp_template", "whatsapp_template_lang"):
+              "whatsapp_template", "whatsapp_template_lang",
+              "whatsapp_app_secret", "whatsapp_verify_token"):
         v = getattr(body, k)
         if v is not None and v.strip() != "":
             updates[k] = v.strip()
-            if k == "whatsapp_access_token":
+            if k in ("whatsapp_access_token", "whatsapp_app_secret", "whatsapp_verify_token"):
                 secret_keys.add(k)
     if updates:
         updates["updated_at"] = iso(now_utc())
@@ -5117,6 +5125,7 @@ async def admin_list_notifications(
     has not read yet (the menu badge). A hub_manager sees their own hub's
     drivers; anyone else may pass `?hub_id=` to look at one hub."""
     await _alarm_watch()      # raises "no answer" / "not started" alerts when due
+    await _whatsapp_retry_due_quietly()
     query: Dict[str, Any] = {"direction": "from_driver"}
     target = _hub_target(admin, hub_id)
     if target:
@@ -5144,8 +5153,9 @@ async def admin_driver_notifications(driver_id: str, admin: Dict = Depends(get_a
         if not d:
             raise HTTPException(404, "driver_not_found")
         await _assert_driver_in_scope(d, scope)
+    # Payment notices are for the driver; the hub sees them on QR payments.
     rows = [r async for r in db.notifications.find(
-        {"driver_id": driver_id}, {"_id": 0}
+        {"driver_id": driver_id, "kind": {"$ne": "payment"}}, {"_id": 0}
     ).sort("created_at", -1).limit(100)]
     return {"items": rows, "count": len(rows)}
 
@@ -7173,13 +7183,13 @@ async def _reconcile_collection_once(
         }},
         upsert=True,
     )
-    # Only a payment seen for the first time gets a message, so a replayed
-    # webhook never sends it twice. Never lets a WhatsApp problem fail this.
+    # Only a payment seen for the first time is announced, so a replayed
+    # webhook never sends it twice. Never lets a notice problem fail this.
     if first.upserted_id is not None:
         try:
-            await _whatsapp_qr_paid(driver_id, amount, razorpay_payment_id)
+            await _notify_qr_paid(driver_id, amount, razorpay_payment_id)
         except Exception:
-            logger.exception("WhatsApp message for QR payment %s failed", razorpay_payment_id)
+            logger.exception("Notice for QR payment %s failed", razorpay_payment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -7189,7 +7199,15 @@ async def _reconcile_collection_once(
 # WhatsApp Manager. The template's body takes three values, in this order:
 #   {{1}} amount, {{2}} time (IST), {{3}} cash the driver still owes
 # e.g. "Ride91: ₹{{1}} received on your QR at {{2}}. Cash you owe now: ₹{{3}}."
+#
+# Each message is a whatsapp_messages row: sending → sent → delivered → read,
+# or failed. Meta reports delivered / read / failed to /webhooks/whatsapp. A
+# send that failed for a passing reason (network, Meta busy) is tried again
+# later; there is no clock on the server, so the retries run when the panel
+# or a driver's phone next checks in (see _whatsapp_retry_due).
 WHATSAPP_API = "https://graph.facebook.com/v23.0"
+WHATSAPP_RETRY_MINUTES = (2, 10, 30)      # waits before the 2nd, 3rd and 4th try
+WHATSAPP_STATUS_RANK = {"sending": 0, "retry": 0, "sent": 1, "delivered": 2, "read": 3}
 
 
 def _whatsapp_ready() -> bool:
@@ -7198,7 +7216,7 @@ def _whatsapp_ready() -> bool:
 
 
 def _whatsapp_status() -> Dict[str, Any]:
-    """WhatsApp STATUS for the admin — never the access token."""
+    """WhatsApp STATUS for the admin — never the token or the app secret."""
     return {
         "enabled": bool(get_setting("whatsapp_enabled")),
         "ready": _whatsapp_ready(),
@@ -7206,6 +7224,10 @@ def _whatsapp_status() -> Dict[str, Any]:
         "access_token_set": bool(get_setting("whatsapp_access_token")),
         "template": get_setting("whatsapp_template") or None,
         "template_lang": get_setting("whatsapp_template_lang") or "en",
+        # Delivery reports from Meta.
+        "app_secret_set": bool(get_setting("whatsapp_app_secret")),
+        "verify_token_set": bool(get_setting("whatsapp_verify_token")),
+        "webhook_url": "/api/webhooks/whatsapp",
     }
 
 
@@ -7221,9 +7243,9 @@ def _wa_amount(x: float) -> str:
     return f"{int(x):,}" if float(x) == int(x) else f"{x:,.2f}"
 
 
-async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Send the template to one number. Returns (sent, message_id, error).
-    A short timeout: this runs inside Razorpay's webhook call."""
+async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str], Optional[str], bool]:
+    """Send the template to one number. Returns (sent, message_id, error,
+    worth_retrying). A short timeout: this runs inside Razorpay's webhook call."""
     import httpx
     body = {
         "messaging_product": "whatsapp",
@@ -7240,7 +7262,7 @@ async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str
             r = await c.post(f"{WHATSAPP_API}/{get_setting('whatsapp_phone_number_id')}/messages", json=body,
                              headers={"Authorization": f"Bearer {get_setting('whatsapp_access_token')}"})
     except Exception as e:
-        return False, None, f"network: {type(e).__name__}"
+        return False, None, f"network: {type(e).__name__}", True
     data: Dict[str, Any] = {}
     try:
         data = r.json()
@@ -7248,26 +7270,89 @@ async def _whatsapp_send(to: str, params: List[str]) -> Tuple[bool, Optional[str
         pass
     if r.status_code >= 400:
         err = (data.get("error") or {}) if isinstance(data, dict) else {}
-        return False, None, f"{r.status_code}: {err.get('message') or r.text[:200]}"
+        # Too many requests or Meta's own trouble pass; a bad token or
+        # template does not, until someone fixes the settings.
+        retry = r.status_code == 429 or r.status_code >= 500
+        return False, None, f"{r.status_code}: {err.get('message') or r.text[:200]}", retry
     msgs = data.get("messages") or [{}]
-    return True, msgs[0].get("id"), None
+    return True, msgs[0].get("id"), None, False
 
 
-async def _whatsapp_qr_paid(driver_id: str, amount: float, payment_id: str) -> None:
+async def _whatsapp_attempt(row: Dict[str, Any]) -> None:
+    """One try at sending a whatsapp_messages row already marked 'sending'."""
+    sent, msg_id, err, retry = await _whatsapp_send(row["to"], row["params"])
+    attempts = int(row.get("attempts") or 0) + 1
+    now = now_utc()
+    upd: Dict[str, Any] = {"attempts": attempts, "error": err, "next_at": None}
+    if sent:
+        upd.update(status="sent", wa_message_id=msg_id, sent_at=iso(now))
+    elif retry and attempts <= len(WHATSAPP_RETRY_MINUTES):
+        upd.update(status="retry", next_at=iso(now + timedelta(minutes=WHATSAPP_RETRY_MINUTES[attempts - 1])))
+    else:
+        upd.update(status="failed", failed_at=iso(now))
+    await db.whatsapp_messages.update_one({"id": row["id"]}, {"$set": upd})
+
+
+_wa_retry_at: Optional[datetime] = None
+
+
+async def _whatsapp_retry_due() -> None:
+    """Try again the messages whose wait is over (at most once a minute per
+    server). Each row is claimed before it is sent, so two servers never send
+    the same one. A row left 'sending' for 5 minutes (the server stopped
+    mid-send) is claimed again."""
+    global _wa_retry_at
+    now = now_utc()
+    if _wa_retry_at and (now - _wa_retry_at).total_seconds() < 60:
+        return
+    _wa_retry_at = now
+    if not _whatsapp_ready():
+        return
+    stale = iso(now - timedelta(minutes=5))
+    for _ in range(20):
+        row = await db.whatsapp_messages.find_one_and_update(
+            {"$or": [{"status": "retry", "next_at": {"$lte": iso(now)}},
+                     {"status": "sending", "claimed_at": {"$lte": stale}}]},
+            {"$set": {"status": "sending", "claimed_at": iso(now)}},
+            projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+        )
+        if not row:
+            break
+        await _whatsapp_attempt(row)
+
+
+async def _whatsapp_retry_due_quietly() -> None:
+    try:
+        await _whatsapp_retry_due()
+    except Exception:
+        logger.exception("WhatsApp retries failed")
+
+
+async def _notify_qr_paid(driver_id: str, amount: float, payment_id: str) -> None:
+    """Tell the driver a rider paid on their QR: always in the app (free, and
+    still there when WhatsApp fails), and on WhatsApp when it is set up."""
+    owed = float((await _driver_balance(driver_id)).get("you_owe") or 0)
+    at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
+    key = f"qrpaid:{payment_id}"
+    if not await db.notifications.find_one({"driver_id": driver_id, "client_action_id": key}, {"_id": 1}):
+        await db.notifications.insert_one({
+            "id": str(uuid.uuid4()), "driver_id": driver_id, "direction": "to_driver", "kind": "payment",
+            "body": f"₹{_wa_amount(amount)} received on your QR at {at}. Cash you owe now: ₹{_wa_amount(owed)}.",
+            "created_at": iso(now_utc()), "created_by": "Ride91", "read": False, "read_at": None,
+            "client_action_id": key,
+        })
     if not _whatsapp_ready():
         return
     driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "phone": 1})
     to = _wa_number((driver or {}).get("phone"))
-    row = {"id": str(uuid.uuid4()), "kind": "qr_paid", "driver_id": driver_id,
-           "ref": payment_id, "created_at": iso(now_utc())}
+    row = {"id": str(uuid.uuid4()), "kind": "qr_paid", "driver_id": driver_id, "ref": payment_id,
+           "to": to, "params": [_wa_amount(amount), at, _wa_amount(owed)], "attempts": 0,
+           "created_at": iso(now_utc()), "claimed_at": iso(now_utc())}
     if not to:
-        await db.whatsapp_messages.insert_one({**row, "status": "failed", "error": "no_phone"})
+        await db.whatsapp_messages.insert_one({**row, "status": "failed", "error": "No mobile number on file"})
         return
-    owed = float((await _driver_balance(driver_id)).get("you_owe") or 0)
-    at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
-    sent, msg_id, err = await _whatsapp_send(to, [_wa_amount(amount), at, _wa_amount(owed)])
-    await db.whatsapp_messages.insert_one({**row, "to": to, "status": "sent" if sent else "failed",
-                                           "wa_message_id": msg_id, "error": err})
+    await db.whatsapp_messages.insert_one({**row, "status": "sending"})
+    await _whatsapp_attempt(row)
 
 
 class WhatsAppTestIn(BaseModel):
@@ -7283,9 +7368,118 @@ async def admin_test_whatsapp(body: WhatsAppTestIn, admin: Dict = Depends(requir
     if not to:
         return {"ok": False, "error": "Enter a 10-digit mobile number, or one with its country code."}
     at = now_utc().astimezone(IST).strftime("%I:%M %p").lstrip("0")
-    sent, _, err = await _whatsapp_send(to, ["250", at, "950"])
+    sent, _, err, _ = await _whatsapp_send(to, ["250", at, "950"])
     await _audit(admin, "whatsapp_test", to[-4:])
     return {"ok": True} if sent else {"ok": False, "error": f"Meta refused it ({err})."}
+
+
+# Meta checks the webhook address once, when it is saved in the Meta app.
+@api.get("/webhooks/whatsapp")
+async def whatsapp_webhook_verify(req: Request):
+    q = req.query_params
+    want = get_setting("whatsapp_verify_token") or ""
+    if q.get("hub.mode") == "subscribe" and want and hmac.compare_digest(q.get("hub.verify_token") or "", want):
+        return Response(content=q.get("hub.challenge") or "", media_type="text/plain")
+    raise HTTPException(403, "bad_verify_token")
+
+
+@api.post("/webhooks/whatsapp")
+async def whatsapp_webhook(req: Request):
+    """Meta → us: what became of each message (sent, delivered, read, failed).
+    Signed with the Meta app's secret; checked on the raw body."""
+    raw = await req.body()
+    secret = get_setting("whatsapp_app_secret") or ""
+    if not secret:
+        raise HTTPException(503, "webhook_not_configured")
+    want = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(req.headers.get("X-Hub-Signature-256", ""), want):
+        raise HTTPException(400, "bad_signature")
+    event = _json.loads(raw)
+    for entry in event.get("entry") or []:
+        for change in entry.get("changes") or []:
+            for s in (change.get("value") or {}).get("statuses") or []:
+                await _whatsapp_status_update(s)
+    return {"ok": True}
+
+
+async def _whatsapp_status_update(s: Dict[str, Any]) -> None:
+    """Record one status report. Statuses can arrive out of order, so a row
+    only moves forward (sent → delivered → read); 'failed' always lands."""
+    wamid, st = s.get("id"), s.get("status")
+    if not wamid or st not in ("sent", "delivered", "read", "failed"):
+        return
+    row = await db.whatsapp_messages.find_one({"wa_message_id": wamid}, {"_id": 0, "id": 1, "status": 1})
+    if not row:
+        return
+    try:
+        at = iso(datetime.fromtimestamp(int(s["timestamp"]), timezone.utc))
+    except (KeyError, TypeError, ValueError):
+        at = iso(now_utc())
+    upd: Dict[str, Any] = {f"{st}_at": at}
+    if st == "failed":
+        e = (s.get("errors") or [{}])[0]
+        detail = (e.get("error_data") or {}).get("details")
+        upd.update(status="failed", error=f"{e.get('code')}: {e.get('title') or e.get('message')}"
+                   + (f" ({detail})" if detail else ""))
+    elif WHATSAPP_STATUS_RANK[st] > WHATSAPP_STATUS_RANK.get(row.get("status"), 0):
+        upd["status"] = st
+    await db.whatsapp_messages.update_one({"id": row["id"]}, {"$set": upd})
+
+
+def _wa_shown(status: Optional[str]) -> Optional[str]:
+    """The status as screens show it: still being sent is just 'pending'."""
+    return "pending" if status in ("sending", "retry") else status
+
+
+@api.get("/admin/whatsapp/messages")
+async def admin_whatsapp_messages(
+    status_filter: Optional[str] = None, limit: int = 50, admin: Dict = Depends(fleet_admin),
+):
+    """The latest WhatsApp messages, newest first (`?status_filter=failed` for
+    the failed ones), and how many of each in the last 7 days."""
+    await _whatsapp_retry_due_quietly()
+    q: Dict[str, Any] = {}
+    if status_filter == "failed":
+        q["status"] = "failed"
+    n = max(1, min(int(limit), 200))
+    rows = [r async for r in db.whatsapp_messages.find(q, {"_id": 0, "params": 0})
+            .sort("created_at", -1).limit(n)]
+    who = await _drivers_by_ids([r.get("driver_id") for r in rows])
+    items = [{
+        "id": r["id"], "kind": r.get("kind"), "driver_id": r.get("driver_id"),
+        "driver_name": who.get(r.get("driver_id"), {}).get("name"),
+        "to": ("•••• " + r["to"][-4:]) if r.get("to") else None,
+        "status": _wa_shown(r.get("status")), "error": r.get("error"), "attempts": r.get("attempts", 0),
+        "created_at": r.get("created_at"), "delivered_at": r.get("delivered_at"), "read_at": r.get("read_at"),
+    } for r in rows]
+    since = iso(now_utc() - timedelta(days=7))
+    counts = {"pending": 0, "sent": 0, "delivered": 0, "read": 0, "failed": 0}
+    async for r in db.whatsapp_messages.aggregate([
+        {"$match": {"created_at": {"$gte": since}}},
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+    ]):
+        k = _wa_shown(r["_id"])
+        if k in counts:
+            counts[k] += r["n"]
+    return {"items": items, "counts_7d": counts}
+
+
+@api.post("/admin/whatsapp/messages/{message_id}/retry")
+async def admin_whatsapp_retry(message_id: str, admin: Dict = Depends(require_owner)):
+    """Send a failed message again now (e.g. after fixing the template)."""
+    if not _whatsapp_ready():
+        raise HTTPException(409, "whatsapp_not_ready")
+    row = await db.whatsapp_messages.find_one_and_update(
+        {"id": message_id, "status": "failed", "to": {"$nin": [None, ""]}},
+        {"$set": {"status": "sending", "claimed_at": iso(now_utc()), "attempts": 0}},
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+    )
+    if not row:
+        raise HTTPException(409, "not_retryable")
+    await _whatsapp_attempt(row)
+    await _audit(admin, "whatsapp_retry", message_id)
+    out = await db.whatsapp_messages.find_one({"id": message_id}, {"_id": 0, "status": 1, "error": 1})
+    return {"ok": True, "status": _wa_shown(out.get("status")), "error": out.get("error")}
 
 
 # Driver codes: R91D-<4-digit running number>-<CITY>, e.g. R91D-0106-PNQ. One
@@ -7515,7 +7709,14 @@ async def admin_hub_qr_collections(
                 "amount": round(float(c.get("amount") or 0), 2),
                 "occurred_at": c.get("occurred_at"), "business_date": c.get("business_date"),
                 "ref": (c.get("razorpay_payment_id") or "")[-6:] or None,
+                "_pid": c.get("razorpay_payment_id"),
             })
+    # WhatsApp status per payment: null when none was sent (WhatsApp off).
+    wa = {r["ref"]: r.get("status") async for r in db.whatsapp_messages.find(
+        {"kind": "qr_paid", "ref": {"$in": [p["_pid"] for p in payments if p["_pid"]] or ["_none"]}},
+        {"_id": 0, "ref": 1, "status": 1})}
+    for p in payments:
+        p["wa"] = _wa_shown(wa.get(p.pop("_pid")))
 
     items = []
     for did, d in drivers.items():
@@ -8614,6 +8815,7 @@ async def phone_ping(
     # ALSO bridged into vehicle_pings so the driver shows on the admin live map
     # and drives `last_ping_at` until real tracker hardware exists. Bridged rows
     # carry source="phone" so a future hardware feed can be preferred/filtered.
+    await _whatsapp_retry_due_quietly()
     now = iso(now_utc())
     recorded_at = body.get("recorded_at") or now
     lat, lng = body.get("lat"), body.get("lng")
@@ -9190,6 +9392,10 @@ async def _prepare_database() -> None:
     await db.qr_payments.create_index(
         [("driver_id", 1), ("business_date", 1)]
     )
+    await db.whatsapp_messages.create_index("wa_message_id")
+    await db.whatsapp_messages.create_index("ref")
+    await db.whatsapp_messages.create_index([("status", 1), ("next_at", 1)])
+    await db.whatsapp_messages.create_index("created_at")
     await db.qr_payments.create_index(
         [("driver_id", 1), ("client_action_id", 1)], unique=True
     )

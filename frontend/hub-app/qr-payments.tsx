@@ -4,7 +4,8 @@
 // the money goes to the fleet and counts against the cash that driver owes.
 // This screen shows how much came in that way: today, yesterday or the last
 // 7 days, the total, each driver's share (drivers with no QR yet are marked),
-// and every payment. Tap a driver to see only their payments.
+// and every payment. Tap a driver to see only their payments. Each payment
+// shows what became of the WhatsApp message telling the driver about it.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -20,8 +21,32 @@ import { colors, fonts, radius, spacing } from "@/src/theme";
 type Period = "today" | "yesterday" | "week";
 
 interface DriverRow { driver_id: string; name: string | null; code: string | null; has_qr: boolean; total: number; count: number; last_at: string | null }
-interface Payment { id: string; driver_id: string; driver_name: string | null; amount: number; occurred_at: string; ref: string | null }
+type WaState = "pending" | "sent" | "delivered" | "read" | "failed";
+interface Payment { id: string; driver_id: string; driver_name: string | null; amount: number; occurred_at: string; ref: string | null; wa?: WaState | null }
 interface QrData { from_date: string; to_date: string; today: string; total: number; count: number; items: DriverRow[]; payments: Payment[] }
+
+const WA_READ = "#3B6FD4";       // WhatsApp's own "read" ticks are blue
+
+// The WhatsApp message to the driver: one tick sent, two delivered, two blue
+// read, a warning when it failed. Nothing when none was sent (WhatsApp off).
+function WaTick({ state }: { state?: WaState | null }) {
+  const t = useHubText();
+  if (!state) return null;
+  const look: Record<WaState, { icon: React.ComponentProps<typeof Icon>["name"]; color: string; label: string }> = {
+    pending: { icon: "time-outline", color: colors.muted, label: t.wa_pending },
+    sent: { icon: "checkmark", color: colors.muted, label: t.wa_sent },
+    delivered: { icon: "checkmark-done", color: colors.muted, label: t.wa_delivered },
+    read: { icon: "checkmark-done", color: WA_READ, label: t.wa_read },
+    failed: { icon: "alert-circle", color: colors.alert, label: t.wa_failed },
+  };
+  const l = look[state];
+  return (
+    <View style={styles.wa} testID={`hub-qr-wa-${state}`}>
+      <Icon name={l.icon} size={14} color={l.color} />
+      <Text style={[styles.waText, { color: l.color }]} numberOfLines={1}>{l.label}</Text>
+    </View>
+  );
+}
 
 // Step a YYYY-MM-DD date by whole days.
 function shiftDate(d: string, days: number): string {
@@ -138,7 +163,10 @@ export default function QrPayments() {
                     <Text style={hubStyles.name} numberOfLines={1}>{p.driver_name ?? "—"}</Text>
                     <Text style={hubStyles.sub} numberOfLines={1}>{[formatIST(p.occurred_at), p.ref ? `…${p.ref}` : null].filter(Boolean).join(" · ")}</Text>
                   </View>
-                  <Text style={[styles.amount, { color: colors.live }]}>{formatINR(p.amount)}</Text>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={[styles.amount, { color: colors.live }]}>{formatINR(p.amount)}</Text>
+                    <WaTick state={p.wa} />
+                  </View>
                 </View>
               ))}
             </View>
@@ -163,6 +191,8 @@ const styles = StyleSheet.create({
   heroNote: { fontFamily: fonts.ui, fontSize: 12, color: ON_DARK, marginTop: spacing.md, lineHeight: 17 },
   picked: { backgroundColor: colors.brandTint, marginHorizontal: -spacing.md, paddingHorizontal: spacing.md },
   amount: { fontFamily: fonts.dataMed, fontSize: 16 },
+  wa: { flexDirection: "row", alignItems: "center", gap: 3, marginTop: 2 },
+  waText: { fontFamily: fonts.uiMed, fontSize: 11 },
   qrIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.brandTint, alignItems: "center", justifyContent: "center" },
   filter: { flexDirection: "row", alignItems: "center", gap: 4, maxWidth: 180, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
   filterText: { flexShrink: 1, fontFamily: fonts.uiBold, fontSize: 12, color: colors.ink },
