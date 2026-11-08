@@ -41,6 +41,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, field_validator
@@ -6393,10 +6394,11 @@ async def money_loyalty(driver: Dict = Depends(get_driver)):
 
 
 @api.get("/money/collection-qr")
-async def money_collection_qr(driver: Dict = Depends(get_driver)):
+async def money_collection_qr(req: Request, driver: Dict = Depends(get_driver)):
     """The driver's own collection QR, to show riders for payment. Created on
     first open (which also assigns their R91D code). Degrades gracefully if
-    Razorpay isn't configured."""
+    Razorpay isn't configured. `image_url` is the QR alone (big and easy to
+    scan); `poster_url` is Razorpay's full poster."""
     row = await db.driver_collection_qrs.find_one({"driver_id": driver["id"]}, {"_id": 0})
     if not row and _razorpay_configured():
         try:
@@ -6407,13 +6409,78 @@ async def money_collection_qr(driver: Dict = Depends(get_driver)):
     if not code:
         d = await db.drivers.find_one({"id": driver["id"]}, {"_id": 0, "code": 1})
         code = (d or {}).get("code")
+    qr_id = (row or {}).get("qr_code_id")
+    poster = (row or {}).get("image_url")
     return {
-        "qr_code_id": (row or {}).get("qr_code_id"),
-        "image_url": (row or {}).get("image_url"),
+        "qr_code_id": qr_id,
+        "image_url": _qr_only_url(req, qr_id) if qr_id and poster else poster,
+        "poster_url": poster,
         "short_url": (row or {}).get("short_url"),
         "code": code,
         "enabled": _razorpay_configured(),
     }
+
+
+def _qr_only_url(req: Request, qr_code_id: str) -> str:
+    proto = (req.headers.get("x-forwarded-proto") or req.url.scheme or "https").split(",")[0].strip()
+    host = req.headers.get("x-forwarded-host") or req.headers.get("host") or req.url.netloc
+    return f"{proto}://{host}/api/qr/{qr_code_id}.png"
+
+
+def _upi_from_poster(png: bytes) -> Optional[str]:
+    """Read the UPI payment link out of Razorpay's QR poster."""
+    import io as _io
+    import zxingcpp
+    from PIL import Image
+    for b in zxingcpp.read_barcodes(Image.open(_io.BytesIO(png))):
+        if (b.text or "").lower().startswith("upi://"):
+            return b.text
+    return None
+
+
+def _qr_png(text: str) -> bytes:
+    import io as _io
+    import segno
+    buf = _io.BytesIO()
+    segno.make(text, error="m", micro=False).save(buf, kind="png", scale=12, border=2)
+    return buf.getvalue()
+
+
+_QR_PNG_CACHE: Dict[str, bytes] = {}
+
+
+# Public on purpose: it is the same QR a rider scans off the driver's phone,
+# and an <Image> cannot send the driver's token. Unknown IDs get a 404.
+@api.get("/qr/{qr_code_id}.png")
+async def collection_qr_png(qr_code_id: str):
+    if not re.fullmatch(r"qr_[A-Za-z0-9]{6,30}", qr_code_id):
+        raise HTTPException(404, "not_found")
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if qr_code_id in _QR_PNG_CACHE:
+        return Response(content=_QR_PNG_CACHE[qr_code_id], media_type="image/png", headers=headers)
+    row = await db.driver_collection_qrs.find_one({"qr_code_id": qr_code_id}, {"_id": 0})
+    if not row or not row.get("image_url"):
+        raise HTTPException(404, "not_found")
+    upi = row.get("upi")
+    if not upi:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as c:
+                r = await c.get(row["image_url"])
+            r.raise_for_status()
+            upi = _upi_from_poster(r.content)
+        except Exception:
+            logger.exception("Reading collection QR %s failed", qr_code_id)
+            upi = None
+        if not upi:
+            # Could not read it: the poster still works, just smaller.
+            return RedirectResponse(row["image_url"], status_code=302)
+        await db.driver_collection_qrs.update_one({"qr_code_id": qr_code_id}, {"$set": {"upi": upi}})
+    png = _qr_png(upi)
+    if len(_QR_PNG_CACHE) > 500:
+        _QR_PNG_CACHE.clear()
+    _QR_PNG_CACHE[qr_code_id] = png
+    return Response(content=png, media_type="image/png", headers=headers)
 
 
 @api.get("/money/collections/today")
