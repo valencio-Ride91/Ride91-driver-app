@@ -8706,6 +8706,241 @@ async def _salary_payments(driver_id: str, limit: int = 10) -> List[Dict[str, An
     return out[:limit]
 
 
+# ---------------------------------------------------------------------------
+# PAYMENT HISTORY (driver app) — everything that ever moved the driver's money,
+# from their first day: earnings by day, cash handed in (at the hub, paid
+# online, or a rider paying the driver's QR), salary sent and asked for, and
+# bonuses paid. /money/history gives the lifetime totals and one line per
+# month; /money/history/month gives that month's entries.
+#
+# The rules match the screens that decide money, so the numbers agree:
+#   * earnings count when SETTLED and from yesterday back (as _salary_state);
+#   * cash collected counts the same way, cash handed in counts on any day
+#     (as _driver_balances); only trusted sources move cash;
+#   * a bank transfer that failed or was reversed never arrived, so it is
+#     listed but not counted.
+# ---------------------------------------------------------------------------
+def _bd_of(ts: Optional[str]) -> Optional[str]:
+    """The business day of a stored timestamp (None if missing or unreadable)."""
+    if not ts:
+        return None
+    try:
+        return business_date_from_dt(_parse_iso(ts))
+    except Exception:
+        return None
+
+
+def _deposit_via(r: Dict) -> str:
+    src = r.get("source")
+    if src == "qr_collection":
+        return "rider_qr"         # a rider paid the driver's QR; the fleet got the money
+    if src == "razorpay":
+        return "online"           # the driver paid in the app / by payment link
+    return "hub"                  # cash handed in at the hub, entered by the manager
+
+
+async def _history_timed_rows(driver_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Salary transfers, hand payments, withdrawal requests and bonus payouts,
+    each with its business day. A driver has tens of these, not thousands, so
+    they are read whole and bucketed in Python."""
+    payouts = [p async for p in db.payouts.find(
+        {"driver_id": driver_id}, {"_id": 0, "razorpayx_fund_account_id": 0, "razorpayx_contact_id": 0})]
+    withdrawals = [w async for w in db.salary_withdrawals.find({"driver_id": driver_id}, {"_id": 0})]
+    rewards = [r async for r in db.reward_payouts.find({"driver_id": driver_id}, {"_id": 0})]
+    out: Dict[str, List[Dict[str, Any]]] = {"salary": [], "requests": [], "rewards": []}
+    for p in payouts:
+        status_ = p.get("status") or ""
+        out["salary"].append({
+            "kind": "salary", "id": p.get("id"), "at": p.get("created_at"), "date": _bd_of(p.get("created_at")),
+            "amount": round(float(p.get("amount_rupees") or 0), 2),
+            "via": "upi" if p.get("mode") == "UPI" else "bank",
+            "status": "failed" if status_ in PAYOUT_DEAD_STATES else "paid" if status_ == "processed" else "processing",
+            "reference": p.get("utr"),
+        })
+    for w in withdrawals:
+        state = w.get("state")
+        if state == "paid" and w.get("method") == "manual":
+            at = w.get("decided_at") or w.get("requested_at")
+            out["salary"].append({
+                "kind": "salary", "id": w.get("id"), "at": at, "date": _bd_of(at),
+                "amount": round(float(w.get("amount") or 0), 2), "via": "hand", "status": "paid",
+                "reference": w.get("reference"),
+            })
+        elif state in ("pending", "paying", "rejected"):
+            # Paid requests show up as their payment above; these never paid.
+            at = w.get("decided_at") if state == "rejected" else w.get("requested_at")
+            out["requests"].append({
+                "kind": "salary_request", "id": w.get("id"), "at": at or w.get("requested_at"),
+                "date": _bd_of(at or w.get("requested_at")),
+                "amount": round(float(w.get("amount") or 0), 2),
+                "status": "rejected" if state == "rejected" else "pending",
+                "note": w.get("note") if state == "rejected" else None,
+            })
+    for r in rewards:
+        out["rewards"].append({
+            "kind": "reward", "id": r.get("id"), "at": r.get("created_at"), "date": _bd_of(r.get("created_at")),
+            "amount": round(float(r.get("amount") or 0), 2), "type": r.get("type"),
+            "month": r.get("month"), "note": r.get("note"),
+        })
+    return out
+
+
+def _month_after(ym: str) -> str:
+    y, m = int(ym[:4]), int(ym[5:7])
+    return f"{y + (m == 12):04d}-{(m % 12) + 1:02d}"
+
+
+@api.get("/money/history")
+async def money_history(driver: Dict = Depends(get_driver)):
+    """Lifetime totals and one line per month, newest month first."""
+    did = driver["id"]
+    today_bd = business_date_now()
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    months: Dict[str, Dict[str, Any]] = {}
+
+    def month(ym: str) -> Dict[str, Any]:
+        return months.setdefault(ym, {
+            "month": ym, "fares": 0.0, "share": 0.0, "cash_collected": 0.0, "cash_handed_in": 0.0,
+            "salary_paid": 0.0, "rewards_paid": 0.0, "days_worked": 0})
+
+    # Earnings: settled days up to yesterday, as salary and dues count them.
+    days_worked = 0
+    first_bd: Optional[str] = None
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"driver_id": did, "status": "settled", "business_date": {"$lt": today_bd}}},
+        {"$group": {"_id": "$business_date",
+                    "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}},
+                    "c": {"$sum": "$cash_amount"}}},
+    ]):
+        bd, g, c = r["_id"], float(r.get("g") or 0), float(r.get("c") or 0)
+        m = month(bd[:7])
+        m["fares"] += g
+        m["cash_collected"] += c
+        if g > 0:
+            m["days_worked"] += 1
+            days_worked += 1
+        first_bd = bd if first_bd is None or bd < first_bd else first_bd
+    async for r in db.qr_payments.aggregate([
+        {"$match": {"driver_id": did, "type": "deposit", "source": {"$in": sorted(TRUSTED_CASH_SOURCES)}}},
+        {"$group": {"_id": "$business_date", "t": {"$sum": "$amount"}}},
+    ]):
+        if r["_id"]:
+            month(r["_id"][:7])["cash_handed_in"] += float(r.get("t") or 0)
+            if first_bd is None or r["_id"] < first_bd:
+                first_bd = r["_id"]
+    timed = await _history_timed_rows(did)
+    for s in timed["salary"]:
+        if s["date"] and s["status"] != "failed":
+            month(s["date"][:7])["salary_paid"] += s["amount"]
+    for s in timed["requests"]:
+        if s["date"]:
+            month(s["date"][:7])
+    for r in timed["rewards"]:
+        if r["date"]:
+            month(r["date"][:7])["rewards_paid"] += r["amount"]
+
+    # Every month from the first one to this one, even quiet ones, so the list
+    # has no gaps.
+    joined_bd = _bd_of(driver.get("created_at"))
+    start = min([x for x in (first_bd, joined_bd, *(k + "-01" for k in months)) if x] or [today_bd])[:7]
+    ym = start
+    while ym <= today_bd[:7]:
+        month(ym)
+        ym = _month_after(ym)
+    for m in months.values():
+        m["share"] = round(m["fares"] * rate, 2)
+        for k in ("fares", "cash_collected", "cash_handed_in", "salary_paid", "rewards_paid"):
+            m[k] = round(m[k], 2)
+
+    salary = await _salary_state(driver)
+    bal = await _driver_balance(did)
+    return {
+        "since": first_bd or joined_bd,
+        "share_rate": rate,
+        "lifetime": {
+            "fares": salary["gross"],
+            "share": salary["earned"],
+            "salary_paid": salary["paid"],
+            "salary_pending": salary["pending"],
+            "salary_available": salary["available"],
+            "cash_collected": bal["collected_to_yesterday"],
+            "cash_handed_in": bal["paid_in_total"],
+            "you_owe": bal["you_owe"],
+            "in_credit": bal["in_credit"],
+            "rewards_paid": round(sum(r["amount"] for r in timed["rewards"]), 2),
+            "days_worked": days_worked,
+        },
+        "months": sorted(months.values(), key=lambda m: m["month"], reverse=True),
+    }
+
+
+@api.get("/money/history/month")
+async def money_history_month(month: str, driver: Dict = Depends(get_driver)):
+    """Every entry in one month (YYYY-MM), newest first."""
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month or ""):
+        raise HTTPException(400, "invalid_month")
+    did = driver["id"]
+    today_bd = business_date_now()
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    lo, hi = f"{month}-01", f"{_month_after(month)}-01"
+    entries: List[Dict[str, Any]] = []
+
+    # One line per day worked, all apps together.
+    days: Dict[str, Dict[str, Any]] = {}
+    async for r in db.platform_cash.find(
+        {"driver_id": did, "business_date": {"$gte": lo, "$lt": hi}},
+        {"_id": 0, "business_date": 1, "platform": 1, "gross_amount": 1, "cash_amount": 1, "status": 1},
+    ):
+        bd = r["business_date"]
+        g = float(r.get("gross_amount") if r.get("gross_amount") is not None else r.get("cash_amount") or 0)
+        c = float(r.get("cash_amount") or 0)
+        d = days.setdefault(bd, {"kind": "earning", "date": bd, "at": None, "fares": 0.0, "cash": 0.0,
+                                 "apps": {}, "settled": True})
+        d["fares"] += g
+        d["cash"] += c
+        app = d["apps"].setdefault(r.get("platform") or "other", {"fares": 0.0, "cash": 0.0})
+        app["fares"] += g
+        app["cash"] += c
+        if r.get("status") != "settled":
+            d["settled"] = False
+    for d in days.values():
+        if d["fares"] <= 0 and d["cash"] <= 0:
+            continue
+        # Today's figures count from tomorrow; an unsettled day waits for its report.
+        d["status"] = "today" if d["date"] >= today_bd else "settled" if d["settled"] else "pending"
+        d["share"] = round(d["fares"] * rate, 2)
+        d["fares"], d["cash"] = round(d["fares"], 2), round(d["cash"], 2)
+        for a in d["apps"].values():
+            a["fares"], a["cash"] = round(a["fares"], 2), round(a["cash"], 2)
+        d.pop("settled")
+        entries.append(d)
+
+    # Cash handed in (and any hand-in the hub undid).
+    rows = [r async for r in db.qr_payments.find(
+        {"driver_id": did, "type": "deposit", "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+         "business_date": {"$gte": lo, "$lt": hi}}, {"_id": 0})]
+    undone = {r.get("reverses") for r in rows if r.get("reverses")}
+    for r in rows:
+        at = r.get("occurred_at") or r.get("created_at") or r.get("ts")
+        if r.get("reverses"):
+            entries.append({"kind": "cash_undone", "id": r.get("id"), "date": r["business_date"], "at": at,
+                            "amount": round(abs(float(r.get("amount") or 0)), 2), "note": r.get("reason")})
+            continue
+        via = _deposit_via(r)
+        entries.append({"kind": "cash_in", "id": r.get("id"), "date": r["business_date"], "at": at,
+                        "amount": round(float(r.get("amount") or 0), 2), "via": via,
+                        # The hub's receipt number helps a driver match their slip.
+                        "reference": r.get("reference") if via == "hub" else None,
+                        "undone": r.get("id") in undone})
+
+    timed = await _history_timed_rows(did)
+    for group in ("salary", "requests", "rewards"):
+        entries.extend(e for e in timed[group] if e["date"] and lo <= e["date"] < hi)
+
+    entries.sort(key=lambda e: (e["date"] or "", e.get("at") or ""), reverse=True)
+    return {"month": month, "share_rate": rate, "entries": entries}
+
+
 # Who the audit log and the payout row name when a withdrawal pays itself.
 DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
 

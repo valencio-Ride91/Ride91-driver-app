@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
 import { AppHeader } from "@/src/components/AppHeader";
 import { Card } from "@/src/components/ui";
@@ -52,6 +53,7 @@ const PERIODS: { key: Period; label: "period_yesterday" | "period_week" | "perio
 export default function Money() {
   const { t } = useI18n();
   const c = useCardText();
+  const router = useRouter();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<Period>("yesterday");
@@ -148,6 +150,20 @@ export default function Money() {
             {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? c.earn_days(earn!.days_operated) : ""}
           </Text>
         </Card>
+
+        {/* The full lifetime history of every payment */}
+        <TouchableOpacity onPress={() => router.push("/history" as never)} testID="open-history" activeOpacity={0.8}>
+          <Card style={{ marginTop: spacing.md }}>
+            <View style={styles.histRow}>
+              <Text style={styles.histIcon}>📜</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.histTitle}>{c.hist_open}</Text>
+                <Text style={styles.histSub}>{c.hist_open_sub}</Text>
+              </View>
+              <Text style={styles.histChev}>›</Text>
+            </View>
+          </Card>
+        </TouchableOpacity>
 
         {/* Salary cash-out — what the driver can withdraw, and the button to ask for it */}
         <SalaryCard style={{ marginTop: spacing.md }} refreshKey={salaryKey} />
@@ -256,5 +272,10 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4 },
   hr: { height: 1, backgroundColor: colors.line, marginVertical: 4 },
   overLimitBanner: { backgroundColor: colors.alert, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.xs, marginBottom: spacing.xs },
+  histRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  histIcon: { fontSize: 22 },
+  histTitle: { fontFamily: fonts.uiBold, fontSize: 15, color: colors.ink },
+  histSub: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.muted, marginTop: 2 },
+  histChev: { fontFamily: fonts.uiBold, fontSize: 24, color: colors.muted },
   overLimitBannerText: { fontFamily: fonts.uiBold, color: colors.white, fontSize: 12, textAlign: "center" },
 });
