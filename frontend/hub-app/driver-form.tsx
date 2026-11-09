@@ -18,7 +18,7 @@ import { CarsData, HubCar } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
 import { HubDriver, useHubToday } from "@/src/hub/today";
-import { Icon } from "@/src/hub/kit";
+import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
@@ -92,6 +92,7 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
   const t = useHubText();
   const router = useRouter();
   const { refresh } = useHubToday();
+  const say = useToast();
   const id = driver?.driver_id ?? null;
   const first = useRef(cars);       // what the form opened with
   const was = {
@@ -144,10 +145,15 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
     setBusy(true);
     try {
       if (!id) {
-        const made = await hubApi.post<{ id: string }>("/admin/drivers", {
-          name: name.trim(), phone: ten, password, shift_type: shift, hub_id: hubId, ...(car ? { vehicle_id: car } : {}),
+        const made = await hubApi.post<{ id: string; shift_start_time?: string | null }>("/admin/drivers", {
+          name: name.trim(), phone: ten, password, shift_type: shift, hub_id: hubId,
+          ...(car ? { vehicle_id: car } : {}), ...(time.trim() ? { shift_start_time: time.trim() } : {}),
         });
-        if (time.trim()) await hubApi.patch(`/admin/drivers/${made.id}`, { shift_start_time: time.trim() });
+        // An older server ignores the time on create; set it after. The driver
+        // exists either way, so a failure here only says so.
+        if (time.trim() && made.shift_start_time !== time.trim()) {
+          await hubApi.patch(`/admin/drivers/${made.id}`, { shift_start_time: time.trim() }).catch(() => say(t.df_time_not_saved, "bad"));
+        }
         await refresh();
         router.replace(`/driver/${made.id}` as never);
         return;

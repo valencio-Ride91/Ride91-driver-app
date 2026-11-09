@@ -138,8 +138,10 @@ export default function Money() {
       setAct(null);
       say(done);
       await reload();
-    } catch {
-      setErr(t.action_fail);
+    } catch (e: any) {
+      setErr(t.why[e?.body?.detail] ?? t.action_fail);
+      // The list was out of date (or the amount changed): show it as it is now.
+      reload();
     } finally {
       setBusyId(null);
     }

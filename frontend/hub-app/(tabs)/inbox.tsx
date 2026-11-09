@@ -120,8 +120,9 @@ export default function Inbox() {
       await hubApi.post(`/admin/requests/${r.id}/decide`, { decision });
       say(decision === "approve" ? t.approved : t.reject_done);
       await Promise.all([load(), refresh()]);
-    } catch {
-      say(t.action_fail, "bad");
+    } catch (e: any) {
+      say(t.why[e?.body?.detail] ?? t.action_fail, "bad");
+      Promise.all([load(), refresh()]).catch(() => {});
     } finally {
       setBusyId(null);
       setAsking(null);

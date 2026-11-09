@@ -509,6 +509,17 @@ class DriverCreateIn(BaseModel):
     hub_lng: Optional[float] = None
     shift_type: str = "day"                    # day | night
     status: Literal["approved", "pending"] = "approved"
+    shift_start_time: Optional[str] = None     # HH:MM; set in the same call so a new driver is never half made
+
+    @field_validator("shift_start_time")
+    @classmethod
+    def _hhmm_or_blank(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+            raise ValueError("shift_start_time must be HH:MM")
+        return v
 
 
 class DriverUpdateIn(BaseModel):
@@ -2338,8 +2349,12 @@ async def admin_change_password(body: ChangePasswordIn, admin: Dict = Depends(ge
         {"$set": {"password_hash": hash_password(body.new_password),
                   "password_changed_at": iso(now_utc())}},
     )
-    await _audit(admin, "change_password")
-    return {"ok": True}
+    # Every other device signed in with the old password is signed out; this
+    # one stays signed in.
+    gone = await db.admin_sessions.delete_many(
+        {"username": admin["username"], "token": {"$ne": admin["token"]}})
+    await _audit(admin, "change_password", "", {"signed_out": gone.deleted_count})
+    return {"ok": True, "signed_out": gone.deleted_count}
 
 
 # ---- Admin accounts (owner only) ------------------------------------------
@@ -3175,6 +3190,7 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
         "active": True,
         "status": body.status,
         "shift_type": body.shift_type,
+        "shift_start_time": body.shift_start_time,
         "hub_id": hub_id,
         "hub_name": hub_name,
         "hub_lat": hub_lat,
@@ -3485,13 +3501,23 @@ async def admin_hub_today(hub_id: str, admin: Dict = Depends(require_ops)):
     rows: List[Dict[str, Any]] = []
     attention: List[Dict[str, Any]] = []
     shift_counts: Dict[str, int] = {}
-    for d in sorted(drivers, key=lambda x: (x.get("name") or "").lower()):
+    # Each driver needs a few lookups; they only read, so up to 8 drivers are
+    # looked up at once instead of one after another (a hub of 20 drivers used
+    # to take seconds). The cap keeps the small database from being swamped.
+    gate = asyncio.Semaphore(8)
+
+    async def look(d: Dict) -> tuple:
+        async with gate:
+            did = d["id"]
+            # Where the driver's own phone was last seen — the dot on the app's map.
+            shift, duty, seen = await asyncio.gather(
+                _shift_status(d, now), _duty_summary(did, d.get("vehicle_id"), bd), _last_phone_ping(did))
+            track = await _tracking_status(did, duty["on_duty"], seen)
+            return d, shift, duty, seen, track
+
+    ordered = sorted(drivers, key=lambda x: (x.get("name") or "").lower())
+    for d, shift, duty, seen, track in await asyncio.gather(*(look(d) for d in ordered)):
         did = d["id"]
-        shift = await _shift_status(d, now)
-        duty = await _duty_summary(did, d.get("vehicle_id"), bd)
-        # Where the driver's own phone was last seen — the dot on the app's map.
-        seen = await _last_phone_ping(did)
-        track = await _tracking_status(did, duty["on_duty"], seen)
         try:
             seen_min = round((now - _parse_iso(seen["recorded_at"])).total_seconds() / 60, 1)
         except Exception:
@@ -3934,9 +3960,13 @@ async def admin_delete_driver(
     d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
     if not d:
         raise HTTPException(404, "driver_not_found")
-    await _assert_driver_in_scope(d, hub_scope(admin))
+    scope = hub_scope(admin)
+    await _assert_driver_in_scope(d, scope)
 
     if hard:
+        # Erasing a driver for good is the office's call, not a hub's.
+        if ROLE_RANK.get(admin.get("role", "viewer"), 0) < ROLE_RANK["manager"]:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "office_only")
         has_money = (
             await db.qr_payments.find_one({"driver_id": driver_id}, {"_id": 1})
             or await db.platform_cash.find_one({"driver_id": driver_id}, {"_id": 1})
@@ -3948,14 +3978,24 @@ async def admin_delete_driver(
         await _audit(admin, "delete_driver", driver_id)
         return {"ok": True, "id": driver_id, "deleted": True}
 
+    keep: Dict[str, Any] = {}
+    if not d.get("hub_id") and d.get("vehicle_id"):
+        # They belonged to the hub through their car; once the car is freed
+        # that link is gone, so record the hub on the driver.
+        car = await db.vehicles.find_one({"id": d["vehicle_id"]}, {"_id": 0, "hub_id": 1})
+        if car and car.get("hub_id"):
+            hub = await db.hubs.find_one({"id": car["hub_id"]}, {"_id": 0, "name": 1})
+            keep = {"hub_id": car["hub_id"], "hub_name": (hub or {}).get("name")}
     await db.drivers.update_one(
         {"id": driver_id},
         {"$set": {
             "archived": True,
             "active": False,
             "vehicle_id": None,          # free the plate for reassignment
+            "archived_vehicle_id": d.get("vehicle_id"),
             "archived_at": iso(now_utc()),
             "archived_by": admin["username"],
+            **keep,
         }},
     )
     await _audit(admin, "archive_driver", driver_id)
