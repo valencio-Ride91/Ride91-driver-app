@@ -1,7 +1,9 @@
 // One car: what the hub does with it and everything on file for it.
 //
 //   - Shift change, Inspect, Add service — the three things done to a car.
-//   - Drivers: who has it by day and by night, each with "Remove from car".
+//   - Drivers: who has it by day and by night, each with "Remove from car";
+//     a free shift can be given to a driver who has no car.
+//   - Damage from a shift change can be marked repaired.
 //   - Last done: when it last had a full service, tyres, wipers, brakes and
 //     battery work.
 //   - Inspections: each walk-round, with the points that needed attention.
@@ -18,7 +20,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
-import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, HubCar, SERVICE_KINDS } from "@/src/hub/cars";
+import { CHECK_ITEMS, CarCheck, CarDriver, CarHistory, CarsData, HubCar, SERVICE_KINDS, ago, isStale } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { ServiceSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
@@ -55,6 +57,9 @@ export default function Car() {
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [taking, setTaking] = useState<OnCar | null>(null);     // the "take off this car?" step
+  const [giving, setGiving] = useState<"day" | "night" | null>(null);   // picking who takes a free shift
+  const [spare, setSpare] = useState<CarDriver[] | null>(null);         // the hub's drivers with no car
+  const [fixing, setFixing] = useState<string | null>(null);            // the shift change whose damage is being marked repaired
   const { today, refresh } = useHubToday();
 
   const load = useCallback(async () => {
@@ -124,6 +129,53 @@ export default function Car() {
     }
   };
 
+  // Pick who takes a free shift: drivers of the hub who have no car.
+  const openGive = async (sh: "day" | "night") => {
+    setTaking(null);
+    setGiving(sh);
+    setSpare(null);
+    try {
+      const list = await hubApi.get<CarsData>(`/admin/hubs/${hubId}/cars`);
+      setSpare(list.drivers.filter((d) => !d.vehicle_id));
+    } catch {
+      setSpare([]);
+      fail(t.action_fail);
+    }
+  };
+
+  const give = async (d: CarDriver) => {
+    if (busy || !giving) return;
+    setBusy(true);
+    try {
+      // Refused (shift_slot_taken) if someone took the shift meanwhile.
+      await hubApi.post(`/admin/vehicles/${id}/assign`, { shift: giving, driver_id: d.driver_id });
+      say(t.car_give_done(d.name ?? ""));
+      setGiving(null);
+      await Promise.all([load(), refresh()]);
+    } catch (e: any) {
+      fail(e?.body?.detail === "shift_slot_taken" ? t.df_slot_taken : t.action_fail);
+      setGiving(null);
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markRepaired = async (handoverId: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await hubApi.post(`/admin/handovers/${handoverId}/damage-repaired`, {});
+      say(t.car_damage_done);
+      setFixing(null);
+      await load();
+    } catch {
+      fail(t.action_fail);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async () => {
     if (busy) return;
     setBusy(true);
@@ -157,7 +209,7 @@ export default function Car() {
             <View style={hubStyles.card}>
               <Text style={hubStyles.name}>{h.vehicle.model ?? "—"}</Text>
               <Text style={hubStyles.sub}>
-                {[h.vehicle.current_soc != null ? `${t.battery} ${h.vehicle.current_soc}%` : null,
+                {[h.vehicle.current_soc != null ? `${t.battery} ${h.vehicle.current_soc}%${h.vehicle.soc_at ? ` (${ago(h.vehicle.soc_at, t)})` : ""}` : null,
                   h.vehicle.odometer_km != null ? t.car_odometer(Math.round(h.vehicle.odometer_km).toLocaleString("en-IN")) : null,
                   limited ? null : h.checks[0] ? t.car_last_inspected(formatISTDate(h.checks[0].created_at)) : t.car_never_inspected].filter(Boolean).join(" · ")}
               </Text>
@@ -167,6 +219,27 @@ export default function Car() {
               </View>
             </View>
             {limited ? <Text style={[hubStyles.warn, { marginTop: spacing.md }]} testID="hub-car-limited">{t.car_limited}</Text> : null}
+
+            {h.handovers.filter((x) => x.damage_note && !x.damage_repaired_at).slice(0, 3).map((x) => (
+              <View key={x.id} style={[hubStyles.card, styles.damage]} testID={`hub-car-damage-${x.id}`}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                  <Icon name="warning" size={18} color="#8A5D00" />
+                  <Text style={[hubStyles.name, { flex: 1 }]}>{t.car_damage_open(formatISTDate(x.created_at))}</Text>
+                </View>
+                <Text style={[styles.note, { marginTop: 4 }]}>{x.damage_note}</Text>
+                {fixing === x.id ? (
+                  <View style={{ marginTop: spacing.sm }}>
+                    <Text style={styles.dangerText}>{t.car_damage_sure}</Text>
+                    <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm }}>
+                      <Btn label={t.cancel} small kind="ghost" onPress={() => setFixing(null)} disabled={busy} style={{ flex: 1 }} />
+                      <Btn label={t.car_damage_yes} small onPress={() => markRepaired(x.id)} busy={busy} style={{ flex: 1 }} testID="hub-car-damage-yes" />
+                    </View>
+                  </View>
+                ) : (
+                  <Btn label={t.car_damage_fix} small kind="ghost" onPress={() => setFixing(x.id)} style={{ marginTop: spacing.sm, alignSelf: "flex-start" }} testID="hub-car-damage-fix" />
+                )}
+              </View>
+            ))}
 
             <SectionTitle>{t.car_drivers}</SectionTitle>
             <View style={hubStyles.card} testID="hub-car-drivers">
@@ -178,6 +251,7 @@ export default function Car() {
                     <View key={sh} style={[hubStyles.row, si === 0 ? hubStyles.rowFirst : null]} testID={`hub-car-slot-${sh}`}>
                       <Text style={styles.shift}>{label}</Text>
                       <Text style={[hubStyles.sub, { flex: 1 }]}>{t.slot_free}</Text>
+                      <Btn label={t.car_give} small onPress={() => openGive(sh)} disabled={busy} testID={`hub-car-give-${sh}`} />
                     </View>
                   );
                 }
@@ -187,11 +261,31 @@ export default function Car() {
                     <TouchableOpacity style={{ flex: 1 }} onPress={() => router.push(`/driver/${d.driver_id}` as never)}>
                       <Text style={hubStyles.name} numberOfLines={1}>{d.name ?? "—"}</Text>
                     </TouchableOpacity>
-                    <Btn label={t.car_off} small kind="ghost" onPress={() => setTaking(d)} disabled={busy} testID={`hub-car-off-${d.driver_id}`} />
+                    <Btn label={t.car_off} small kind="ghost" onPress={() => { setGiving(null); setTaking(d); }} disabled={busy} testID={`hub-car-off-${d.driver_id}`} />
                   </View>
                 ));
               })}
-              {(h.drivers ?? []).length < 2 ? <Text style={[hubStyles.sub, { marginTop: spacing.sm }]}>{t.car_free_hint}</Text> : null}
+              {giving ? (
+                <View style={styles.giveBox} testID="hub-car-give-list">
+                  <Text style={hubStyles.name}>{t.car_give_title(giving === "day" ? t.day_short : t.night_short)}</Text>
+                  {spare === null ? <Empty>{t.loading}</Empty> : spare.length === 0 ? <Text style={[hubStyles.sub, { marginTop: 4 }]}>{t.car_give_none}</Text> : spare.map((d) => {
+                    const theirs = d.shift_type === "night" ? "night" : "day";
+                    return (
+                      <TouchableOpacity key={d.driver_id} style={styles.giveRow} onPress={() => give(d)} disabled={busy} testID={`hub-car-give-${d.driver_id}`}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
+                          <Text style={hubStyles.sub}>
+                            {theirs === "night" ? t.night_short : t.day_short}
+                            {theirs !== giving ? ` · ${t.car_give_shift_note(giving === "day" ? t.day_short : t.night_short)}` : ""}
+                          </Text>
+                        </View>
+                        <Icon name="chevron-forward" size={18} color={colors.muted} />
+                      </TouchableOpacity>
+                    );
+                  })}
+                  <Btn label={t.cancel} small kind="ghost" onPress={() => setGiving(null)} disabled={busy} style={{ marginTop: spacing.sm }} testID="hub-car-give-cancel" />
+                </View>
+              ) : (h.drivers ?? []).length < 2 ? <Text style={[hubStyles.sub, { marginTop: spacing.sm }]}>{t.car_free_hint}</Text> : null}
               {taking ? (
                 <View style={styles.offBox} testID="hub-car-off-confirm">
                   <Text style={styles.dangerText}>
@@ -280,7 +374,7 @@ export default function Car() {
                       </Text>
                       <Text style={hubStyles.sub}>{x.photo_count ? t.tap_for_photos(x.photo_count) : t.photos_none}</Text>
                     </View>
-                    {x.damage_note ? <Tag tone="warn">{t.damage_tag}</Tag> : null}
+                    {x.damage_note ? (x.damage_repaired_at ? <Tag tone="ok">{t.damage_fixed_tag}</Tag> : <Tag tone="warn">{t.damage_tag}</Tag>) : null}
                   </TouchableOpacity>
                   {openHandover === x.id ? (
                     <View style={styles.detail}>
@@ -350,6 +444,9 @@ const styles = StyleSheet.create({
   photoLabel: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: 2, textTransform: "capitalize" },
   danger: { marginTop: spacing.xl, borderColor: colors.alert },
   shift: { width: 52, fontFamily: fonts.uiBold, fontSize: 12, color: colors.muted },
+  damage: { marginTop: spacing.md, borderColor: colors.amber },
+  giveBox: { marginTop: spacing.md, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.paper },
+  giveRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.line },
   offBox: { marginTop: spacing.md, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.alert, backgroundColor: colors.paper },
   dangerText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
 });

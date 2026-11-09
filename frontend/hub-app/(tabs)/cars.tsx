@@ -7,12 +7,12 @@
 // last changed hands. Tap a car for its page (shift change, inspection,
 // service history); "+ Add car" adds one.
 import React, { useCallback, useMemo, useState } from "react";
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { formatIST, formatISTDate } from "@/src/i18n";
-import { CarsData, HubCar } from "@/src/hub/cars";
+import { CarsData, HubCar, ago, isStale, openDamage } from "@/src/hub/cars";
 import { Chips, Icon, ProgressBar, useToast } from "@/src/hub/kit";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { AddCarSheet } from "@/src/hub/sheets";
@@ -21,7 +21,7 @@ import { Btn, Empty, HubHeader, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 type Filter = "all" | "attention" | "free" | "unchecked";
-const needsAttention = (c: HubCar) => !!c.last_check?.attention.length || !!c.last_handover?.damage_note;
+const needsAttention = (c: HubCar) => !!c.last_check?.attention.length || openDamage(c);
 const freeSlots = (c: HubCar) => Number(!c.day_driver) + Number(!c.night_driver);
 const matches = (c: HubCar, f: Filter) =>
   f === "all" || (f === "attention" ? needsAttention(c) : f === "free" ? freeSlots(c) > 0 : !c.last_check);
@@ -39,6 +39,7 @@ export default function Cars() {
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [q, setQ] = useState("");
 
   const load = useCallback(async () => {
     if (!hubId) return;
@@ -67,7 +68,9 @@ export default function Cars() {
     unchecked: cars.filter((c) => !c.last_check).length,
     slots: cars.reduce((n, c) => n + freeSlots(c), 0),
   }), [cars]);
-  const list = cars.filter((c) => matches(c, filter));
+  // The search ignores spaces and dashes, so "1001" or "mh14 ev" both find MH14EV1001.
+  const norm = (x: string) => x.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const list = cars.filter((c) => matches(c, filter) && (!q.trim() || norm(c.number ?? "").includes(norm(q))));
 
   const slot = (label: string, who: { name: string | null } | null) => (
     <View style={[styles.slot, who ? null : styles.slotFree]}>
@@ -101,6 +104,15 @@ export default function Cars() {
               ]}
             />
 
+            {cars.length > 5 ? (
+              <View style={styles.search}>
+                <Icon name="search" size={18} color={colors.muted} />
+                <TextInput testID="hub-car-search" value={q} onChangeText={setQ} placeholder={t.car_search} placeholderTextColor={colors.muted}
+                  autoCapitalize="characters" autoCorrect={false} style={styles.searchInput} />
+                {q ? <TouchableOpacity onPress={() => setQ("")}><Icon name="close-circle" size={18} color={colors.muted} /></TouchableOpacity> : null}
+              </View>
+            ) : null}
+
             <View style={styles.list} testID="hub-car-list">
               {list.length === 0 ? <Empty>{cars.length ? t.no_match_cars : t.cars_none}</Empty> : list.map((c) => {
                 const flagged = c.last_check?.attention.length ?? 0;
@@ -118,6 +130,7 @@ export default function Cars() {
                             <Text style={styles.socText}>{c.current_soc}%</Text>
                           </View>
                           <ProgressBar value={c.current_soc / 100} color={socColor(c.current_soc)} />
+                          {c.soc_at ? <Text style={[styles.socAge, isStale(c.soc_at) ? { color: "#8A5D00" } : null]} numberOfLines={1}>{ago(c.soc_at, t)}</Text> : null}
                         </View>
                       ) : null}
                       <Icon name="chevron-forward" size={18} color={colors.muted} />
@@ -140,7 +153,7 @@ export default function Cars() {
                       <View style={styles.footLine}>
                         <Icon name="swap-horizontal" size={16} color={colors.muted} />
                         <Text style={styles.footText} numberOfLines={1}>{c.last_handover ? t.last_change(formatIST(c.last_handover.created_at)) : t.never_changed}</Text>
-                        {c.last_handover?.damage_note ? <Tag tone="warn">{t.damage_tag}</Tag> : null}
+                        {openDamage(c) ? <Tag tone="warn">{t.damage_tag}</Tag> : null}
                       </View>
                     </View>
                   </TouchableOpacity>
@@ -168,6 +181,9 @@ const styles = StyleSheet.create({
   soc: { width: 74, gap: 4 },
   socRow: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 4 },
   socText: { fontFamily: fonts.dataMed, fontSize: 14, color: colors.ink },
+  socAge: { fontFamily: fonts.ui, fontSize: 10, color: colors.muted, textAlign: "right" },
+  search: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.md, paddingHorizontal: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  searchInput: { flex: 1, paddingVertical: 10, fontFamily: fonts.dataMed, fontSize: 15, color: colors.ink },
   slots: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.md },
   slot: { flex: 1, minWidth: 0, paddingVertical: 8, paddingHorizontal: spacing.md, borderRadius: radius.md, backgroundColor: colors.paper },
   slotFree: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderStyle: "dashed" },

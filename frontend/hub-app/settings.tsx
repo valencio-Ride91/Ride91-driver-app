@@ -16,6 +16,7 @@ import { colors, fonts, spacing } from "@/src/theme";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 interface Removed { driver_id: string; name: string | null; phone: string | null; removed_at: string | null }
+interface RemovedCar { vehicle_id: string; number: string | null; model: string | null; removed_at: string | null }
 type Who = "all" | "day" | "night";
 
 export default function Settings() {
@@ -28,6 +29,7 @@ export default function Settings() {
   const [time, setTime] = useState("");
   const [sure, setSure] = useState(false);          // asking before the shift time is set for everyone
   const [removed, setRemoved] = useState<Removed[] | null>(null);
+  const [removedCars, setRemovedCars] = useState<RemovedCar[] | null>(null);
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [busy, setBusy] = useState<string | null>(null);      // which action is running
@@ -38,6 +40,11 @@ export default function Settings() {
       setRemoved((await hubApi.get<{ items: Removed[] }>(`/admin/hubs/${hubId}/removed-drivers`)).items);
     } catch {
       setRemoved([]);       // an older server has no such list
+    }
+    try {
+      setRemovedCars((await hubApi.get<{ items: RemovedCar[] }>(`/admin/hubs/${hubId}/removed-cars`)).items);
+    } catch {
+      setRemovedCars([]);
     }
   }, [hubId]);
 
@@ -79,6 +86,13 @@ export default function Settings() {
       await Promise.all([loadRemoved(), refresh()]);
       return t.restored(d.name ?? "");
     });
+
+  const restoreCar = (c: RemovedCar) =>
+    run(`car:${c.vehicle_id}`, async () => {
+      await hubApi.post(`/admin/vehicles/${c.vehicle_id}/restore`);
+      await loadRemoved();
+      return t.car_restored(c.number ?? "");
+    }, (e) => (e?.body?.detail === "hub_full" ? t.car_hub_full : t.action_fail));
 
   const changePassword = () => {
     if (newPw.length < 10) return fail(t.pw_short);
@@ -140,6 +154,19 @@ export default function Settings() {
                   <Text style={hubStyles.sub}>{[d.phone, d.removed_at ? formatISTDate(d.removed_at) : null].filter(Boolean).join(" · ")}</Text>
                 </View>
                 <Btn label={t.restore} small kind="ghost" onPress={() => restore(d)} busy={busy === `restore:${d.driver_id}`} testID={`hub-set-restore-${d.driver_id}`} />
+              </View>
+            ))}
+          </View>
+
+          <SectionTitle>{t.removed_cars_title}</SectionTitle>
+          <View style={hubStyles.card} testID="hub-set-removed-cars">
+            {removedCars === null ? <Empty>{t.loading}</Empty> : removedCars.length === 0 ? <Empty>{t.removed_cars_none}</Empty> : removedCars.map((c, i) => (
+              <View key={c.vehicle_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[hubStyles.name, styles.mono]}>{c.number ?? "—"}</Text>
+                  <Text style={hubStyles.sub}>{[c.model, c.removed_at ? formatISTDate(c.removed_at) : null].filter(Boolean).join(" · ")}</Text>
+                </View>
+                <Btn label={t.restore} small kind="ghost" onPress={() => restoreCar(c)} busy={busy === `car:${c.vehicle_id}`} testID={`hub-set-restore-car-${c.vehicle_id}`} />
               </View>
             ))}
           </View>

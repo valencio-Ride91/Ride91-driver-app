@@ -3087,6 +3087,8 @@ async def admin_update_vehicle(
         val = getattr(body, field)
         if val is not None:
             updates[field] = val
+    if "current_soc" in updates:
+        updates["soc_at"] = iso(now_utc())
     # A hub_manager can't move a car out of their hub.
     if body.hub_id is not None and scope is None:
         # "" clears the hub; any other value must exist and have room.
@@ -3127,14 +3129,16 @@ async def admin_retire_vehicle(vehicle_id: str, admin: Dict = Depends(require_op
 
 @api.post("/admin/vehicles/{vehicle_id}/restore")
 async def admin_restore_vehicle(vehicle_id: str, admin: Dict = Depends(require_ops)):
-    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1})
+    veh = await db.vehicles.find_one({"id": vehicle_id}, {"_id": 0, "id": 1, "hub_id": 1, "number": 1})
     if not veh:
         raise HTTPException(404, "vehicle_not_found")
     await _assert_vehicle_in_scope(veh, hub_scope(admin))
+    await _assign_vehicle_hub(vehicle_id, veh.get("hub_id"))     # the hub may be full by now
     await db.vehicles.update_one(
         {"id": vehicle_id},
         {"$set": {"retired": False}, "$unset": {"retired_at": "", "retired_by": ""}},
     )
+    await _audit(admin, "restore_vehicle", vehicle_id, {"number": veh.get("number")})
     return {"ok": True, "id": vehicle_id, "retired": False}
 
 
@@ -3624,7 +3628,8 @@ def _handover_out(h: Dict) -> Dict[str, Any]:
     return {k: h.get(k) for k in (
         "id", "hub_id", "vehicle_id", "vehicle_number", "from_driver_id", "from_driver_name",
         "to_driver_id", "to_driver_name", "soc_pct", "odometer_km", "damage_note", "photo_count",
-        "photo_labels", "cash_due", "created_at", "created_by")}
+        "photo_labels", "cash_due", "created_at", "created_by",
+        "damage_repaired_at", "damage_repaired_by", "damage_repair_note")}
 
 
 def _assert_my_hub(hub_id: str, admin: Dict) -> None:
@@ -3663,6 +3668,8 @@ async def admin_hub_cars(hub_id: str, admin: Dict = Depends(require_ops)):
         "cars": [{
             "id": v["id"], "number": v.get("number"), "model": v.get("model"),
             "current_soc": v.get("current_soc"), "odometer_km": v.get("odometer_km"),
+            # Older cars have no soc_at; their battery came from the last shift change.
+            "soc_at": v.get("soc_at") or (v.get("last_handover_at") if v.get("current_soc") is not None else None),
             "day_driver": slot.get(f"{v['id']}:day"), "night_driver": slot.get(f"{v['id']}:night"),
             "last_handover": _handover_out(last[v["id"]]) if v["id"] in last else None,
             "last_check": ({"created_at": checked[v["id"]]["created_at"], "attention": checked[v["id"]].get("attention") or []}
@@ -3756,6 +3763,7 @@ async def admin_record_handover(hub_id: str, body: HandoverIn, admin: Dict = Dep
     car_update: Dict[str, Any] = {"last_handover_at": now}
     if body.soc_pct is not None:
         car_update["current_soc"] = body.soc_pct
+        car_update["soc_at"] = now
     if body.odometer_km is not None:
         car_update["odometer_km"] = body.odometer_km
     await db.vehicles.update_one({"id": vehicle["id"]}, {"$set": car_update})
@@ -3785,6 +3793,45 @@ async def admin_get_handover(handover_id: str, admin: Dict = Depends(require_ops
     photos = [{"label": p.get("label"), "data": _handover_photo_data(p)} async for p in db.handover_photos.find(
         {"handover_id": handover_id}, {"_id": 0}).sort("created_at", 1)]
     return {**_handover_out(h), "photos": photos}
+
+
+class DamageRepairedIn(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
+@api.post("/admin/handovers/{handover_id}/damage-repaired")
+async def admin_damage_repaired(handover_id: str, body: DamageRepairedIn, admin: Dict = Depends(require_ops)):
+    """The damage noted at a shift change has been put right, so the car no
+    longer needs attention for it. The note itself stays on file. Doing it
+    twice keeps the first record."""
+    h = await db.handovers.find_one({"id": handover_id}, {"_id": 0})
+    if not h:
+        raise HTTPException(404, "handover_not_found")
+    _assert_my_hub(h["hub_id"], admin)
+    if not h.get("damage_note"):
+        raise HTTPException(400, "no_damage")
+    if not h.get("damage_repaired_at"):
+        upd = {"damage_repaired_at": iso(now_utc()), "damage_repaired_by": admin["username"],
+               "damage_repair_note": (body.note or "").strip() or None}
+        await db.handovers.update_one({"id": handover_id, "damage_repaired_at": None}, {"$set": upd})
+        h.update(upd)
+        await _audit(admin, "damage_repaired", h["vehicle_id"], {"handover_id": handover_id})
+    return {"ok": True, "handover": _handover_out(h)}
+
+
+@api.get("/admin/hubs/{hub_id}/removed-cars")
+async def admin_hub_removed_cars(hub_id: str, admin: Dict = Depends(require_ops)):
+    """Cars removed from this hub, newest first, to bring one back
+    (POST /admin/vehicles/<id>/restore)."""
+    _assert_my_hub(hub_id, admin)
+    rows = [v async for v in db.vehicles.find(
+        {"hub_id": hub_id, "retired": True},
+        {"_id": 0, "id": 1, "number": 1, "model": 1, "retired_at": 1, "retired_by": 1},
+    ).sort("retired_at", -1).limit(100)]
+    return {"items": [{
+        "vehicle_id": v["id"], "number": v.get("number"), "model": v.get("model"),
+        "removed_at": v.get("retired_at"), "removed_by": v.get("retired_by"),
+    } for v in rows], "count": len(rows)}
 
 
 @api.get("/admin/hubs/{hub_id}/earnings-day")
@@ -4270,7 +4317,8 @@ async def admin_car_history(vehicle_id: str, admin: Dict = Depends(require_ops))
     return {
         "vehicle": {"id": veh["id"], "number": veh.get("number"), "model": veh.get("model"),
                     "hub_id": veh.get("hub_id"), "current_soc": veh.get("current_soc"),
-                    "odometer_km": veh.get("odometer_km"), "last_handover_at": veh.get("last_handover_at")},
+                    "odometer_km": veh.get("odometer_km"), "last_handover_at": veh.get("last_handover_at"),
+                    "soc_at": veh.get("soc_at") or (veh.get("last_handover_at") if veh.get("current_soc") is not None else None)},
         "drivers": drivers,
         "check_items": list(CAR_CHECK_ITEMS),
         "checks": checks,
