@@ -1,6 +1,7 @@
 // One car: what the hub does with it and everything on file for it.
 //
 //   - Shift change, Inspect, Add service — the three things done to a car.
+//   - Drivers: who has it by day and by night, each with "Remove from car".
 //   - Last done: when it last had a full service, tyres, wipers, brakes and
 //     battery work.
 //   - Inspections: each walk-round, with the points that needed attention.
@@ -17,16 +18,23 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { formatINR, formatIST, formatISTDate } from "@/src/i18n";
-import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, SERVICE_KINDS } from "@/src/hub/cars";
+import { CHECK_ITEMS, CarCheck, CarHistory, CarsData, HubCar, SERVICE_KINDS } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { ServiceSheet } from "@/src/hub/sheets";
 import { useHubText } from "@/src/hub/text";
+import { useHubToday } from "@/src/hub/today";
 import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, hubStyles } from "@/src/hub/ui";
 import { colors, fonts, radius, spacing } from "@/src/theme";
 
 interface Photo { label: string; data: string }
+type OnCar = { driver_id: string; name: string | null; shift: string };
 const uri = (p: Photo) => (p.data.startsWith("data:") ? p.data : `data:image/jpeg;base64,${p.data}`);
+// The drivers on a car as the hub's car list has them (one per shift).
+const slotsOf = (c: HubCar | undefined): OnCar[] => (c ? [
+  ...(c.day_driver ? [{ driver_id: c.day_driver.driver_id, name: c.day_driver.name, shift: "day" }] : []),
+  ...(c.night_driver ? [{ driver_id: c.night_driver.driver_id, name: c.night_driver.name, shift: "night" }] : []),
+] : []);
 // A date-only value shown as a date, wherever the phone is.
 const day = (ymd: string) => formatISTDate(`${ymd}T12:00:00+05:30`);
 
@@ -46,11 +54,19 @@ export default function Car() {
   const [service, setService] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [taking, setTaking] = useState<OnCar | null>(null);     // the "take off this car?" step
+  const { today, refresh } = useHubToday();
 
   const load = useCallback(async () => {
     if (!signedIn) return;          // the saved session is still being read back
     try {
-      setH(await hubApi.get<CarHistory>(`/admin/vehicles/${id}/history`));
+      const got = await hubApi.get<CarHistory>(`/admin/vehicles/${id}/history`);
+      if (!got.drivers) {
+        // An older server: who is on the car comes from the hub's car list.
+        const list = await hubApi.get<CarsData>(`/admin/hubs/${hubId}/cars`).catch(() => null);
+        got.drivers = slotsOf(list?.cars.find((c) => c.id === id));
+      }
+      setH(got);
       setLimited(false);
       setFailed(false);
       return;
@@ -64,7 +80,7 @@ export default function Car() {
       if (!car) return setFailed(true);
       setH({
         vehicle: { id: car.id, number: car.number, model: car.model, current_soc: car.current_soc, odometer_km: car.odometer_km },
-        checks: [], services: [], last_done: {}, handovers: [],
+        checks: [], services: [], last_done: {}, handovers: [], drivers: slotsOf(car),
       });
       setLimited(true);
       setFailed(false);
@@ -88,6 +104,23 @@ export default function Car() {
       setPhotos((p) => ({ ...p, [hid]: r.photos }));
     } catch {
       fail(t.action_fail);
+    }
+  };
+
+  // Take one driver off this car. Only lets go if they still hold it, so a
+  // page that is out of date cannot take off someone put there since.
+  const takeOff = async (d: OnCar) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await hubApi.post(`/admin/vehicles/${id}/assign`, { shift: d.shift, driver_id: null, release_driver_id: d.driver_id });
+      say(t.car_off_done(d.name ?? ""));
+      setTaking(null);
+      await Promise.all([load(), refresh()]);
+    } catch {
+      fail(t.action_fail);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -125,6 +158,7 @@ export default function Car() {
               <Text style={hubStyles.name}>{h.vehicle.model ?? "—"}</Text>
               <Text style={hubStyles.sub}>
                 {[h.vehicle.current_soc != null ? `${t.battery} ${h.vehicle.current_soc}%` : null,
+                  h.vehicle.odometer_km != null ? t.car_odometer(Math.round(h.vehicle.odometer_km).toLocaleString("en-IN")) : null,
                   limited ? null : h.checks[0] ? t.car_last_inspected(formatISTDate(h.checks[0].created_at)) : t.car_never_inspected].filter(Boolean).join(" · ")}
               </Text>
               <View style={styles.actions}>
@@ -133,6 +167,45 @@ export default function Car() {
               </View>
             </View>
             {limited ? <Text style={[hubStyles.warn, { marginTop: spacing.md }]} testID="hub-car-limited">{t.car_limited}</Text> : null}
+
+            <SectionTitle>{t.car_drivers}</SectionTitle>
+            <View style={hubStyles.card} testID="hub-car-drivers">
+              {(["day", "night"] as const).map((sh, si) => {
+                const on = (h.drivers ?? []).filter((d) => (d.shift === "night" ? "night" : "day") === sh);
+                const label = sh === "day" ? t.day_short : t.night_short;
+                if (on.length === 0) {
+                  return (
+                    <View key={sh} style={[hubStyles.row, si === 0 ? hubStyles.rowFirst : null]} testID={`hub-car-slot-${sh}`}>
+                      <Text style={styles.shift}>{label}</Text>
+                      <Text style={[hubStyles.sub, { flex: 1 }]}>{t.slot_free}</Text>
+                    </View>
+                  );
+                }
+                return on.map((d, i) => (
+                  <View key={d.driver_id} style={[hubStyles.row, si === 0 && i === 0 ? hubStyles.rowFirst : null]} testID={`hub-car-slot-${sh}`}>
+                    <Text style={styles.shift}>{label}</Text>
+                    <TouchableOpacity style={{ flex: 1 }} onPress={() => router.push(`/driver/${d.driver_id}` as never)}>
+                      <Text style={hubStyles.name} numberOfLines={1}>{d.name ?? "—"}</Text>
+                    </TouchableOpacity>
+                    <Btn label={t.car_off} small kind="ghost" onPress={() => setTaking(d)} disabled={busy} testID={`hub-car-off-${d.driver_id}`} />
+                  </View>
+                ));
+              })}
+              {(h.drivers ?? []).length < 2 ? <Text style={[hubStyles.sub, { marginTop: spacing.sm }]}>{t.car_free_hint}</Text> : null}
+              {taking ? (
+                <View style={styles.offBox} testID="hub-car-off-confirm">
+                  <Text style={styles.dangerText}>
+                    {t.car_off_sure(taking.name ?? "", h.vehicle.number ?? "", taking.shift === "night" ? t.night_short : t.day_short)}
+                  </Text>
+                  {today?.drivers.find((x) => x.driver_id === taking.driver_id)?.on_duty
+                    ? <Text style={[styles.dangerText, { color: colors.alert, marginTop: 4 }]}>{t.car_off_on_duty(taking.name ?? "")}</Text> : null}
+                  <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
+                    <Btn label={t.cancel} small kind="ghost" onPress={() => setTaking(null)} disabled={busy} style={{ flex: 1 }} testID="hub-car-off-no" />
+                    <Btn label={t.car_off_yes} small kind="danger" onPress={() => takeOff(taking)} busy={busy} style={{ flex: 1 }} testID="hub-car-off-yes" />
+                  </View>
+                </View>
+              ) : null}
+            </View>
 
             {limited ? null : (
             <>
@@ -276,5 +349,7 @@ const styles = StyleSheet.create({
   photoImg: { width: "100%", height: 110, borderRadius: radius.sm, backgroundColor: colors.line },
   photoLabel: { fontFamily: fonts.ui, fontSize: 11, color: colors.muted, marginTop: 2, textTransform: "capitalize" },
   danger: { marginTop: spacing.xl, borderColor: colors.alert },
+  shift: { width: 52, fontFamily: fonts.uiBold, fontSize: 12, color: colors.muted },
+  offBox: { marginTop: spacing.md, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.alert, backgroundColor: colors.paper },
   dangerText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
 });

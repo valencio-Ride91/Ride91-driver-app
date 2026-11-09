@@ -4260,10 +4260,18 @@ async def admin_car_history(vehicle_id: str, admin: Dict = Depends(require_ops))
         last_done.setdefault(sv["kind"], sv["service_date"])
     handovers = [_handover_out(h) async for h in db.handovers.find(
         {"vehicle_id": vehicle_id}, {"_id": 0}).sort("created_at", -1).limit(30)]
+    # Who drives it now, by shift, so the car page can show them and take one
+    # off the car. A list per shift: old data can hold two on one shift, and
+    # each must be removable.
+    drivers = [{"driver_id": d["id"], "name": d.get("name"), "shift": d.get("shift_type") or "day"}
+               async for d in db.drivers.find(
+                   {"vehicle_id": vehicle_id, "archived": {"$ne": True}},
+                   {"_id": 0, "id": 1, "name": 1, "shift_type": 1}).sort("name", 1)]
     return {
         "vehicle": {"id": veh["id"], "number": veh.get("number"), "model": veh.get("model"),
                     "hub_id": veh.get("hub_id"), "current_soc": veh.get("current_soc"),
-                    "odometer_km": veh.get("odometer_km")},
+                    "odometer_km": veh.get("odometer_km"), "last_handover_at": veh.get("last_handover_at")},
+        "drivers": drivers,
         "check_items": list(CAR_CHECK_ITEMS),
         "checks": checks,
         "services": services,

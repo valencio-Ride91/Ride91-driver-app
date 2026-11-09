@@ -52,6 +52,8 @@ export interface CarHandover {
 
 export interface CarHistory {
   vehicle: { id: string; number: string | null; model: string | null; current_soc: number | null; odometer_km: number | null };
+  /** Who drives it now, by shift (absent on an older server). */
+  drivers?: { driver_id: string; name: string | null; shift: string }[];
   checks: CarCheck[];
   services: CarService[];
   last_done: Record<string, string>;

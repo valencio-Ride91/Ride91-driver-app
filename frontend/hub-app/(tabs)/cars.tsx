@@ -38,13 +38,15 @@ export default function Cars() {
   const [filter, setFilter] = useState<Filter>("all");
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const load = useCallback(async () => {
     if (!hubId) return;
     try {
       setData(await hubApi.get<CarsData>(`/admin/hubs/${hubId}/cars`));
+      setFailed(false);
     } catch {
-      // keep what we had
+      setFailed(true);        // keep what we had; say so if there is nothing yet
     }
   }, [hubId]);
 
@@ -78,7 +80,7 @@ export default function Cars() {
     <SafeAreaView style={hubStyles.safe} edges={["top"]}>
       <HubHeader title={t.tab_cars} right={<Btn label={t.car_add} small onPress={() => setAdding(true)} testID="hub-add-car" />} />
       <ScrollView contentContainerStyle={hubStyles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
-        {!data ? <Empty>{t.loading}</Empty> : (
+        {!data ? <Empty>{failed ? t.action_fail : t.loading}</Empty> : (
           <>
             <View style={[hubStyles.card, styles.stats]} testID="hub-car-stats">
               {([[counts.all, t.tab_cars, colors.ink], [counts.slots, t.free_slots, colors.ink], [counts.attention, t.check_attention, counts.attention ? "#8A5D00" : colors.ink]] as const).map(([n, label, color], i) => (
