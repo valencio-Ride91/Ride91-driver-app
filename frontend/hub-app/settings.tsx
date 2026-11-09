@@ -33,6 +33,7 @@ export default function Settings() {
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [busy, setBusy] = useState<string | null>(null);      // which action is running
+  const [deleting, setDeleting] = useState<string | null>(null);   // the removed driver being deleted for good
 
   const loadRemoved = useCallback(async () => {
     if (!hubId) return;
@@ -85,6 +86,18 @@ export default function Settings() {
       await hubApi.post(`/admin/drivers/${d.driver_id}/restore`);
       await Promise.all([loadRemoved(), refresh()]);
       return t.restored(d.name ?? "");
+    });
+
+  const office = session?.role === "manager" || session?.role === "owner";
+  const deleteForGood = (d: Removed) =>
+    run(`del:${d.driver_id}`, async () => {
+      await hubApi.del(`/admin/drivers/${d.driver_id}?hard=true`);
+      setDeleting(null);
+      await loadRemoved();
+      return t.del_done(d.name ?? "");
+    }, (e) => {
+      setDeleting(null);
+      return e?.body?.detail === "has_financial_history" ? t.del_has_money : t.action_fail;
     });
 
   const restoreCar = (c: RemovedCar) =>
@@ -148,12 +161,24 @@ export default function Settings() {
           <SectionTitle>{t.removed_title}</SectionTitle>
           <View style={hubStyles.card} testID="hub-set-removed">
             {removed === null ? <Empty>{t.loading}</Empty> : removed.length === 0 ? <Empty>{t.removed_none}</Empty> : removed.map((d, i) => (
-              <View key={d.driver_id} style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
-                  <Text style={hubStyles.sub}>{[d.phone, d.removed_at ? formatISTDate(d.removed_at) : null].filter(Boolean).join(" · ")}</Text>
+              <View key={d.driver_id} style={[styles.removedRow, i === 0 ? { borderTopWidth: 0 } : null]}>
+                <View style={styles.removedTop}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
+                    <Text style={hubStyles.sub}>{[d.phone, d.removed_at ? formatISTDate(d.removed_at) : null].filter(Boolean).join(" · ")}</Text>
+                  </View>
+                  <Btn label={t.restore} small kind="ghost" onPress={() => restore(d)} busy={busy === `restore:${d.driver_id}`} testID={`hub-set-restore-${d.driver_id}`} />
+                  {office ? <Btn label={t.del_forever} small kind="danger" onPress={() => setDeleting(d.driver_id)} disabled={!!busy} testID={`hub-set-delete-${d.driver_id}`} /> : null}
                 </View>
-                <Btn label={t.restore} small kind="ghost" onPress={() => restore(d)} busy={busy === `restore:${d.driver_id}`} testID={`hub-set-restore-${d.driver_id}`} />
+                {deleting === d.driver_id ? (
+                  <View style={styles.sure} testID="hub-set-delete-confirm">
+                    <Text style={styles.sureText}>{t.del_sure(d.name ?? "")}</Text>
+                    <View style={styles.inline}>
+                      <Btn label={t.cancel} small kind="ghost" onPress={() => setDeleting(null)} style={{ flex: 1 }} />
+                      <Btn label={t.del_yes} small kind="danger" onPress={() => deleteForGood(d)} busy={busy === `del:${d.driver_id}`} style={{ flex: 1 }} testID="hub-set-delete-yes" />
+                    </View>
+                  </View>
+                ) : null}
               </View>
             ))}
           </View>
@@ -207,4 +232,6 @@ const styles = StyleSheet.create({
   sure: { marginBottom: spacing.sm, padding: spacing.md, borderRadius: 12, backgroundColor: colors.paper },
   sureText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   account: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  removedRow: { paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.line },
+  removedTop: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
 });

@@ -3971,10 +3971,13 @@ async def admin_delete_driver(
             await db.qr_payments.find_one({"driver_id": driver_id}, {"_id": 1})
             or await db.platform_cash.find_one({"driver_id": driver_id}, {"_id": 1})
             or await db.payouts.find_one({"driver_id": driver_id}, {"_id": 1})
+            or await db.salary_withdrawals.find_one({"driver_id": driver_id}, {"_id": 1})
+            or await db.reward_payouts.find_one({"driver_id": driver_id}, {"_id": 1})
         )
         if has_money:
             raise HTTPException(409, "has_financial_history")
         await db.drivers.delete_one({"id": driver_id})
+        await db.sessions.delete_many({"driver_id": driver_id})       # no phone stays signed in
         await _audit(admin, "delete_driver", driver_id)
         return {"ok": True, "id": driver_id, "deleted": True}
 

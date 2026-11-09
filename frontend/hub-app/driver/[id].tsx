@@ -61,6 +61,8 @@ export default function DriverPage() {
   const [cash, setCash] = useState<CashTarget | null>(null);
   const [notComing, setNotComing] = useState(false);     // the "not coming: why?" sheet
   const [marking, setMarking] = useState(false);
+  const [removing, setRemoving] = useState(false);     // the "remove this driver?" step
+  const [busyRemove, setBusyRemove] = useState(false);
 
   // Opened from the Inbox (`focus=messages`): go straight to the messages, once
   // they are on the page.
@@ -127,6 +129,22 @@ export default function DriverPage() {
     }
   };
 
+  // Remove from the hub (reversible from Settings): they can no longer sign
+  // in and their car is freed; their cash and salary records stay.
+  const removeDriver = async () => {
+    if (busyRemove || !d) return;
+    setBusyRemove(true);
+    try {
+      await hubApi.del(`/admin/drivers/${id}`);
+      say(t.dr_removed(d.name ?? ""));
+      await refresh();
+      router.replace("/(tabs)/drivers" as never);
+    } catch {
+      fail(t.action_fail);
+      setBusyRemove(false);
+    }
+  };
+
   const saveShift = async () => {
     const v = (shift ?? "").trim();
     if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return fail(t.shift_bad);
@@ -174,7 +192,7 @@ export default function DriverPage() {
 
         <ScrollView ref={scroller} contentContainerStyle={hubStyles.scroll} keyboardShouldPersistTaps="handled">
 
-          {!d ? <Empty>{t.loading}</Empty> : (
+          {!d ? <Empty>{today ? t.driver_gone : t.loading}</Empty> : (
             <>
               <View style={hubStyles.card}>
                 <Text style={hubStyles.name}>{doing(d, t)}</Text>
@@ -267,6 +285,22 @@ export default function DriverPage() {
               <Btn label={t.send} small onPress={send} busy={sending} disabled={!draft.trim()} testID="hub-driver-send" />
             </View>
           </View>
+          {d ? (
+            removing ? (
+              <View style={[hubStyles.card, styles.danger]} testID="hub-driver-remove-confirm">
+                <Text style={styles.dangerText}>{t.df_remove_sure(d.name ?? "")}</Text>
+                {d.you_owe > 0 ? <Text style={[styles.dangerText, { color: colors.alert, marginTop: 4 }]}>{t.df_remove_owes(formatINR(d.you_owe))}</Text> : null}
+                {d.on_duty ? <Text style={[styles.dangerText, { color: colors.alert, marginTop: 4 }]}>{t.dr_remove_on_duty(d.name ?? "")}</Text> : null}
+                <Text style={[hubStyles.sub, { marginTop: 4 }]}>{t.dr_remove_back}</Text>
+                <View style={{ flexDirection: "row", gap: spacing.sm, marginTop: spacing.md }}>
+                  <Btn label={t.cancel} small kind="ghost" onPress={() => setRemoving(false)} disabled={busyRemove} style={{ flex: 1 }} testID="hub-driver-remove-no" />
+                  <Btn label={t.df_remove_yes} small kind="danger" onPress={removeDriver} busy={busyRemove} style={{ flex: 1 }} testID="hub-driver-remove-yes" />
+                </View>
+              </View>
+            ) : (
+              <Btn label={t.df_remove} kind="danger" onPress={() => setRemoving(true)} style={{ marginTop: spacing.xl }} testID="hub-driver-remove" />
+            )
+          ) : null}
         </ScrollView>
 
         <CashSheet target={cash} onClose={() => setCash(null)} onDone={(m) => { setCash(null); say(m); refresh(); }} />
@@ -302,5 +336,7 @@ const styles = StyleSheet.create({
   theirs: { alignSelf: "flex-start", backgroundColor: colors.paper },
   bubbleText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   bubbleMeta: { fontFamily: fonts.ui, fontSize: 10, color: colors.muted, marginTop: 3 },
+  danger: { marginTop: spacing.xl, borderColor: colors.alert },
+  dangerText: { fontFamily: fonts.uiMed, fontSize: 14, color: colors.ink, lineHeight: 20 },
   composer: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, marginTop: spacing.sm },
 });

@@ -67,9 +67,13 @@ export default function Drivers() {
 
   const list = useMemo(() => {
     const needle = q.trim().toLowerCase();
+    const digits = needle.replace(/\D/g, "");          // "98765 43210" finds +919876543210
+    const plate = needle.replace(/[^a-z0-9]/g, "");    // "mh14 ev" finds MH14EV1001
     const hit = (today?.drivers ?? []).filter((d) =>
       inFilter(bucketOf(d), filter)
-      && (!needle || (d.name ?? "").toLowerCase().includes(needle) || (d.phone ?? "").includes(needle) || (d.vehicle_number ?? "").toLowerCase().includes(needle)));
+      && (!needle || (d.name ?? "").toLowerCase().includes(needle)
+        || (digits.length >= 3 && (d.phone ?? "").replace(/\D/g, "").includes(digits))
+        || (plate.length >= 2 && (d.vehicle_number ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").includes(plate))));
     // On duty first, then by name.
     return [...hit].sort((a, b) => Number(b.on_duty) - Number(a.on_duty) || (a.name ?? "").localeCompare(b.name ?? ""));
   }, [today, q, filter]);

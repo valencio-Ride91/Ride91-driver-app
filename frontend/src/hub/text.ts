@@ -116,6 +116,16 @@ const en = {
   df_remove_sure: (name: string) => `Remove ${name}? They will not be able to sign in and their car is freed. Their cash and salary records are kept.`,
   df_remove_owes: (amt: string) => `They still owe ${amt}.`,
   df_remove_yes: "Yes, remove",
+  // drivers tab
+  dr_remove_on_duty: (name: string) => `${name} is on duty right now.`,
+  dr_remove_back: "You can bring them back later from Settings.",
+  dr_removed: (name: string) => `${name} is removed from the hub.`,
+  driver_gone: "This driver is not in the hub any more. Removed drivers are listed in Settings.",
+  del_forever: "Delete for good",
+  del_sure: (name: string) => `Delete ${name} for good? This cannot be undone. It is only possible when they have no payment records.`,
+  del_yes: "Yes, delete",
+  del_done: (name: string) => `${name} is deleted.`,
+  del_has_money: "They have payment records, so they stay removed and cannot be deleted.",
   // cars: the car's page, inspections and service history
   car_add: "+ Add car",
   car_add_title: "Add a car",
@@ -531,6 +541,16 @@ const hi: HubText = {
   df_remove_sure: (name: string) => `${name} को हटाएँ? वह साइन इन नहीं कर पाएगा और उसकी गाड़ी खाली हो जाएगी। नकद और वेतन का रिकॉर्ड बना रहेगा।`,
   df_remove_owes: (amt: string) => `उस पर अभी ${amt} बाकी है।`,
   df_remove_yes: "हाँ, हटाएँ",
+  // drivers tab
+  dr_remove_on_duty: (name) => `${name} अभी ड्यूटी पर है।`,
+  dr_remove_back: "आप बाद में सेटिंग से उसे वापस ला सकते हैं।",
+  dr_removed: (name) => `${name} को हब से हटा दिया गया।`,
+  driver_gone: "यह ड्राइवर अब हब में नहीं है। हटाए गए ड्राइवर सेटिंग में दिखते हैं।",
+  del_forever: "हमेशा के लिए मिटाएँ",
+  del_sure: (name) => `${name} को हमेशा के लिए मिटाएँ? यह वापस नहीं होगा। यह तभी हो सकता है जब उसका कोई पेमेंट रिकॉर्ड न हो।`,
+  del_yes: "हाँ, मिटाएँ",
+  del_done: (name) => `${name} को मिटा दिया गया।`,
+  del_has_money: "उसके पेमेंट रिकॉर्ड हैं, इसलिए वह हटाया हुआ रहेगा, मिटाया नहीं जा सकता।",
   // cars: the car's page, inspections and service history
   car_add: "+ गाड़ी जोड़ें",
   car_add_title: "गाड़ी जोड़ें",
