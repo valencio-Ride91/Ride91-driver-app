@@ -18,7 +18,6 @@ interface RewardTier {
   qualified: boolean;
   progress: number;
   reward: number;
-  all_days?: boolean;
 }
 interface Leaders {
   days_remaining: number | null;
@@ -79,8 +78,6 @@ export default function RewardsTab() {
     setRefreshing(false);
   }, [load]);
 
-  const allDays = (rewards?.days_operated ?? 0) >= (rewards?.days_required ?? 7);
-
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <AppHeader title={t.rewards} />
@@ -95,14 +92,12 @@ export default function RewardsTab() {
           </View>
           <View style={styles.daysRow} testID="reward-days">
             <Text style={styles.daysLabel}>{c.days_operated}</Text>
-            <Text style={[styles.daysValue, allDays ? { color: colors.live } : null]}>
-              {rewards?.days_operated ?? 0} / {rewards?.days_required ?? 7}
-            </Text>
+            <Text style={styles.daysValue}>{rewards?.days_operated ?? 0}</Text>
           </View>
           {rewards ? (
             <>
               <RewardRow tier={rewards.daily} label={c.tier_daily} note={c.note_daily} testID="reward-daily" />
-              <RewardRow tier={rewards.top_car_week} label={c.tier_car_week} note={c.note_car_week(rewards.days_required)} testID="reward-car-week" />
+              <RewardRow tier={rewards.top_car_week} label={c.tier_car_week} note={c.note_car_week} testID="reward-car-week" />
               <RewardRow tier={rewards.top_driver_week} label={c.tier_driver_week} note={c.note_driver_week} testID="reward-driver-week" />
             </>
           ) : (
@@ -138,7 +133,6 @@ export default function RewardsTab() {
 
         <Card testID="rewards-tip-card" style={{ marginTop: spacing.md }}>
           <Text style={styles.cardTitle}>{c.how_to_win}</Text>
-          <Text style={styles.tip}>{c.tip_all_days}</Text>
           <Text style={styles.tip}>{c.tip_safe}</Text>
           <Text style={styles.tip}>{c.tip_on_top}</Text>
         </Card>

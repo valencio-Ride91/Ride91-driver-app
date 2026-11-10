@@ -88,6 +88,9 @@ REWARD_WEEK_CAR_TARGET = 28000        # min weekly gross (top car of week)
 REWARD_TOP_CAR_WEEK = 1000
 REWARD_WEEK_DRIVER_TARGET = 17500     # min weekly DRIVER earnings (top driver of week)
 REWARD_TOP_DRIVER_WEEK = 1000
+# No longer a condition (2026-11-10): top car of the week needs only the
+# weekly gross. Kept so the setting still loads, and sent to driver app v21
+# and older, which print "x / N days".
 REWARD_DAYS_REQUIRED = 7
 # Loyalty (earnings) milestones — a bonus when the driver's cumulative gross
 # (from the loyalty start date) crosses each threshold. Forfeit-if-you-leave
@@ -5648,7 +5651,7 @@ async def _reward_standings(scope: Optional[str]) -> Dict[str, Any]:
             "days_operated": len(c["day_set"]),
             "drivers": c["drivers"],
             "q_car_day": c["yesterday_gross"] >= REWARD_DAILY_TARGET,
-            "q_car_week": c["week_gross"] >= REWARD_WEEK_CAR_TARGET and len(c["day_set"]) >= REWARD_DAYS_REQUIRED,
+            "q_car_week": c["week_gross"] >= REWARD_WEEK_CAR_TARGET,
         })
     for d in drivers:
         hid = d.get("hub_id") or vehicles.get(d.get("vehicle_id"), {}).get("hub_id")
@@ -5692,7 +5695,6 @@ async def _reward_standings(scope: Optional[str]) -> Dict[str, Any]:
             "daily_target": REWARD_DAILY_TARGET, "top_car_day": REWARD_TOP_CAR_DAY,
             "week_car_target": REWARD_WEEK_CAR_TARGET, "top_car_week": REWARD_TOP_CAR_WEEK,
             "week_driver_target": REWARD_WEEK_DRIVER_TARGET, "top_driver_week": REWARD_TOP_DRIVER_WEEK,
-            "days_required": REWARD_DAYS_REQUIRED,
         },
     }
 
@@ -6665,7 +6667,7 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
         "leaders": leaders,
         "week_start": mon_bd,
         "days_operated": car_days_n,          # the car's operated days (any shift)
-        "days_required": REWARD_DAYS_REQUIRED,
+        "days_required": REWARD_DAYS_REQUIRED,   # only for driver app v21 and older
         "share_rate": rate,
         "daily": {
             "label": "Top car of the day",
@@ -6679,8 +6681,7 @@ async def money_rewards(driver: Dict = Depends(get_driver)):
             "label": "Top car of the week",
             "target": REWARD_WEEK_CAR_TARGET,
             "value": round(car_week, 2),
-            "all_days": car_days_n >= REWARD_DAYS_REQUIRED,
-            "qualified": car_week >= REWARD_WEEK_CAR_TARGET and car_days_n >= REWARD_DAYS_REQUIRED,
+            "qualified": car_week >= REWARD_WEEK_CAR_TARGET,
             "progress": pct(car_week, REWARD_WEEK_CAR_TARGET),
             "reward": REWARD_TOP_CAR_WEEK,
         },

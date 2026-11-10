@@ -379,7 +379,6 @@ export interface RewardsResponse {
     daily_target: number; top_car_day: number;
     week_car_target: number; top_car_week: number;
     week_driver_target: number; top_driver_week: number;
-    days_required: number;
   };
 }
 

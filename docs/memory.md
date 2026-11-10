@@ -6,6 +6,7 @@ Last updated: 2026-11-10. Why things are the way they are. Newest first within e
 
 | Date | Decision | Why | Commit |
 |---|---|---|---|
+| 2026-11-10 | Top car of the week needs only ₹28,000 weekly gross; the "all 7 days" condition is removed (server, apps, admin Settings). | The owner's rule: the gross is the only qualifier. | see git log |
 | 2026-11-10 | On-time is judged by when Start duty **reached the server** if it arrived more than 5 min late, from business date 2026-11-10 only. Taps keep their own time. | Drivers could set the phone clock back to look on time. Restamping the taps themselves put offline queues out of order, so only the on-time check uses arrival. Past days were not re-judged. | `0db37f1` |
 | 2026-11-10 | Drivers are signed out only on 401/403. The profile is cached on the phone. | A driver who opened the app with no signal was signed out and could not work. | `0db37f1` |
 | 2026-11-10 | Queued taps are kept through network errors and server errors; dropped only after 3 refusals (4xx) or 72 h of server errors. | Taps were being dropped on the first error, losing duty starts. One bad tap must not block the queue for ever either. | `0db37f1` |

@@ -41,7 +41,7 @@ Most numbers below are defaults that the owner can change in admin Settings (`SE
 
 ### Rewards and bonuses
 - Top car of the day: ₹300, if the car made at least ₹4,000.
-- Top car of the week: ₹1,000, at least ₹28,000 in the week and on the road all 7 days.
+- Top car of the week: ₹1,000, at least ₹28,000 gross in the week (the car's day and night drivers together). The number of days the car ran is not a condition.
 - Top driver of the week: ₹1,000, at least ₹17,500 driver earnings in the week.
 - Yearly, per hub: top driver ₹50,000, top car ₹40,000.
 - Loyalty milestones: ₹2,000 / ₹4,000 / ₹8,000 / ₹15,000 at ₹1 / 3 / 6 / 12 lakh earned.

@@ -39,7 +39,7 @@ export default function Rewards({ hubId }: { hubId?: string }) {
       {th ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 16 }}>
           <RewardCard title="🏆 Top car of the day" target={`car ≥ ${fmtINR(th.daily_target)} gross`} reward={th.top_car_day} />
-          <RewardCard title="🏆 Top car of the week" target={`car ≥ ${fmtINR(th.week_car_target)} · all ${th.days_required} days`} reward={th.top_car_week} />
+          <RewardCard title="🏆 Top car of the week" target={`car ≥ ${fmtINR(th.week_car_target)} gross`} reward={th.top_car_week} />
           <RewardCard title="🏆 Top driver of the week" target={`driver ≥ ${fmtINR(th.week_driver_target)} gross`} reward={th.top_driver_week} />
         </div>
       ) : null}
@@ -49,7 +49,7 @@ export default function Rewards({ hubId }: { hubId?: string }) {
       ) : (data?.hubs ?? []).length === 0 ? (
         <div className="card"><div className="empty">No hubs with earnings yet.</div></div>
       ) : (
-        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} daysReq={th?.days_required ?? 7} />)
+        data!.hubs.map((hub) => <HubBlock key={hub.hub_id ?? "none"} hub={hub} />)
       )}
 
       <div className="muted-sm" style={{ marginTop: 12 }}>
@@ -59,7 +59,7 @@ export default function Rewards({ hubId }: { hubId?: string }) {
   );
 }
 
-function HubBlock({ hub, daysReq }: { hub: RewardHub; daysReq: number }) {
+function HubBlock({ hub }: { hub: RewardHub }) {
   const [tab, setTab] = useState<"cars" | "drivers">("cars");
   return (
     <div className="card" style={{ marginBottom: 20, padding: 0 }}>
@@ -97,7 +97,7 @@ function HubBlock({ hub, daysReq }: { hub: RewardHub; daysReq: number }) {
                   {fmtINR(c.week_gross)}
                   {c.is_top_car_week ? <span className="tag live" style={{ marginLeft: 6 }}>★WEEK</span> : null}
                 </td>
-                <td style={{ textAlign: "center" }}><span className={c.days_operated >= daysReq ? "tag live" : "tag muted"}>{c.days_operated}/{daysReq}</span></td>
+                <td style={{ textAlign: "center" }}><span className="tag muted">{c.days_operated}</span></td>
                 <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
                   {c.q_car_day ? <span className="tag ok" style={{ marginRight: 4 }} title="Cleared daily target">DAY</span> : null}
                   {c.q_car_week ? <span className="tag ok" title="Qualifies: top car of week">WEEK</span> : null}
@@ -123,7 +123,7 @@ function HubBlock({ hub, daysReq }: { hub: RewardHub; daysReq: number }) {
                   {fmtINR(d.week_gross)}
                   {d.is_top_driver_week ? <span className="tag live" style={{ marginLeft: 6 }}>★TOP</span> : null}
                 </td>
-                <td style={{ textAlign: "center" }}><span className="tag muted">{d.days_operated}/{daysReq}</span></td>
+                <td style={{ textAlign: "center" }}><span className="tag muted">{d.days_operated}</span></td>
                 <td style={{ textAlign: "center" }}>{d.q_driver_week ? <span className="tag ok" title="Qualifies: top driver of week">DRV</span> : <span className="muted-sm">—</span>}</td>
               </tr>
             ))}

@@ -117,7 +117,6 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       reward_top_car_week: String(s.reward_top_car_week),
       reward_week_driver_target: String(s.reward_week_driver_target),
       reward_top_driver_week: String(s.reward_top_driver_week),
-      reward_days_required: String(s.reward_days_required),
       yearly_top_driver: String(s.yearly_top_driver),
       yearly_top_car: String(s.yearly_top_car),
     });
@@ -170,7 +169,6 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
       if (!Number.isFinite(n) || n < 0) return setRwErr(`"${k.replace(/_/g, " ")}" must be a positive number.`);
       nums[k] = Math.round(n);
     }
-    if (nums.reward_days_required < 1 || nums.reward_days_required > 7) return setRwErr("Days required must be 1–7.");
     for (const m of ms) {
       if (!Number.isFinite(m.amount) || m.amount < 1) return setRwErr("Each milestone needs an earnings threshold of at least ₹1.");
       if (!Number.isFinite(m.reward) || m.reward < 0) return setRwErr("Each milestone reward must be a positive number.");
@@ -467,7 +465,6 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
           <NumField label="Top car of week — bonus (₹)" k="reward_top_car_week" rw={rw} set={setRwField} dis={!isOwner} />
           <NumField label="Top driver of week — min weekly gross (₹)" k="reward_week_driver_target" rw={rw} set={setRwField} dis={!isOwner} />
           <NumField label="Top driver of week — bonus (₹)" k="reward_top_driver_week" rw={rw} set={setRwField} dis={!isOwner} />
-          <NumField label="Days required (1–7)" k="reward_days_required" rw={rw} set={setRwField} dis={!isOwner} />
         </div>
 
         <h3 style={{ margin: "16px 0 4px", fontSize: 14 }}>Yearly (per hub)</h3>

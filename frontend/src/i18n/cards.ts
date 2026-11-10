@@ -109,7 +109,7 @@ const en = {
   tier_car_week: "Top car of the week",
   tier_driver_week: "Top driver of the week",
   note_daily: "yesterday's earnings",
-  note_car_week: (n: number) => `this week · all ${n} days needed`,
+  note_car_week: "your car's earnings this week",
   note_driver_week: "your earnings this week",
 
   // ---- Payment history (lifetime) ----
@@ -177,7 +177,6 @@ const en = {
 
   // ---- Rewards: how to win ----
   how_to_win: "How to win",
-  tip_all_days: "• Keep the car running all 7 days.",
   tip_safe: "• Safe driving and good service count for Top Driver.",
   tip_on_top: "Rewards are paid on top of your 30% earnings.",
 
@@ -603,7 +602,7 @@ const hi: CardText = {
   tier_car_week: "हफ़्ते की टॉप गाड़ी",
   tier_driver_week: "हफ़्ते का टॉप ड्राइवर",
   note_daily: "कल की कमाई",
-  note_car_week: (n) => `इस हफ़्ते · सभी ${n} दिन ज़रूरी`,
+  note_car_week: "इस हफ़्ते आपकी गाड़ी की कमाई",
   note_driver_week: "इस हफ़्ते आपकी कमाई",
 
   // ---- Payment history (lifetime) ----
@@ -670,7 +669,6 @@ const hi: CardText = {
 
   // ---- Rewards: how to win ----
   how_to_win: "कैसे जीतें",
-  tip_all_days: "• गाड़ी पूरे 7 दिन चलाएँ।",
   tip_safe: "• टॉप ड्राइवर के लिए सुरक्षित ड्राइविंग और अच्छी सेवा गिनी जाती है।",
   tip_on_top: "इनाम आपकी 30% कमाई के ऊपर मिलते हैं।",
 
