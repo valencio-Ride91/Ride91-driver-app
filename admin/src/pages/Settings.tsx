@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, SettingsData, WhatsAppMessages } from "../api";
 import { AdminIdentity } from "../auth";
+import StorageCard from "../components/StorageCard";
 
 type Milestone = { key: string; label: string; amount: number; reward: number };
 
@@ -430,6 +431,8 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     <div>
       <h1>Settings</h1>
       <div className="sub">Signed in as {admin.username} · role: {admin.role}</div>
+
+      {isOwner ? <StorageCard /> : null}
 
       <div className="card" style={{ marginTop: 16, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>Fleet values {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>

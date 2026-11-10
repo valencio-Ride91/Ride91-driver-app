@@ -15,14 +15,33 @@ export interface ApiError extends Error {
   body: unknown;
 }
 
+// A request that has not answered in time is given up, as if offline. Without
+// a limit one stuck request (a weak signal that never quite drops) held up the
+// offline queue until the app was restarted. A big upload (a document photo)
+// gets longer, sized for a slow connection of about 10 KB a second, so it is
+// not cut off halfway every time and left blocking the queue.
+const TIMEOUT_MS = 20000;
+const MAX_TIMEOUT_MS = 10 * 60000;
+const timeoutFor = (payload: string | undefined) =>
+  Math.min(MAX_TIMEOUT_MS, TIMEOUT_MS + ((payload?.length ?? 0) / 10000) * 1000);
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = `${BASE}/api${path}`;
   const auth = await tokenHeader();
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json", ...auth },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const payload = body ? JSON.stringify(body) : undefined;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutFor(payload));
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", ...auth },
+      body: payload,
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   // A gateway/timeout error can return an HTML body; don't let JSON.parse throw
   // and mask the real status.

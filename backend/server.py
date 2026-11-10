@@ -1170,14 +1170,16 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     if body.state in PLATFORMS:
         platforms = [body.state]
     platforms = sorted(set(platforms))
+    started_at, device_started_at = _trusted_started_at(body.state, body.started_at)
     row = {
         "id": str(uuid.uuid4()),
         "driver_id": driver["id"],
         "vehicle_id": driver.get("vehicle_id"),
         "state": body.state,
         "platforms": platforms,
-        "started_at": body.started_at,
-        "business_date": business_date_from_dt(_parse_iso(body.started_at) if body.started_at else now_utc()),
+        "started_at": started_at,
+        "device_started_at": device_started_at,     # what the phone said, when it differed
+        "business_date": business_date_from_dt(_parse_iso(started_at)),
         "lat": body.lat,
         "lng": body.lng,
         "source": body.source,
@@ -1187,6 +1189,62 @@ async def append_duty_state(body: DutyStateIn, driver: Dict = Depends(get_driver
     await db.duty_states.insert_one(row.copy())
     row.pop("_id", None)
     return row
+
+
+# Duty times. Each tap keeps the time the phone gave it: taps made without
+# signal wait in the phone's queue and arrive together later, and restamping
+# some of them with the arrival time would put them out of order (an "online"
+# tap landing before the "start duty" it followed). Only two things are
+# corrected: a time in the future (a phone clock running ahead) becomes the
+# server's now, and a time with no zone is read as UTC.
+#
+# Being ON TIME is judged differently, because the phone's clock can be set
+# back to look punctual: when a duty start reached the server more than
+# START_DUTY_MAX_LAG after the time it claims, the arrival time (`synced_at`)
+# is what counts for the attendance bonus and the hub's "late" figure. Start
+# duty is sent straight away, so an honest start arrives within seconds; one
+# made with no signal counts from when the phone is back in coverage. This
+# applies from ONTIME_BY_RECEIPT_FROM, so days already counted do not change.
+CLOCK_AHEAD_SLACK = timedelta(minutes=2)
+START_DUTY_MAX_LAG = timedelta(minutes=5)
+ONTIME_BY_RECEIPT_FROM = "2026-11-10"        # business date
+
+
+def _aware(ts: datetime) -> datetime:
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _trusted_started_at(state: str, raw: Optional[str]) -> tuple:
+    """(started_at to store, the phone's own value when it was not used).
+    A value that is not a time at all is a 400."""
+    now = now_utc()
+    if not raw:
+        return iso(now), None
+    try:
+        ts = _parse_iso(raw)
+    except Exception:
+        raise HTTPException(400, "bad_started_at")
+    if _aware(ts) > now + CLOCK_AHEAD_SLACK:
+        return iso(now), raw
+    if ts.tzinfo is None:
+        return iso(_aware(ts)), raw
+    return raw, None
+
+
+def _punctual_start(row: Dict) -> Optional[datetime]:
+    """When a start_duty row counts as having started, for judging lateness."""
+    try:
+        started = _aware(_parse_iso(row["started_at"]))
+    except Exception:
+        return None
+    bd = row.get("business_date") or business_date_from_dt(started)
+    if bd < ONTIME_BY_RECEIPT_FROM:
+        return started
+    try:
+        synced = _aware(_parse_iso(row["synced_at"]))
+    except Exception:
+        return started
+    return synced if synced - started > START_DUTY_MAX_LAG else started
 
 
 def _start_of_day_utc(offset_hours: int = 5, offset_minutes: int = 30) -> datetime:
@@ -1841,13 +1899,8 @@ async def _shift_status(driver: Dict, now: datetime) -> Dict[str, Any]:
         {"driver_id": did, "state": "start_duty",
          "started_at": {"$gte": iso(start - timedelta(hours=3))[:19],
                         "$lt": iso(start + timedelta(hours=12))[:19]}},
-        {"_id": 0, "started_at": 1}, sort=[("started_at", 1)])
-    duty_at = None
-    if duty:
-        try:
-            duty_at = _parse_iso(duty["started_at"])
-        except Exception:
-            duty_at = None
+        {"_id": 0, "started_at": 1, "synced_at": 1, "business_date": 1}, sort=[("started_at", 1)])
+    duty_at = _punctual_start(duty) if duty else None
 
     if duty_at:
         status_ = "started"          # whatever they answered, they are at work
@@ -3845,6 +3898,45 @@ async def admin_damage_repaired(handover_id: str, body: DamageRepairedIn, admin:
     return {"ok": True, "handover": _handover_out(h)}
 
 
+DB_QUOTA_MB = 512          # MongoDB Atlas free tier (M0); change if the plan changes
+
+
+@api.get("/admin/storage")
+async def admin_storage(admin: Dict = Depends(require_owner)):
+    """How full the database is, and which collections use the space, biggest
+    first. Read-only. The 30-31 Oct outage was the database filling up with
+    nobody warned; this is the gauge."""
+    try:
+        stats = await db.command("dbStats", scale=1)
+    except Exception:
+        logger.exception("dbStats failed")
+        raise HTTPException(503, "storage_stats_unavailable")
+    names = await db.list_collection_names()
+    rows: List[Dict[str, Any]] = []
+    for name in names:
+        try:
+            cs = await db.command("collStats", name)
+        except Exception:
+            continue
+        rows.append({
+            "collection": name,
+            "documents": int(cs.get("count") or 0),
+            "data_mb": round(float(cs.get("size") or 0) / 1048576, 2),
+            "storage_mb": round(float(cs.get("storageSize") or 0) / 1048576, 2),
+            "index_mb": round(float(cs.get("totalIndexSize") or 0) / 1048576, 2),
+        })
+    rows.sort(key=lambda r: r["data_mb"] + r["index_mb"], reverse=True)
+    used_mb = round((float(stats.get("dataSize") or 0) + float(stats.get("indexSize") or 0)) / 1048576, 1)
+    quota = float(get_setting("db_quota_mb") or DB_QUOTA_MB)
+    return {
+        "quota_mb": quota,
+        "used_mb": used_mb,
+        "storage_mb": round(float(stats.get("storageSize") or 0) / 1048576, 1),
+        "used_pct": round(100 * used_mb / quota, 1) if quota else None,
+        "collections": rows,
+    }
+
+
 @api.get("/admin/hubs/{hub_id}/removed-cars")
 async def admin_hub_removed_cars(hub_id: str, admin: Dict = Depends(require_ops)):
     """Cars removed from this hub, newest first, to bring one back
@@ -5304,7 +5396,7 @@ async def admin_inspections(hub_id: Optional[str] = None, admin: Dict = Depends(
         r["driver_name"] = d.get("name")
         r["driver_phone"] = d.get("phone")
         r["vehicle_number"] = veh.get(r.get("vehicle_id"))
-        r["has_photo"] = True   # every inspection carries a dashboard photo
+        r["has_photo"] = not r.get("media_purged_at")   # cleared by scripts/purge_inspection_media.py
     return {"items": rows, "count": len(rows)}
 
 
@@ -6414,12 +6506,12 @@ async def _attendance_state(driver: Dict) -> Dict[str, Any]:
         {"_id": 0, "business_date": 1, "started_at": 1, "synced_at": 1},
     ):
         bd = r.get("business_date")
-        raw = r.get("started_at") or r.get("synced_at")
-        if not bd or not raw:
+        if not bd:
             continue
-        try:
-            ts = _parse_iso(raw)
-        except Exception:
+        if not r.get("started_at"):
+            r["started_at"] = r.get("synced_at")
+        ts = _punctual_start(r) if r.get("started_at") else None
+        if ts is None:
             continue
         if bd not in first_start or ts < first_start[bd]:
             first_start[bd] = ts

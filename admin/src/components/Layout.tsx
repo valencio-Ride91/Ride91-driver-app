@@ -1,6 +1,7 @@
 // Persistent shell with sidebar nav. Wraps every authed page.
 
 import { useCallback, useEffect, useState } from "react";
+import StorageCard from "./StorageCard";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { AdminIdentity, logout } from "../auth";
@@ -87,6 +88,8 @@ export default function Layout({ admin, onLogout }: Props) {
         </div>
       </aside>
       <main className="main">
+        {/* Owners see this on every page once the database is getting full. */}
+        {admin.role === "owner" ? <StorageCard compact /> : null}
         <Outlet context={{ admin }} />
       </main>
     </div>
