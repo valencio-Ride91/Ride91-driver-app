@@ -8922,6 +8922,15 @@ def _bd_of(ts: Optional[str]) -> Optional[str]:
         return None
 
 
+def _onboarded_bd(driver: Dict) -> Optional[str]:
+    """The business day the driver was onboarded: `joined_at` when set,
+    otherwise when the driver was added (`created_at`)."""
+    raw = driver.get("joined_at") or driver.get("created_at")
+    if isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw
+    return _bd_of(raw)
+
+
 def _deposit_via(r: Dict) -> str:
     src = r.get("source")
     if src == "qr_collection":
@@ -9033,7 +9042,7 @@ async def money_history(driver: Dict = Depends(get_driver)):
 
     # Every month from the first one to this one, even quiet ones, so the list
     # has no gaps.
-    joined_bd = _bd_of(driver.get("created_at"))
+    joined_bd = _onboarded_bd(driver)
     start = min([x for x in (first_bd, joined_bd, *(k + "-01" for k in months)) if x] or [today_bd])[:7]
     ym = start
     while ym <= today_bd[:7]:
@@ -9227,7 +9236,21 @@ async def _day_calendar(driver: Dict, month: str) -> Dict[str, Any]:
     owed = opening
     totals = {"fares": 0.0, "share": 0.0, "cash_fares": 0.0, "qr": 0.0, "handed_in": 0.0,
               "days_worked": 0, "days_short": 0, "days_waiting": 0}
-    bd = lo
+    # History runs from the day the driver was onboarded (or their first
+    # record, if anything was recorded earlier), never from before it.
+    joined = _onboarded_bd(driver)
+    firsts = [joined]
+    async for r in db.platform_cash.find({"driver_id": did}, {"_id": 0, "business_date": 1}).sort("business_date", 1).limit(1):
+        firsts.append(r.get("business_date"))
+    async for r in db.qr_payments.find(
+            {"driver_id": did, "type": "deposit", "source": {"$in": sorted(TRUSTED_CASH_SOURCES)}},
+            {"_id": 0, "business_date": 1}).sort("business_date", 1).limit(1):
+        firsts.append(r.get("business_date"))
+    async for r in db.duty_states.find({"driver_id": did, "state": "start_duty"}, {"_id": 0, "business_date": 1}).sort("business_date", 1).limit(1):
+        firsts.append(r.get("business_date"))
+    start = min([x for x in firsts if x] or [today_bd])
+
+    bd = max(lo, start)
     last = min(hi, (datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)).strftime("%Y-%m-%d"))
     while bd < last:
         d = days.get(bd) or day(bd)
@@ -9266,13 +9289,9 @@ async def _day_calendar(driver: Dict, month: str) -> Dict[str, Any]:
     for k in ("fares", "share", "cash_fares", "qr", "handed_in"):
         totals[k] = round(totals[k], 2)
 
-    joined = _bd_of(driver.get("created_at"))
-    first = None
-    async for r in db.platform_cash.find({"driver_id": did}, {"_id": 0, "business_date": 1}).sort("business_date", 1).limit(1):
-        first = r.get("business_date")
-    first_month = min(x for x in (first, joined, today_bd) if x)[:7]
     return {
-        "month": month, "first_month": min(first_month, month), "today": today_bd, "share_rate": rate,
+        "month": month, "first_month": start[:7], "start_date": start, "joined": joined,
+        "today": today_bd, "share_rate": rate,
         "opening_owed": round(opening, 2), "closing_owed": round(owed, 2),
         "totals": totals, "days": out,
     }
@@ -9287,7 +9306,7 @@ async def money_calendar(month: Optional[str] = None, driver: Dict = Depends(get
 @api.get("/admin/drivers/{driver_id}/calendar")
 async def admin_driver_calendar(driver_id: str, month: Optional[str] = None, admin: Dict = Depends(require_ops)):
     """The same calendar for a driver of the hub (hub managers: their hub only)."""
-    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "vehicle_id": 1, "hub_id": 1, "created_at": 1})
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "vehicle_id": 1, "hub_id": 1, "created_at": 1, "joined_at": 1})
     if not d:
         raise HTTPException(404, "driver_not_found")
     await _assert_driver_in_scope(d, hub_scope(admin))

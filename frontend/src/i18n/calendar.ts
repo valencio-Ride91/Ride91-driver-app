@@ -40,6 +40,8 @@ const en = {
   loading: "Loading…",
   failed: "Could not load. Pull down to try again.",
   today: "Today",
+  joined: (day: string) => `Joined Ride91 on ${day}`,
+  joined_day: "Joined Ride91 this day",
 };
 
 type CalendarText = typeof en;
@@ -82,6 +84,8 @@ const hi: CalendarText = {
   loading: "लोड हो रहा है…",
   failed: "लोड नहीं हुआ। नीचे खींचकर फिर कोशिश करें।",
   today: "आज",
+  joined: (day) => `${day} को Ride91 से जुड़े`,
+  joined_day: "इस दिन Ride91 से जुड़े",
 };
 
 export const useCalendarText = (): CalendarText => {

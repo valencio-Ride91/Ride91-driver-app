@@ -37,6 +37,8 @@ export interface CalendarDay {
 export interface CalendarMonth {
   month: string;
   first_month: string;
+  start_date?: string;          // the first day shown: onboarding, or an earlier record
+  joined?: string | null;       // the day the driver was onboarded
   today: string;
   share_rate: number;
   opening_owed: number;
@@ -154,6 +156,11 @@ export const DayCalendar: React.FC<{
           </TouchableOpacity>
         </View>
         {busy ? <ActivityIndicator size="small" color={colors.muted} style={styles.spin} /> : null}
+        {shown.joined && shown.joined.slice(0, 7) === ym ? (
+          <Text style={styles.joined} testID={`${testID}-joined`}>
+            {t.joined(`${Number(shown.joined.slice(8))} ${t.months[Number(shown.joined.slice(5, 7)) - 1]} ${shown.joined.slice(0, 4)}`)}
+          </Text>
+        ) : null}
 
         <View style={styles.totals} testID={`${testID}-totals`}>
           <Total label={t.month_fares} value={formatINR(shown.totals.fares)} />
@@ -196,12 +203,12 @@ export const DayCalendar: React.FC<{
         </View>
       </View>
 
-      {sel ? <DayDetail d={sel} pct={pct} testID={`${testID}-detail`} /> : null}
+      {sel ? <DayDetail d={sel} pct={pct} joined={shown.joined === sel.date} testID={`${testID}-detail`} /> : null}
     </View>
   );
 };
 
-const DayDetail: React.FC<{ d: CalendarDay; pct: number; testID: string }> = ({ d, pct, testID }) => {
+const DayDetail: React.FC<{ d: CalendarDay; pct: number; joined?: boolean; testID: string }> = ({ d, pct, joined, testID }) => {
   const t = useCalendarText();
   const wd = t.days_short[weekday(d.date)];
   const title = `${d.today ? `${t.today} · ` : ""}${wd} ${Number(d.date.slice(8))} ${t.months[Number(d.date.slice(5, 7)) - 1]}`;
@@ -216,6 +223,7 @@ const DayDetail: React.FC<{ d: CalendarDay; pct: number; testID: string }> = ({ 
   return (
     <View style={[styles.card, { marginTop: spacing.md }]} testID={testID}>
       <Text style={styles.dayTitle}>{title}</Text>
+      {joined ? <Text style={styles.joinedDay}>{t.joined_day}</Text> : null}
       <View style={[styles.status, tone]} testID={`${testID}-status`}>
         <Text style={styles.statusText}>{status}</Text>
       </View>
@@ -283,6 +291,8 @@ const styles = StyleSheet.create({
   arrowText: { fontFamily: fonts.uiBold, fontSize: 30, lineHeight: 32, color: colors.ink },
   off: { color: colors.line },
   monthTitle: { fontFamily: fonts.display, fontSize: 18, color: colors.ink },
+  joined: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.live, textAlign: "center", marginTop: 2 },
+  joinedDay: { fontFamily: fonts.uiMed, fontSize: 12, color: colors.live, marginTop: 2 },
   spin: { position: "absolute", top: spacing.lg, right: 64 },
   totals: { flexDirection: "row", marginTop: spacing.sm, gap: spacing.sm },
   total: { flex: 1, backgroundColor: colors.paper, borderRadius: radius.md, paddingVertical: spacing.sm, alignItems: "center" },
