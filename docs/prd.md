@@ -20,7 +20,7 @@ Signed in with phone number and a password the hub sets. Stays signed in for 30 
 
 Tabs:
 1. **Home** — map, duty status, Start/End duty, platform switcher (Uber, Rapido, Ola, Ride91, not online, to charger, charging), the day's duty stripe, distance today, battery, shift alarm card, attendance card.
-2. **Money** — today's earnings by platform, the driver's share, cash held against the cash limit (₹1,500 default), deposit cash by Razorpay QR or payment link, salary balance and withdrawal to bank/UPI, weekly chart, **Payment history** (lifetime totals and month by month).
+2. **Money** — today's earnings by platform, the driver's share, cash held against the cash limit (₹1,500 default), deposit cash by Razorpay QR or payment link, salary balance and withdrawal to bank/UPI, weekly chart, **Payment history** (lifetime totals and month by month), **Day by day** (a month calendar: each day's work against the QR payments and cash handed in, with what was left with the driver and what was owed at the end of the day).
 3. **Rewards** — weekly and daily reward targets, "Who is winning" (top 3 drivers and top 3 cars of the week), loyalty milestones, loyalty wallet, attendance bonus progress.
 4. **Profile** — driver and car details, documents (licence etc.) with expiry, consents, bank account, change password, language (English, Hindi; Kannada for the core screens), sign out.
 
@@ -34,7 +34,7 @@ For roles hub_manager and above; a hub manager sees only their own hub. Viewers 
 
 Tabs:
 1. **Today** — who is on duty, not started, late, not coming, no answer to the alarm; tracking stopped; attention list first.
-2. **Drivers** — search by name, phone or plate; add a driver (one step, with shift start time and car); driver page with duty, money, messages; remove (archive) or delete for good (manager+ only, only if no money history).
+2. **Drivers** — search by name, phone or plate; add a driver (one step, with shift start time and car); driver page with duty, money, messages and the same **Day by day** calendar the driver sees; remove (archive) or delete for good (manager+ only, only if no money history).
 3. **Cars** — battery and how old the reading is, who drives it, open damage; car page with drivers, give to / remove from a driver, handovers with photos and odometer, damage "mark repaired", service log, car checks.
 4. **Money** — cash received from drivers (undo within 48 h), QR collections, salary withdrawals to pay or reject, typed-in earnings (Uber cash may exceed fares because Uber collects old dues; hub managers can change the last 7 days only).
 5. **Inbox** — messages and requests from drivers; broadcast to the hub.

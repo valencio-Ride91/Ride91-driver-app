@@ -9133,6 +9133,167 @@ async def money_history_month(month: str, driver: Dict = Depends(get_driver)):
     return {"month": month, "share_rate": rate, "entries": entries}
 
 
+# ---------------------------------------------------------------------------
+# DAY-BY-DAY CALENDAR — for each day of a month: the work done (fares, cash
+# fares, the driver's share), the money that came in against it (riders paying
+# the driver's QR, cash handed in), what that left with the driver, and what
+# they owed at the end of the day. The driver sees their own; the Hub app shows
+# the same for a driver of the hub.
+#
+# The end-of-day balance follows the balance rule (_driver_balances): only
+# SETTLED fares count, and only for days before today; every trusted deposit
+# counts on its own day. So today's end-of-day figure is exactly what the Money
+# tab says is owed now.
+# ---------------------------------------------------------------------------
+
+CALENDAR_MATCH_SLACK = 1.0      # ₹: rounding between a report and the QR payments
+
+
+def _month_or_400(month: Optional[str]) -> str:
+    today_m = business_date_now()[:7]
+    if not month:
+        return today_m
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        raise HTTPException(400, "invalid_month")
+    if month > today_m:
+        raise HTTPException(400, "future_month")
+    return month
+
+
+async def _day_calendar(driver: Dict, month: str) -> Dict[str, Any]:
+    did = driver["id"]
+    today_bd = business_date_now()
+    rate = get_setting("driver_share", DRIVER_SHARE)
+    lo, hi = f"{month}-01", f"{_month_after(month)}-01"
+
+    # What was owed when the month began (same rule as the balance).
+    opening = 0.0
+    async for r in db.platform_cash.aggregate([
+        {"$match": {"driver_id": did, "status": "settled", "business_date": {"$lt": lo}}},
+        {"$group": {"_id": None, "c": {"$sum": "$cash_amount"}}},
+    ]):
+        opening += float(r.get("c") or 0)
+    async for r in db.qr_payments.aggregate([
+        {"$match": {"driver_id": did, "type": "deposit", "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+                    "business_date": {"$lt": lo}}},
+        {"$group": {"_id": None, "t": {"$sum": "$amount"}}},
+    ]):
+        opening -= float(r.get("t") or 0)
+
+    days: Dict[str, Dict[str, Any]] = {}
+
+    def day(bd: str) -> Dict[str, Any]:
+        return days.setdefault(bd, {
+            "date": bd, "on_duty": False, "fares": 0.0, "cash_fares": 0.0, "settled_cash": 0.0,
+            "has_report": False, "all_settled": True, "apps": {},
+            "qr": 0.0, "qr_count": 0, "handed_in": 0.0})
+
+    async for r in db.platform_cash.find(
+            {"driver_id": did, "business_date": {"$gte": lo, "$lt": hi}},
+            {"_id": 0, "business_date": 1, "platform": 1, "gross_amount": 1, "cash_amount": 1, "status": 1}):
+        d = day(r["business_date"])
+        cash = float(r.get("cash_amount") or 0)
+        gross = r.get("gross_amount")
+        gross = float(gross) if gross is not None else cash
+        d["has_report"] = True
+        d["fares"] += gross
+        d["cash_fares"] += cash
+        if r.get("status") == "settled":
+            d["settled_cash"] += cash
+        else:
+            d["all_settled"] = False
+        app = d["apps"].setdefault(r.get("platform") or "other", {"fares": 0.0, "cash": 0.0})
+        app["fares"] += gross
+        app["cash"] += cash
+
+    async for r in db.qr_payments.find(
+            {"driver_id": did, "type": "deposit", "source": {"$in": sorted(TRUSTED_CASH_SOURCES)},
+             "business_date": {"$gte": lo, "$lt": hi}},
+            {"_id": 0, "business_date": 1, "amount": 1, "source": 1}):
+        d = day(r["business_date"])
+        amt = float(r.get("amount") or 0)
+        if r.get("source") == "qr_collection":
+            d["qr"] += amt
+            d["qr_count"] += 1
+        else:
+            d["handed_in"] += amt          # an undone hand-in is a negative row
+
+    for duty_bd in await db.duty_states.distinct(
+            "business_date", {"driver_id": did, "state": "start_duty", "business_date": {"$gte": lo, "$lt": hi}}):
+        if duty_bd:
+            day(duty_bd)["on_duty"] = True
+
+    out: List[Dict[str, Any]] = []
+    owed = opening
+    totals = {"fares": 0.0, "share": 0.0, "cash_fares": 0.0, "qr": 0.0, "handed_in": 0.0,
+              "days_worked": 0, "days_short": 0, "days_waiting": 0}
+    bd = lo
+    last = min(hi, (datetime.strptime(today_bd, "%Y-%m-%d").date() + timedelta(days=1)).strftime("%Y-%m-%d"))
+    while bd < last:
+        d = days.get(bd) or day(bd)
+        is_today = bd == today_bd
+        if not is_today:
+            owed += d["settled_cash"]       # settled fares only, as the balance counts them
+        owed -= d["qr"] + d["handed_in"]
+        left = d["cash_fares"] - d["qr"] - d["handed_in"]
+        worked = d["on_duty"] or d["fares"] > 0
+        if not worked and not d["qr"] and not d["handed_in"]:
+            st = "none"
+        elif not d["has_report"] or not d["all_settled"] or is_today:
+            st = "waiting"                  # the day's fares are not final yet
+        elif left > CALENDAR_MATCH_SLACK:
+            st = "short"                    # cash fares not covered by QR or a hand-in that day
+        else:
+            st = "ok"
+        apps = {k: {"fares": round(v["fares"], 2), "cash": round(v["cash"], 2)} for k, v in d["apps"].items()}
+        out.append({
+            "date": bd, "today": is_today, "status": st, "on_duty": d["on_duty"],
+            "fares": round(d["fares"], 2), "share": round(d["fares"] * rate, 2),
+            "cash_fares": round(d["cash_fares"], 2), "fares_final": d["has_report"] and d["all_settled"],
+            "apps": apps, "qr": round(d["qr"], 2), "qr_count": d["qr_count"],
+            "handed_in": round(d["handed_in"], 2), "left": round(left, 2),
+            "owed_after": round(owed, 2),
+        })
+        totals["fares"] += d["fares"]
+        totals["cash_fares"] += d["cash_fares"]
+        totals["qr"] += d["qr"]
+        totals["handed_in"] += d["handed_in"]
+        totals["days_worked"] += 1 if worked else 0
+        totals["days_short"] += 1 if st == "short" else 0
+        totals["days_waiting"] += 1 if st == "waiting" else 0
+        bd = (datetime.strptime(bd, "%Y-%m-%d").date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    totals["share"] = totals["fares"] * rate
+    for k in ("fares", "share", "cash_fares", "qr", "handed_in"):
+        totals[k] = round(totals[k], 2)
+
+    joined = _bd_of(driver.get("created_at"))
+    first = None
+    async for r in db.platform_cash.find({"driver_id": did}, {"_id": 0, "business_date": 1}).sort("business_date", 1).limit(1):
+        first = r.get("business_date")
+    first_month = min(x for x in (first, joined, today_bd) if x)[:7]
+    return {
+        "month": month, "first_month": min(first_month, month), "today": today_bd, "share_rate": rate,
+        "opening_owed": round(opening, 2), "closing_owed": round(owed, 2),
+        "totals": totals, "days": out,
+    }
+
+
+@api.get("/money/calendar")
+async def money_calendar(month: Optional[str] = None, driver: Dict = Depends(get_driver)):
+    """The driver's own month, day by day (see _day_calendar)."""
+    return await _day_calendar(driver, _month_or_400(month))
+
+
+@api.get("/admin/drivers/{driver_id}/calendar")
+async def admin_driver_calendar(driver_id: str, month: Optional[str] = None, admin: Dict = Depends(require_ops)):
+    """The same calendar for a driver of the hub (hub managers: their hub only)."""
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "vehicle_id": 1, "hub_id": 1, "created_at": 1})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
+    return await _day_calendar(d, _month_or_400(month))
+
+
 # Who the audit log and the payout row name when a withdrawal pays itself.
 DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
 

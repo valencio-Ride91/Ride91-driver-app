@@ -11,6 +11,7 @@ import { hubApi } from "@/src/hub/session";
 import { NotComingSheet } from "@/src/hub/sheets";
 import { doing, tagFor } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
+import { useCalendarText } from "@/src/i18n/calendar";
 import { useHubToday } from "@/src/hub/today";
 import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
@@ -47,6 +48,7 @@ function describeTap(e: Tap, t: HubText): string {
 
 export default function DriverPage() {
   const t = useHubText();
+  const ct = useCalendarText();
   const router = useRouter();
   const { id, focus } = useLocalSearchParams<{ id: string; focus?: string }>();
   const { today, refresh } = useHubToday();
@@ -223,6 +225,14 @@ export default function DriverPage() {
                     {d.you_owe > 0 ? <Btn label={t.received} small onPress={() => setCash({ driver_id: d.driver_id, name: d.name, you_owe: d.you_owe })} testID="hub-driver-cash" /> : null}
                   </View>
                 </View>
+                {/* Day by day: each day's work against the QR money and cash handed in */}
+                <Btn
+                  label={`📅 ${ct.open}`}
+                  kind="ghost"
+                  onPress={() => router.push(`/driver-calendar?id=${encodeURIComponent(d.driver_id)}&name=${encodeURIComponent(d.name ?? "")}` as never)}
+                  style={{ marginTop: spacing.md }}
+                  testID="hub-driver-calendar"
+                />
                 {d.shift_status !== "no_shift_time" && d.shift_status !== "started" && !d.on_duty ? (
                   <View style={styles.phoned} testID="hub-driver-phoned">
                     <Text style={styles.k}>{t.phoned_in}</Text>

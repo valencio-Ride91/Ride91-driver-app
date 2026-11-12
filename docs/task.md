@@ -7,7 +7,7 @@ Last updated: 2026-11-10, after commit `0db37f1`. Tick items off here as they la
 - [ ] Deploy `ride91-api` and `ride91-admin` with commit `0db37f1`.
 - [ ] Admin → Settings → **Database storage**: note how full it is and the biggest collections.
 - [ ] If `inspections` / `go_online_captures` are large: run `python3 backend/scripts/purge_inspection_media.py --from-cloud-run ride91-api` (dry run), review, then add `--apply`.
-- [ ] Hand out driver app **v22** (versionCode 9; replaces v21) and Hub app **v15** (versionCode 15).
+- [ ] Hand out driver app **v23** (versionCode 10; replaces v21 and v22) and Hub app **v16** (versionCode 16; replaces v15).
 - [ ] Check the logs after the deploy (no 5xx, no warnings).
 
 ## Decisions waiting on the owner

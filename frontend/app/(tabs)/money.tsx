@@ -11,6 +11,7 @@ import { SalaryCard } from "@/src/components/SalaryCard";
 import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
+import { useCalendarText } from "@/src/i18n/calendar";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 
 // Ride91 settles on the PREVIOUS day: the driver's earnings and dues are the
@@ -53,6 +54,7 @@ const PERIODS: { key: Period; label: "period_yesterday" | "period_week" | "perio
 export default function Money() {
   const { t } = useI18n();
   const c = useCardText();
+  const ct = useCalendarText();
   const router = useRouter();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -150,6 +152,20 @@ export default function Money() {
             {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? c.earn_days(earn!.days_operated) : ""}
           </Text>
         </Card>
+
+        {/* Day by day: each day's work against the QR money and cash handed in */}
+        <TouchableOpacity onPress={() => router.push("/calendar" as never)} testID="open-calendar" activeOpacity={0.8}>
+          <Card style={{ marginTop: spacing.md }}>
+            <View style={styles.histRow}>
+              <Text style={styles.histIcon}>📅</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.histTitle}>{ct.open}</Text>
+                <Text style={styles.histSub}>{ct.open_sub}</Text>
+              </View>
+              <Text style={styles.histChev}>›</Text>
+            </View>
+          </Card>
+        </TouchableOpacity>
 
         {/* The full lifetime history of every payment */}
         <TouchableOpacity onPress={() => router.push("/history" as never)} testID="open-history" activeOpacity={0.8}>

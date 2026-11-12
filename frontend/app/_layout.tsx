@@ -28,7 +28,7 @@ const Router: React.FC = () => {
     if (loading) return;
     const first = segments[0];
     const inTabs = first === "(tabs)";
-    const isAuthedRoute = inTabs || first === "inspection" || first === "alarm" || (first as string) === "notifications" || (first as string) === "requests" || (first as string) === "history";
+    const isAuthedRoute = inTabs || first === "inspection" || first === "alarm" || (first as string) === "notifications" || (first as string) === "requests" || (first as string) === "history" || (first as string) === "calendar";
     if (!driver && isAuthedRoute) {
       router.replace("/login");
     } else if (driver && !isAuthedRoute) {
@@ -49,6 +49,7 @@ const Router: React.FC = () => {
               <Stack.Screen name="notifications" options={{ presentation: "modal" }} />
               <Stack.Screen name="requests" options={{ presentation: "card" }} />
               <Stack.Screen name="history" options={{ presentation: "card" }} />
+              <Stack.Screen name="calendar" options={{ presentation: "card" }} />
             </Stack>
           </View>
         </ShiftAlarmProvider>

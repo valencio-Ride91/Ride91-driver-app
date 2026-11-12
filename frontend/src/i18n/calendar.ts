@@ -1,0 +1,92 @@
+// Words for the day-by-day calendar, shared by the driver app and the Hub app.
+// English and Hindi; Kannada falls back to English.
+import { useI18n } from "@/src/i18n";
+
+const en = {
+  title: "Day by day",
+  open: "Day by day",
+  open_sub: "Your QR money against each day's work, on a calendar",
+  months: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+  weekdays: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+  days_short: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+  legend_ok: "Covered",
+  legend_short: "Cash kept",
+  legend_waiting: "Fares not in yet",
+  month_fares: "Fares",
+  month_qr: "On QR",
+  month_handed: "Handed in",
+  month_short_days: (n: number) => (n === 1 ? "1 day with cash kept" : `${n} days with cash kept`),
+  work: "Work done",
+  fares: "Fares (all apps)",
+  share: (pct: number) => `Share (${pct}%)`,
+  app_line: (fares: string, cash: string) => `${fares} · cash ${cash}`,
+  on_duty_no_fares: "On duty, but no fares entered for this day yet.",
+  no_work: "No work this day.",
+  cash: "Cash",
+  cash_fares: "Cash fares",
+  qr: (n: number) => (n === 1 ? "Paid on QR (1)" : `Paid on QR (${n})`),
+  handed_in: "Handed in",
+  left: "Left with driver that day",
+  paid_older: "Paid off older cash",
+  owed_after: "Owed at the end of the day",
+  in_credit_after: "In credit at the end of the day",
+  st_ok: "The day's cash fares are covered by QR payments and cash handed in.",
+  st_short: (amt: string) => `${amt} of the day's cash fares was not paid on the QR or handed in that day.`,
+  st_waiting_today: "Today: QR payments show as they come in. Fares appear once the hub enters them or the Uber report arrives.",
+  st_waiting: "Fares for this day are not final yet, so it cannot be checked.",
+  st_none: "Nothing this day.",
+  prev: "Previous month",
+  next: "Next month",
+  loading: "Loading…",
+  failed: "Could not load. Pull down to try again.",
+  today: "Today",
+};
+
+type CalendarText = typeof en;
+
+const hi: CalendarText = {
+  title: "दिन-ब-दिन",
+  open: "दिन-ब-दिन",
+  open_sub: "हर दिन का काम और QR पर आया पैसा, कैलेंडर में",
+  months: ["जनवरी", "फ़रवरी", "मार्च", "अप्रैल", "मई", "जून", "जुलाई", "अगस्त", "सितंबर", "अक्टूबर", "नवंबर", "दिसंबर"],
+  weekdays: ["सो", "मं", "बु", "गु", "शु", "श", "र"],
+  days_short: ["सोम", "मंगल", "बुध", "गुरु", "शुक्र", "शनि", "रवि"],
+  legend_ok: "पूरा जमा",
+  legend_short: "नकद बाकी",
+  legend_waiting: "किराया अभी नहीं आया",
+  month_fares: "किराया",
+  month_qr: "QR पर",
+  month_handed: "जमा किया",
+  month_short_days: (n) => `${n} दिन नकद बाकी रहा`,
+  work: "किया गया काम",
+  fares: "किराया (सभी ऐप)",
+  share: (pct) => `हिस्सा (${pct}%)`,
+  app_line: (fares, cash) => `${fares} · नकद ${cash}`,
+  on_duty_no_fares: "ड्यूटी पर थे, पर इस दिन का किराया अभी नहीं लिखा गया।",
+  no_work: "इस दिन कोई काम नहीं।",
+  cash: "नकद",
+  cash_fares: "नकद किराया",
+  qr: (n) => `QR पर मिला (${n})`,
+  handed_in: "जमा किया",
+  left: "उस दिन ड्राइवर के पास बचा",
+  paid_older: "पुराना नकद चुकाया",
+  owed_after: "दिन के अंत में बकाया",
+  in_credit_after: "दिन के अंत में जमा (ज़्यादा)",
+  st_ok: "उस दिन का नकद किराया QR और जमा से पूरा हो गया।",
+  st_short: (amt) => `उस दिन के नकद किराये में से ${amt} न QR पर आया, न जमा हुआ।`,
+  st_waiting_today: "आज: QR का पैसा आते ही दिखता है। किराया हब के लिखने या Uber रिपोर्ट आने पर दिखेगा।",
+  st_waiting: "इस दिन का किराया अभी पक्का नहीं है, इसलिए जाँच नहीं हो सकती।",
+  st_none: "इस दिन कुछ नहीं।",
+  prev: "पिछला महीना",
+  next: "अगला महीना",
+  loading: "लोड हो रहा है…",
+  failed: "लोड नहीं हुआ। नीचे खींचकर फिर कोशिश करें।",
+  today: "आज",
+};
+
+export const useCalendarText = (): CalendarText => {
+  const { lang } = useI18n();
+  return lang === "hi" ? hi : en;
+};
+
+export type { CalendarText };
