@@ -150,6 +150,14 @@ SETTINGS_DEFAULTS: Dict[str, Any] = {
     "withdraw_hold_cash_owed": True,       # hold back salary equal to the collection cash the driver still owes
     "withdraw_direct": True,               # send withdrawals straight to the bank, no hub approval
     "withdraw_direct_daily_max": 10000,    # most a driver can take directly in one day (₹, 0 = no limit)
+    # Referrals: a driver who referred another earns `referral_rate` of the
+    # referred driver's fares on every day those fares reach
+    # `referral_daily_min`. Each month is paid into salary from day
+    # `referral_pay_day` of the next month. All live.
+    "referral_enabled": True,
+    "referral_rate": 0.02,
+    "referral_daily_min": 2500,
+    "referral_pay_day": 6,
     # Razorpay credentials (owner-editable; override the env vars). Secret
     # values are never returned by the API — only their "set" status is.
     "razorpay_key_id": "",
@@ -894,6 +902,11 @@ class SettingsIn(BaseModel):
     withdraw_min_amount: Optional[int] = Field(default=None, ge=0)
     withdraw_direct: Optional[bool] = None
     withdraw_direct_daily_max: Optional[int] = Field(default=None, ge=0)
+    # Referrals.
+    referral_enabled: Optional[bool] = None
+    referral_rate: Optional[float] = Field(default=None, ge=0, le=1)
+    referral_daily_min: Optional[int] = Field(default=None, ge=0)
+    referral_pay_day: Optional[int] = Field(default=None, ge=1, le=28)
     # Razorpay credentials (owner only; override env vars, never read back).
     razorpay_key_id: Optional[str] = None
     razorpay_key_secret: Optional[str] = None
@@ -2525,6 +2538,7 @@ _REWARD_SETTING_KEYS = (
     "attendance_grace_minutes", "attendance_monthly_min_days",
     "attendance_monthly_min_gross", "attendance_monthly_bonus",
     "withdraw_min_amount", "withdraw_direct", "withdraw_direct_daily_max",
+    "referral_enabled", "referral_rate", "referral_daily_min", "referral_pay_day",
 )
 
 
@@ -2631,12 +2645,15 @@ async def admin_put_settings(body: SettingsIn, admin: Dict = Depends(require_own
               "loyalty_wallet_per_day", "loyalty_wallet_min_gross", "loyalty_wallet_payout_every_days",
               "attendance_daily_target", "attendance_grace_minutes", "attendance_monthly_min_days",
               "attendance_monthly_min_gross", "attendance_monthly_bonus",
-              "withdraw_min_amount", "withdraw_direct_daily_max"):
+              "withdraw_min_amount", "withdraw_direct_daily_max",
+              "referral_rate", "referral_daily_min", "referral_pay_day"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v
     if body.withdraw_direct is not None:
         updates["withdraw_direct"] = bool(body.withdraw_direct)
+    if body.referral_enabled is not None:
+        updates["referral_enabled"] = bool(body.referral_enabled)
     if body.loyalty_wallet_enabled is not None:
         updates["loyalty_wallet_enabled"] = bool(body.loyalty_wallet_enabled)
     if body.attendance_enabled is not None:
@@ -9314,6 +9331,76 @@ async def admin_driver_calendar(driver_id: str, month: Optional[str] = None, adm
 
 
 # Who the audit log and the payout row name when a withdrawal pays itself.
+# ---------------------------------------------------------------------------
+# REFERRALS — a driver the office records as having referred another earns a
+# share of the referred driver's fares on every day those fares reach the
+# daily minimum, for as long as both stay with Ride91. Days are worked out
+# from the fares whenever they are shown; each month is locked into a
+# `referral_months` row (exactly which days were paid) once it is due, and
+# that row is what adds to salary. Links live in `referrals`: one row per
+# referrer period, [from_bd, to_bd), never backdated.
+# ---------------------------------------------------------------------------
+
+
+async def _referral_links(referrer_id: str) -> List[Dict]:
+    return [r async for r in db.referrals.find({"referrer_id": referrer_id}, {"_id": 0}).sort("from_bd", 1)]
+
+
+async def _open_referral(referred_id: str) -> Optional[Dict]:
+    return await db.referrals.find_one({"referred_id": referred_id, "to_bd": None}, {"_id": 0})
+
+
+async def _referral_days(referrer_id: str, lo: str, hi: str) -> List[Dict]:
+    """Every day in [lo, hi) on which a driver this one referred earned them
+    referral money: the link covered the day, the day is before today and its
+    fares are final (every app's row settled), the fares reached the daily
+    minimum, and neither driver had been removed by then."""
+    if not get_setting("referral_enabled"):
+        return []
+    links = await _referral_links(referrer_id)
+    if not links:
+        return []
+    today_bd = business_date_now()
+    hi = min(hi, today_bd)
+    if lo >= hi:
+        return []
+    rate = float(get_setting("referral_rate") or 0)
+    floor = float(get_setting("referral_daily_min") or 0)
+    ids = sorted({l["referred_id"] for l in links})
+    people = {d["id"]: d async for d in db.drivers.find(
+        {"id": {"$in": ids + [referrer_id]}}, {"_id": 0, "id": 1, "name": 1, "archived": 1, "archived_at": 1})}
+
+    def removed_from(did: str) -> Optional[str]:
+        d = people.get(did) or {}
+        return (_bd_of(d.get("archived_at")) or "0000-00-00") if d.get("archived") else None
+
+    stop_referrer = removed_from(referrer_id)
+    buckets: Dict[tuple, Dict[str, float]] = {}
+    async for r in db.platform_cash.find(
+        {"driver_id": {"$in": ids}, "business_date": {"$gte": lo, "$lt": hi}},
+        {"_id": 0, "driver_id": 1, "business_date": 1, "gross_amount": 1, "cash_amount": 1, "status": 1},
+    ):
+        b = buckets.setdefault((r["driver_id"], r["business_date"]), {"fares": 0.0, "rows": 0, "settled": 0})
+        g = r.get("gross_amount")
+        b["fares"] += float((g if g is not None else r.get("cash_amount")) or 0)
+        b["rows"] += 1
+        b["settled"] += r.get("status") == "settled"
+    out = []
+    for (did, day), b in buckets.items():
+        if b["rows"] == 0 or b["settled"] != b["rows"] or b["fares"] < floor - 1e-9:
+            continue
+        if not any(l["referred_id"] == did and l["from_bd"] <= day and (l.get("to_bd") is None or day < l["to_bd"])
+                   for l in links):
+            continue
+        stop = removed_from(did)
+        if (stop and day >= stop) or (stop_referrer and day >= stop_referrer):
+            continue
+        out.append({"referred_id": did, "name": (people.get(did) or {}).get("name") or "Driver",
+                    "date": day, "fares": round(b["fares"], 2), "amount": round(b["fares"] * rate, 2)})
+    out.sort(key=lambda x: (x["date"], x["name"]))
+    return out
+
+
 DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
 
 
@@ -10397,6 +10484,9 @@ async def _prepare_database() -> None:
     await db.collections.create_index([("razorpay_payment_id", 1)], unique=True)
     await db.collections.create_index([("driver_id", 1), ("business_date", 1)])
     await db.reward_payouts.create_index([("driver_id", 1), ("type", 1)])
+    await db.referrals.create_index([("referred_id", 1), ("to_bd", 1)])
+    await db.referrals.create_index("referrer_id")
+    await db.referral_months.create_index([("driver_id", 1), ("month", 1)], unique=True)
     await db.drivers.create_index([("code", 1)], unique=True, sparse=True)
     # Seed the driver-code sequence so the first new code is R91D-0106-*
     # (continuing after the fleet's existing R91D-0105). Leaves it if present.
