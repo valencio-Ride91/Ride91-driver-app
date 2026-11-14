@@ -28,6 +28,12 @@ const en = {
   invite_title: "🤝 Refer a driver",
   invite_sub: (pct: string, min: string) => `Earn ${pct}% of their fares on every day they reach ${min}`,
   invite_how: "To refer someone, tell your hub their name and phone number. The office adds them as referred by you.",
+  df_title: "Referred by (optional)",
+  df_search: "Search name or phone",
+  df_none: "Nobody",
+  df_hint: "They earn a share of this driver's good days. Only the owner can change it later.",
+  df_no_match: "No driver in your hub matches.",
+  df_inactive: "That driver has left Ride91. Pick someone else, or leave it empty.",
 };
 
 type ReferralText = typeof en;
@@ -57,6 +63,12 @@ const hi: ReferralText = {
   invite_title: "🤝 ड्राइवर लाइए",
   invite_sub: (pct, min) => `जिस दिन उनका किराया ${min} तक पहुँचे, उस दिन के किराये का ${pct}% आपको`,
   invite_how: "किसी को लाने के लिए अपने हब को उनका नाम और फ़ोन नंबर बताइए। ऑफ़िस उन्हें आपके रेफ़रल से जोड़ देगा।",
+  df_title: "किसके रेफ़रल से (ज़रूरी नहीं)",
+  df_search: "नाम या फ़ोन से खोजें",
+  df_none: "किसी के नहीं",
+  df_hint: "इस ड्राइवर के अच्छे दिनों का हिस्सा उन्हें मिलेगा। बाद में सिर्फ़ मालिक इसे बदल सकते हैं।",
+  df_no_match: "आपके हब में ऐसा कोई ड्राइवर नहीं।",
+  df_inactive: "वह ड्राइवर Ride91 छोड़ चुका है। कोई और चुनें, या खाली छोड़ें।",
 };
 
 export const useReferralText = (): ReferralText => {

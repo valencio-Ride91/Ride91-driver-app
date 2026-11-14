@@ -17,6 +17,7 @@ import { formatINR } from "@/src/i18n";
 import { CarsData, HubCar } from "@/src/hub/cars";
 import { hubApi, useHubSession } from "@/src/hub/session";
 import { useHubText } from "@/src/hub/text";
+import { useReferralText } from "@/src/i18n/referrals";
 import { HubDriver, useHubToday } from "@/src/hub/today";
 import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, hubStyles } from "@/src/hub/ui";
@@ -81,15 +82,16 @@ export default function DriverForm() {
           <View style={{ padding: spacing.md }}><Empty>{failed ? t.action_fail : t.loading}</Empty></View>
         ) : (
           // Mounted only once its data is here, so the boxes start filled in.
-          <Fields hubId={hubId as string} driver={driver} cars={cars as CarsData} reloadCars={reloadCars} />
+          <Fields hubId={hubId as string} driver={driver} cars={cars as CarsData} reloadCars={reloadCars} others={today?.drivers ?? []} />
         )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData; reloadCars: () => Promise<void> }> = ({ hubId, driver, cars, reloadCars }) => {
+const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData; reloadCars: () => Promise<void>; others: HubDriver[] }> = ({ hubId, driver, cars, reloadCars, others }) => {
   const t = useHubText();
+  const rt = useReferralText();
   const router = useRouter();
   const { refresh } = useHubToday();
   const say = useToast();
@@ -111,6 +113,17 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);     // the "are you sure" step
+  // New drivers only: who referred them. Changing it later is the owner's, in the office.
+  const [refBy, setRefBy] = useState<HubDriver | null>(null);
+  const [refQ, setRefQ] = useState("");
+  const refNeedle = refQ.trim().toLowerCase();
+  const refDigits = refQ.replace(/\D/g, "");
+  const refMatches = refNeedle
+    ? others
+        .filter((d) => d.active !== false)
+        .filter((d) => (d.name ?? "").toLowerCase().includes(refNeedle) || (refDigits.length >= 3 && (d.phone ?? "").includes(refDigits)))
+        .slice(0, 6)
+    : [];
 
   // A car is offered when its slot for this shift is free, or is this driver's own.
   const free = (c: HubCar) => {
@@ -127,7 +140,8 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
 
   const fail = (e: any) => {
     const code = e?.body?.detail;
-    setErr(code === "phone_already_registered" ? t.df_phone_taken : code === "shift_slot_taken" ? t.df_slot_taken : t.action_fail);
+    setErr(code === "phone_already_registered" ? t.df_phone_taken : code === "shift_slot_taken" ? t.df_slot_taken
+      : code === "referrer_inactive" || code === "referrer_not_found" ? rt.df_inactive : t.action_fail);
     // Someone else took the slot meanwhile: show the car list as it is now.
     if (code === "shift_slot_taken") reloadCars();
   };
@@ -148,6 +162,7 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
         const made = await hubApi.post<{ id: string; shift_start_time?: string | null }>("/admin/drivers", {
           name: name.trim(), phone: ten, password, shift_type: shift, hub_id: hubId,
           ...(car ? { vehicle_id: car } : {}), ...(time.trim() ? { shift_start_time: time.trim() } : {}),
+          ...(refBy ? { referred_by: refBy.driver_id } : {}),
         });
         // An older server ignores the time on create; set it after. The driver
         // exists either way, so a failure here only says so.
@@ -244,6 +259,37 @@ const Fields: React.FC<{ hubId: string; driver: HubDriver | null; cars: CarsData
           );
         })}
       </View>
+
+      {!id ? (
+        <View style={[hubStyles.card, { marginTop: spacing.md }]} testID="hub-df-referrer">
+          <Text style={[hubStyles.label, { marginTop: 0 }]}>{rt.df_title}</Text>
+          {refBy ? (
+            <View style={[hubStyles.row, hubStyles.rowFirst]}>
+              <View style={{ flex: 1 }}>
+                <Text style={hubStyles.name} testID="hub-df-ref-picked">🤝 {refBy.name ?? "—"}</Text>
+                <Text style={hubStyles.sub}>{localPhone(refBy.phone)}</Text>
+              </View>
+              <Btn label={t.cancel} small kind="ghost" onPress={() => setRefBy(null)} testID="hub-df-ref-clear" />
+            </View>
+          ) : (
+            <>
+              <TextInput testID="hub-df-ref-search" value={refQ} onChangeText={setRefQ} placeholder={rt.df_search}
+                placeholderTextColor={colors.muted} autoCorrect={false} style={hubStyles.input} />
+              {refMatches.map((d, i) => (
+                <TouchableOpacity key={d.driver_id} onPress={() => { setRefBy(d); setRefQ(""); }}
+                  style={[hubStyles.row, i === 0 ? hubStyles.rowFirst : null]} testID={`hub-df-ref-${d.driver_id}`}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={hubStyles.name}>{d.name ?? "—"}</Text>
+                    <Text style={hubStyles.sub}>{localPhone(d.phone)}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+              {refNeedle && refMatches.length === 0 ? <Text style={hubStyles.sub}>{rt.df_no_match}</Text> : null}
+            </>
+          )}
+          <Text style={hubStyles.sub}>{rt.df_hint}</Text>
+        </View>
+      ) : null}
 
       {err ? <Text style={hubStyles.err} testID="hub-df-err">{err}</Text> : null}
       <Btn label={id ? t.save : t.df_add} onPress={save} busy={busy && !removing} disabled={busy} style={{ marginTop: spacing.lg }} testID="hub-df-save" />
