@@ -3,7 +3,8 @@
 // one place ops can see everything about a single driver.
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, DriverDetail as Detail } from "../api";
+import { api, DriverDetail as Detail, DriverReferral, DriverRow } from "../api";
+import { AdminIdentity } from "../auth";
 import DutyCard from "../components/DutyCard";
 
 function fmtINR(n: number | undefined | null) {
@@ -18,8 +19,14 @@ function fmtDay(iso: string | null | undefined) {
   return new Date(iso).toLocaleDateString("en-IN", { dateStyle: "medium", timeZone: "Asia/Kolkata" });
 }
 
-export default function DriverDetail() {
+export default function DriverDetail({ admin }: { admin: AdminIdentity }) {
   const { id = "" } = useParams();
+  const isOwner = admin.role === "owner";
+  const [ref, setRef] = useState<DriverReferral | null>(null);
+  const [refEdit, setRefEdit] = useState(false);
+  const [refPick, setRefPick] = useState("");
+  const [refList, setRefList] = useState<DriverRow[]>([]);
+  const [refBusy, setRefBusy] = useState(false);
   const nav = useNavigate();
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,8 +40,12 @@ export default function DriverDetail() {
 
   const load = useCallback(async () => {
     try {
-      const d = await api.get<Detail>(`/admin/drivers/${id}`);
+      const [d, r] = await Promise.all([
+        api.get<Detail>(`/admin/drivers/${id}`),
+        api.get<DriverReferral>(`/admin/drivers/${id}/referral`).catch(() => null),
+      ]);
       setData(d);
+      setRef(r);
       setShiftStart(d.driver.shift_start_time ?? "");
       setShiftEnd(d.driver.shift_end_time ?? "");
     } catch {
@@ -58,6 +69,31 @@ export default function DriverDetail() {
   };
 
   useEffect(() => { load(); }, [load]);
+
+  const openRefEdit = async () => {
+    setRefPick(ref?.referred_by?.id ?? "");
+    setRefEdit(true);
+    try {
+      const all = await api.get<{ items: DriverRow[] }>("/admin/drivers");
+      setRefList(all.items.filter((r) => r.active && !r.archived && r.id !== id).sort((a, b) => a.name.localeCompare(b.name)));
+    } catch {
+      setErr("Could not load the driver list.");
+    }
+  };
+
+  const saveRef = async () => {
+    setRefBusy(true); setErr(null);
+    try {
+      const r = await api.put<{ referred_by: DriverReferral["referred_by"] }>(`/admin/drivers/${id}/referrer`, { referrer_id: refPick || null });
+      setRef((old) => ({ referrals_made: old?.referrals_made ?? 0, referred_by: r.referred_by }));
+      setRefEdit(false);
+    } catch (e: any) {
+      const d = e?.body?.detail;
+      setErr(d === "referrer_inactive" ? "That driver has left Ride91." : d === "self_referral" ? "A driver cannot refer themselves." : "Could not change the referrer.");
+    } finally {
+      setRefBusy(false);
+    }
+  };
 
   const sendNotification = async () => {
     if (!msg.trim()) return;
@@ -121,6 +157,34 @@ export default function DriverDetail() {
         <Stat label="Paid in today" value={fmtINR(balance.paid_in_today)} />
         <Stat label="Collected (to yest.)" value={fmtINR(balance.collected_to_yesterday)} />
         <Stat label="Shift / hub" value={`${driver.shift_type ?? "—"} · ${driver.hub_name ?? "—"}`} small />
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }} data-testid="driver-referral">
+        <h2 style={{ marginTop: 0 }}>Referral</h2>
+        <div className="sub">
+          {ref?.referred_by
+            ? <>Referred by <Link to={`/drivers/${ref.referred_by.id}`}><strong>{ref.referred_by.name ?? "—"}</strong></Link> since {fmtDay(ref.referred_by.since + "T12:00:00+05:30")}</>
+            : "Not referred by anyone."}
+          {ref && ref.referrals_made > 0 ? <> · referring {ref.referrals_made === 1 ? "1 driver" : `${ref.referrals_made} drivers`} (<Link to="/referrals">see Referrals</Link>)</> : null}
+        </div>
+        {isOwner && !refEdit ? (
+          <div className="form-actions" style={{ justifyContent: "flex-start" }}>
+            <button className="ghost" onClick={openRefEdit} data-testid="ref-change">Change referrer</button>
+          </div>
+        ) : null}
+        {isOwner && refEdit ? (
+          <div style={{ marginTop: 10 }}>
+            <select value={refPick} onChange={(e) => setRefPick(e.target.value)} data-testid="ref-pick">
+              <option value="">Nobody</option>
+              {refList.map((r) => (<option key={r.id} value={r.id}>{r.name} · {r.phone}{r.hub_name ? ` · ${r.hub_name}` : ""}</option>))}
+            </select>
+            <div className="muted-sm" style={{ marginTop: 6 }}>Counts from today. Days already earned stay with the old referrer.</div>
+            <div className="form-actions" style={{ justifyContent: "flex-start" }}>
+              <button className="ghost" onClick={() => setRefEdit(false)} disabled={refBusy}>Cancel</button>
+              <button className="primary" onClick={saveRef} disabled={refBusy} data-testid="ref-save">{refBusy ? "Saving…" : "Save"}</button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>

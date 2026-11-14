@@ -17,6 +17,7 @@ const NAV: { to: string; label: string; end?: boolean; ownerOnly?: boolean; hub?
   { to: "/bookings", label: "Bookings" },
   { to: "/collections", label: "Collections" },
   { to: "/loyalty", label: "Loyalty & yearly", hub: true },
+  { to: "/referrals", label: "Referrals", hub: true },
   { to: "/live-map", label: "Live map" },
   { to: "/audit", label: "Audit log" },
   { to: "/users", label: "Admin accounts", ownerOnly: true },

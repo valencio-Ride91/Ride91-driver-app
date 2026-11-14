@@ -90,6 +90,13 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
   const [mErr, setMErr] = useState<string | null>(null);
 
   // salary withdrawal
+  const [rEnabled, setREnabled] = useState(true);
+  const [rRate, setRRate] = useState("");        // percent, as typed
+  const [rMin, setRMin] = useState("");
+  const [rPayDay, setRPayDay] = useState("");
+  const [rBusy, setRBusy] = useState(false);
+  const [rMsg, setRMsg] = useState<string | null>(null);
+  const [rErr, setRErr] = useState<string | null>(null);
   const [sDirect, setSDirect] = useState(true);
   const [sDailyMax, setSDailyMax] = useState("");
   const [sMin, setSMin] = useState("");
@@ -134,6 +141,10 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     setAMinGross(String(s.attendance_monthly_min_gross ?? ""));
     setABonus(String(s.attendance_monthly_bonus ?? ""));
     setSDirect(!!s.withdraw_direct);
+    setREnabled(s.referral_enabled !== false);
+    setRRate(s.referral_rate != null ? String(Math.round(s.referral_rate * 10000) / 100) : "");
+    setRMin(String(s.referral_daily_min ?? ""));
+    setRPayDay(String(s.referral_pay_day ?? ""));
     setSDailyMax(String(s.withdraw_direct_daily_max ?? ""));
     setSMin(String(s.withdraw_min_amount ?? ""));
   }, []);
@@ -408,6 +419,28 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
     }
   };
 
+  const saveReferrals = async () => {
+    setRErr(null); setRMsg(null);
+    const rate = Number(rRate), min = Number(rMin), day = Number(rPayDay);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) return setRErr("Rate must be between 0 and 100%.");
+    if (!Number.isFinite(min) || min < 0) return setRErr("Daily minimum must be 0 or more.");
+    if (!Number.isInteger(day) || day < 1 || day > 28) return setRErr("Pay day must be a whole number from 1 to 28.");
+    setRBusy(true);
+    try {
+      const s = await api.put<SettingsData>("/admin/settings", {
+        referral_enabled: rEnabled, referral_rate: Math.round(rate * 100) / 10000,
+        referral_daily_min: Math.round(min), referral_pay_day: day,
+      });
+      setData(s);
+      setRMsg("Referral settings saved.");
+      setTimeout(() => setRMsg(null), 3000);
+    } catch (e: any) {
+      setRErr(e?.body?.detail === "owner_only" ? "Only an owner can change these." : "Could not save.");
+    } finally {
+      setRBusy(false);
+    }
+  };
+
   const changePassword = async () => {
     setPwErr(null); setPwMsg(null);
     if (newPw.length < 10) return setPwErr("New password must be at least 10 characters.");
@@ -577,6 +610,35 @@ export default function Settings({ admin }: { admin: AdminIdentity }) {
         {isOwner ? (
           <div className="form-actions">
             <button className="primary" onClick={saveAttendance} disabled={aBusy}>{aBusy ? "Saving…" : "Save attendance"}</button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card" style={{ marginTop: 20, maxWidth: 560 }} data-testid="referral-settings">
+        <h2 style={{ marginTop: 0 }}>Referrals {isOwner ? "" : <span className="tag muted" style={{ marginLeft: 8 }}>owner only</span>}</h2>
+        <div className="muted-sm" style={{ marginBottom: 10 }}>
+          A driver who referred another earns this share of the referred driver's fares on every day those fares reach the daily minimum, for as long as both stay. Each month is added to the referrer's salary on the pay day of the next month. A change applies to days not yet paid.
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 10 }}>
+          <input type="checkbox" checked={rEnabled} disabled={!isOwner} onChange={(e) => setREnabled(e.target.checked)} style={{ width: "auto" }} />
+          Referrals on
+        </label>
+        <div className="form-grid">
+          <label>Share of fares (%)
+            <input type="number" min={0} max={100} step={0.1} value={rRate} disabled={!isOwner} onChange={(e) => setRRate(e.target.value)} />
+          </label>
+          <label>Daily minimum (₹ of fares)
+            <input type="number" min={0} value={rMin} disabled={!isOwner} onChange={(e) => setRMin(e.target.value)} />
+          </label>
+          <label>Pay on day (of the next month)
+            <input type="number" min={1} max={28} value={rPayDay} disabled={!isOwner} onChange={(e) => setRPayDay(e.target.value)} />
+          </label>
+        </div>
+        {rErr ? <div className="err">{rErr}</div> : null}
+        {rMsg ? <div className="tag ok" style={{ display: "inline-block", marginTop: 10 }}>{rMsg}</div> : null}
+        {isOwner ? (
+          <div className="form-actions">
+            <button className="primary" onClick={saveReferrals} disabled={rBusy}>{rBusy ? "Saving…" : "Save referral settings"}</button>
           </div>
         ) : null}
       </div>

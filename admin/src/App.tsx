@@ -21,6 +21,7 @@ import Hubs from "./pages/Hubs";
 import HubDetail from "./pages/HubDetail";
 import Rewards from "./pages/Rewards";
 import Loyalty from "./pages/Loyalty";
+import Referrals from "./pages/Referrals";
 import Collections from "./pages/Collections";
 import DailyEarnings from "./pages/DailyEarnings";
 import Settings from "./pages/Settings";
@@ -72,7 +73,7 @@ export default function App() {
             <Route path="/" element={<Navigate to={homePath(admin)} replace />} />
             <Route path="/bookings" element={<Fleet admin={admin}><Bookings /></Fleet>} />
             <Route path="/drivers" element={<Drivers />} />
-            <Route path="/drivers/:id" element={<DriverDetail />} />
+            <Route path="/drivers/:id" element={<DriverDetail admin={admin} />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/hubs" element={<Hubs />} />
             <Route path="/hubs/:id" element={<HubDetail />} />
@@ -81,6 +82,7 @@ export default function App() {
             <Route path="/collections" element={<Fleet admin={admin}><Collections /></Fleet>} />
             <Route path="/rewards" element={<Rewards />} />
             <Route path="/loyalty" element={<Loyalty />} />
+            <Route path="/referrals" element={<Referrals />} />
             <Route path="/daily-earnings" element={<DailyEarnings />} />
             <Route path="/requests" element={<Fleet admin={admin}><Requests /></Fleet>} />
             <Route path="/live-map" element={<Fleet admin={admin}><LiveMap /></Fleet>} />

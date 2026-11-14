@@ -653,12 +653,50 @@ export interface SettingsData {
   withdraw_min_amount: number;
   withdraw_direct: boolean;
   withdraw_direct_daily_max: number;
+  // Referrals. Absent on older servers.
+  referral_enabled?: boolean;
+  referral_rate?: number;          // 0.02 = 2%
+  referral_daily_min?: number;     // ₹ of fares a day must reach
+  referral_pay_day?: number;       // day of the next month the money is paid
   razorpayx_ready?: boolean;       // RazorpayX payouts are set up on the server
   google_maps_web_key?: string | null;   // admin panel maps; null = OpenStreetMap
   // Razorpay credential status (never the secret values).
   payments?: PaymentsStatus;
   // WhatsApp status (never the access token). Absent on older servers.
   whatsapp?: WhatsAppStatus;
+}
+
+export interface ReferralPerson {
+  id: string;
+  name: string | null;
+  hub_name: string | null;
+  removed: boolean;
+}
+
+export interface ReferralRow {
+  referrer: ReferralPerson;
+  referred: ReferralPerson;
+  since: string;
+  until: string | null;
+  month_amount: number;
+  month_days: number;
+  month_paid: boolean;
+  lifetime_paid: number;
+}
+
+export interface ReferralsResponse {
+  month: string;
+  enabled: boolean;
+  rate: number;
+  daily_min: number;
+  pay_date: string;
+  rows: ReferralRow[];
+  totals: { month_amount: number; lifetime_paid: number };
+}
+
+export interface DriverReferral {
+  referred_by: { id: string; name: string | null; since: string } | null;
+  referrals_made: number;
 }
 
 export interface WhatsAppStatus {

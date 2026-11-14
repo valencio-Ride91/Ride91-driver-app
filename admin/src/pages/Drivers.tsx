@@ -44,6 +44,8 @@ export default function Drivers() {
   const [dVehicle, setDVehicle] = useState("");
   const [dHubId, setDHubId] = useState("");
   const [dShift, setDShift] = useState("day");
+  const [dRef, setDRef] = useState("");          // who referred them (driver id), optional
+  const [dRefQ, setDRefQ] = useState("");        // filters the referrer list
   // vehicle form
   const [vNumber, setVNumber] = useState("");
   const [vModel, setVModel] = useState("Citroën ëC3");
@@ -94,6 +96,13 @@ export default function Drivers() {
     }
   };
 
+  // Active drivers who can be named as the referrer of a new driver.
+  const refNeedle = dRefQ.trim().toLowerCase();
+  const referrerOptions = rows
+    .filter((r) => r.active && !r.archived)
+    .filter((r) => !refNeedle || r.name.toLowerCase().includes(refNeedle) || r.phone.includes(refNeedle) || r.id === dRef)
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   const createDriver = async () => {
     setErr(null);
     if (!dName.trim()) return setErr("Name is required.");
@@ -105,14 +114,19 @@ export default function Drivers() {
         name: dName.trim(), phone: dPhone.trim(), password: dPassword,
         vehicle_id: dVehicle || null,
         hub_id: dHubId || null, shift_type: dShift,
+        referred_by: dRef || null,
       });
-      setDName(""); setDPhone("+91"); setDPassword(""); setDVehicle(""); setDHubId("");
+      setDName(""); setDPhone("+91"); setDPassword(""); setDVehicle(""); setDHubId(""); setDRef(""); setDRefQ("");
       setPanel("none");
       await load();
       flash("Driver added.");
     } catch (e: any) {
       const d = e?.body?.detail;
-      setErr(d === "phone_already_registered" ? "A driver with that phone already exists." : d === "shift_slot_taken" ? "That car already has a driver for this shift." : "Could not add driver.");
+      setErr(d === "phone_already_registered" ? "A driver with that phone already exists."
+        : d === "shift_slot_taken" ? "That car already has a driver for this shift."
+        : d === "referrer_inactive" ? "The referring driver has left Ride91. Pick someone else, or leave it empty."
+        : d === "referrer_not_found" ? "The referring driver was not found."
+        : "Could not add driver.");
     } finally {
       setSaving(false);
     }
@@ -277,6 +291,18 @@ export default function Drivers() {
                   <option key={h.id} value={h.id}>{h.name}{h.city ? ` · ${h.city}` : ""}</option>
                 ))}
               </select>
+            </label>
+            <label className="col-2">Referred by (optional)
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={dRefQ} onChange={(e) => setDRefQ(e.target.value)} placeholder="Search name or phone" style={{ maxWidth: 200 }} data-testid="ref-search" />
+                <select value={dRef} onChange={(e) => setDRef(e.target.value)} data-testid="ref-select" style={{ flex: 1 }}>
+                  <option value="">Nobody</option>
+                  {referrerOptions.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name} · {r.phone}{r.hub_name ? ` · ${r.hub_name}` : ""}</option>
+                  ))}
+                </select>
+              </div>
+              <span className="muted-sm">They earn a share of this driver's good days. Only the owner can change it later.</span>
             </label>
           </div>
           {freeVehicles.length === 0 ? (
