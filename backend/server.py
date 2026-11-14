@@ -522,6 +522,7 @@ class DriverCreateIn(BaseModel):
     shift_type: str = "day"                    # day | night
     status: Literal["approved", "pending"] = "approved"
     shift_start_time: Optional[str] = None     # HH:MM; set in the same call so a new driver is never half made
+    referred_by: Optional[str] = None          # the driver who referred them (earns referral money)
 
     @field_validator("shift_start_time")
     @classmethod
@@ -3243,6 +3244,8 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
             raise HTTPException(404, "vehicle_not_found")
         await _assert_vehicle_in_scope(veh, scope)   # hub_manager: car must be in their hub
         await _check_shift_slot(body.vehicle_id, body.shift_type, None)
+    if body.referred_by:
+        await _check_referrer(body.referred_by, None)
     # A hub_manager's new drivers always belong to their hub.
     hub_id = scope if scope is not None else (body.hub_id or None)
     hub_name, hub_lat, hub_lng = body.hub_name, body.hub_lat, body.hub_lng
@@ -3276,6 +3279,9 @@ async def admin_create_driver(body: DriverCreateIn, admin: Dict = Depends(requir
     row.pop("_id", None)
     row.pop("password_hash", None)   # never return the hash
     await _audit(admin, "create_driver", driver_id, {"name": row["name"], "phone": phone})
+    if body.referred_by:
+        await _open_referral_link(driver_id, body.referred_by, admin)
+        await _audit(admin, "set_referrer", driver_id, {"from": None, "to": body.referred_by})
     return row
 
 
@@ -9468,6 +9474,34 @@ async def _referral_lock(referrer_id: str) -> None:
         paid |= {(d["referred_id"], d["date"]) for d in (row.get("days") or [])}
 
 
+async def _check_referrer(referrer_id: str, referred_id: Optional[str]) -> Dict:
+    """The referrer must be a different driver who is still with Ride91."""
+    if referred_id and referrer_id == referred_id:
+        raise HTTPException(400, "self_referral")
+    d = await db.drivers.find_one({"id": referrer_id}, {"_id": 0, "id": 1, "name": 1, "active": 1, "archived": 1})
+    if not d:
+        raise HTTPException(404, "referrer_not_found")
+    if d.get("archived") or d.get("active") is False:
+        raise HTTPException(409, "referrer_inactive")
+    return d
+
+
+async def _open_referral_link(referred_id: str, referrer_id: str, admin: Dict) -> None:
+    await db.referrals.insert_one({
+        "id": str(uuid.uuid4()), "referred_id": referred_id, "referrer_id": referrer_id,
+        "from_bd": business_date_now(), "to_bd": None,
+        "created_at": iso(now_utc()), "created_by": admin["username"],
+    })
+
+
+async def _referred_by_out(referred_id: str) -> Optional[Dict[str, Any]]:
+    link = await _open_referral(referred_id)
+    if not link:
+        return None
+    d = await db.drivers.find_one({"id": link["referrer_id"]}, {"_id": 0, "name": 1}) or {}
+    return {"id": link["referrer_id"], "name": d.get("name"), "since": link["from_bd"]}
+
+
 async def _referral_paid_total(driver_id: str) -> float:
     total = 0.0
     async for r in db.referral_months.aggregate([
@@ -9476,6 +9510,135 @@ async def _referral_paid_total(driver_id: str) -> float:
     ]):
         total = float(r.get("s") or 0)
     return round(total, 2)
+
+
+class ReferrerIn(BaseModel):
+    referrer_id: Optional[str] = None      # null removes the referrer
+
+
+@api.put("/admin/drivers/{driver_id}/referrer")
+async def admin_set_referrer(driver_id: str, body: ReferrerIn, admin: Dict = Depends(require_owner)):
+    """Set, change or remove who referred a driver. Owner only. Counts from
+    today and is never backdated: the old link keeps the days before today."""
+    if not await db.drivers.find_one({"id": driver_id}, {"_id": 1}):
+        raise HTTPException(404, "driver_not_found")
+    new = (body.referrer_id or "").strip() or None
+    current = await _open_referral(driver_id)
+    old = current["referrer_id"] if current else None
+    if new == old:
+        return {"ok": True, "referred_by": await _referred_by_out(driver_id)}
+    if new:
+        await _check_referrer(new, driver_id)
+    if current and current["from_bd"] >= business_date_now():
+        # Set today and changed today: it never covered a day, so it goes
+        # (the audit keeps the record).
+        await db.referrals.delete_one({"id": current["id"]})
+    elif current:
+        await db.referrals.update_one({"id": current["id"]}, {"$set": {
+            "to_bd": business_date_now(), "ended_at": iso(now_utc()), "ended_by": admin["username"]}})
+    if new:
+        await _open_referral_link(driver_id, new, admin)
+    await _audit(admin, "set_referrer", driver_id, {"from": old, "to": new})
+    return {"ok": True, "referred_by": await _referred_by_out(driver_id)}
+
+
+@api.get("/admin/drivers/{driver_id}/referral")
+async def admin_driver_referral(driver_id: str, admin: Dict = Depends(require_ops)):
+    """Who referred this driver, and how many drivers they are referring now."""
+    d = await db.drivers.find_one({"id": driver_id}, {"_id": 0, "id": 1, "hub_id": 1, "vehicle_id": 1})
+    if not d:
+        raise HTTPException(404, "driver_not_found")
+    await _assert_driver_in_scope(d, hub_scope(admin))
+    return {"referred_by": await _referred_by_out(driver_id),
+            "referrals_made": await db.referrals.count_documents({"referrer_id": driver_id, "to_bd": None})}
+
+
+def _in_link(link: Dict, day: str) -> bool:
+    return link["from_bd"] <= day and (link.get("to_bd") is None or day < link["to_bd"])
+
+
+async def _referral_month_view(referrer_id: str, month: str) -> Dict[str, Any]:
+    """A referrer's month: from its lock when locked, else worked out now."""
+    row = await db.referral_months.find_one({"driver_id": referrer_id, "month": month}, {"_id": 0})
+    if row:
+        return {"paid": True, "days": row.get("days") or [], "total": round(float(row.get("amount") or 0), 2)}
+    days = await _referral_days(referrer_id, f"{month}-01", f"{_month_after(month)}-01")
+    return {"paid": False, "days": days, "total": round(sum(d["amount"] for d in days), 2)}
+
+
+@api.get("/admin/referrals")
+async def admin_referrals(month: Optional[str] = None, admin: Dict = Depends(require_ops)):
+    """Every referral link with its month and lifetime figures. A hub manager
+    sees the links where either driver belongs to their hub."""
+    month = _month_or_400(month)
+    scope = hub_scope(admin)
+    links = [l async for l in db.referrals.find({}, {"_id": 0}).sort("from_bd", 1)]
+    ids = {l["referrer_id"] for l in links} | {l["referred_id"] for l in links}
+    people = {d["id"]: d async for d in db.drivers.find(
+        {"id": {"$in": sorted(ids)}}, {"_id": 0, "id": 1, "name": 1, "hub_id": 1, "hub_name": 1, "archived": 1})}
+    if scope is not None:
+        links = [l for l in links if scope in ((people.get(l["referrer_id"]) or {}).get("hub_id"),
+                                               (people.get(l["referred_id"]) or {}).get("hub_id"))]
+    views: Dict[str, Dict] = {}
+    locked: Dict[str, List[Dict]] = {}
+    for rid in sorted({l["referrer_id"] for l in links}):
+        await _referral_lock(rid)
+        views[rid] = await _referral_month_view(rid, month)
+        locked[rid] = [r async for r in db.referral_months.find({"driver_id": rid}, {"_id": 0, "days": 1})]
+
+    def who(did: str) -> Dict[str, Any]:
+        d = people.get(did) or {}
+        return {"id": did, "name": d.get("name"), "hub_name": d.get("hub_name"), "removed": bool(d.get("archived"))}
+
+    rows = []
+    for l in links:
+        v = views[l["referrer_id"]]
+        mine = [d for d in v["days"] if d["referred_id"] == l["referred_id"] and _in_link(l, d["date"])]
+        life = [d for r in locked[l["referrer_id"]] for d in (r.get("days") or [])
+                if d["referred_id"] == l["referred_id"] and _in_link(l, d["date"])]
+        rows.append({
+            "referrer": who(l["referrer_id"]), "referred": who(l["referred_id"]),
+            "since": l["from_bd"], "until": l.get("to_bd"),
+            "month_amount": round(sum(d["amount"] for d in mine), 2), "month_days": len(mine),
+            "month_paid": v["paid"], "lifetime_paid": round(sum(d["amount"] for d in life), 2),
+        })
+    return {
+        "month": month, "enabled": bool(get_setting("referral_enabled")),
+        "rate": float(get_setting("referral_rate") or 0), "daily_min": float(get_setting("referral_daily_min") or 0),
+        "pay_date": _referral_pay_date(month), "rows": rows,
+        "totals": {"month_amount": round(sum(r["month_amount"] for r in rows), 2),
+                   "lifetime_paid": round(sum(r["lifetime_paid"] for r in rows), 2)},
+    }
+
+
+@api.get("/money/referrals")
+async def money_referrals(month: Optional[str] = None, driver: Dict = Depends(get_driver)):
+    """The driver's referral money for a month: one line per day a referred
+    friend earned it. Only the bonus is sent, never the friend's fares."""
+    month = _month_or_400(month)
+    did = driver["id"]
+    links = await _referral_links(did)
+    await _referral_lock(did)
+    view = await _referral_month_view(did, month)
+    ref_ids = sorted({l["referred_id"] for l in links},
+                     key=lambda x: min(l["from_bd"] for l in links if l["referred_id"] == x))
+    names = {d["id"]: d async for d in db.drivers.find(
+        {"id": {"$in": ref_ids}}, {"_id": 0, "id": 1, "name": 1, "archived": 1})}
+    people = []
+    for rid in ref_ids:
+        mine = [l for l in links if l["referred_id"] == rid]
+        d = names.get(rid) or {}
+        people.append({"name": d.get("name") or "Driver", "since": min(l["from_bd"] for l in mine),
+                       "active": any(l.get("to_bd") is None for l in mine) and not d.get("archived")})
+    return {
+        "month": month,
+        "first_month": min(l["from_bd"] for l in links)[:7] if links else business_date_now()[:7],
+        "enabled": bool(get_setting("referral_enabled")),
+        "rate": float(get_setting("referral_rate") or 0), "daily_min": float(get_setting("referral_daily_min") or 0),
+        "total": view["total"], "paid": view["paid"], "pay_date": _referral_pay_date(month),
+        "people": people,
+        "days": [{"date": d["date"], "name": d.get("name") or "Driver", "amount": d["amount"]} for d in view["days"]],
+    }
 
 
 DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
