@@ -72,13 +72,24 @@ export default function Money() {
     } catch {
       // keep whatever we had
     }
+  }, []);
+
+  // Referral earnings change at most once a day, so they are read when the tab
+  // opens, on pull-to-refresh and every 5 minutes, not with the 20 s balance.
+  const loadRef = useCallback(async () => {
     try {
-      // Referral earnings: the card shows only to drivers who referred someone.
+      // The card shows only to drivers who referred someone.
       setRef(await api.get<ReferralMonth>("/money/referrals"));
     } catch {
       // an older server, or offline: keep whatever we had
     }
   }, []);
+
+  useEffect(() => {
+    loadRef();
+    const id = setInterval(loadRef, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [loadRef]);
 
   const loadEarn = useCallback(async (p: Period) => {
     try {
@@ -103,9 +114,9 @@ export default function Money() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([load(), loadEarn(period)]);
+    await Promise.all([load(), loadEarn(period), loadRef()]);
     setRefreshing(false);
-  }, [load, loadEarn, period]);
+  }, [load, loadEarn, loadRef, period]);
 
   // A deposit just landed: show the new balance, and let the Salary card
   // release whatever was being held back against it.
