@@ -13,8 +13,9 @@ Ride91 needs more drivers. Drivers who bring in a friend should get a share of t
 - It pays **for as long as both drivers stay with Ride91**. It stops from the day either one is removed.
 - ₹2,500, 2% and an on/off switch are **admin Settings** (owner-editable, no update needed).
 - A driver has **one referrer** at a time and cannot refer themselves.
-- The referrer can be set or changed on an existing driver later, **by a manager or owner only**. A change counts from the day it is made and is never backdated. Hub managers can't change it.
-- Earned **daily**, shown daily as "Referral earnings", **paid at the end of the month**. On the 1st, the month's total is added to the salary the referrer can withdraw, and it counts under "Bonus won" for that month.
+- The referrer can be set or changed on an existing driver later, **by the owner only**. A change counts from the day it is made and is never backdated. Managers and hub managers can't change it.
+- Earned **daily**, shown daily as "Referral earnings", **paid after the 5th of the next month**. From the 6th (`referral_pay_day`, a setting, default 6), the month's total is added to the salary the referrer can withdraw, and it counts under "Bonus won" for that month. The wait lets late fares (Uber reports, hub corrections) come in first.
+- The referrer is shown **only the bonus amount**, never the friend's fares (owner, 2026-11-14).
 - If a hub corrects a day's fares, that day is worked out again until its month is paid.
 
 ## Goals
@@ -36,7 +37,7 @@ Ride91 needs more drivers. Drivers who bring in a friend should get a share of t
 
 - A month paid twice, or a paid month changing afterwards.
 - Changing the referrer, the rate or the threshold changing money already paid.
-- A hub manager able to point referrals at a driver of their choosing after the fact.
+- Anyone but the owner able to point referrals at a driver of their choosing after the fact.
 - The friend's daily fares shown to the referrer. Only the referral amount is shown, though fares can be worked out from 2%; the owner accepted that.
 
 ## Constraints
@@ -89,7 +90,8 @@ The owner picked **A**.
 **Settings** (in `SETTINGS_DEFAULTS`, `SettingsIn`, admin Settings page):
 - `referral_enabled`: True
 - `referral_rate`: 0.02 (0–1)
-- `referral_daily_min`: 2500 (₹, ≥ 0)
+- `referral_daily_min`: 2500 (₹, ≥ 0; a day of ₹2,500 or more counts)
+- `referral_pay_day`: 6 (1–28; a month is locked and paid from this day of the next month)
 
 ### Which days count
 
@@ -104,13 +106,13 @@ Amount = `round(fares × referral_rate, 2)`.
 
 ### The monthly lock (paid "at the end of the month")
 
-`_referral_lock(referrer)`: for every finished month (before the current business month, back to the referrer's first referral `from_bd`) with no `referral_months` row:
+`_referral_lock(referrer)`: for every month that is due (the current business date is on or after day `referral_pay_day` of the following month, back to the referrer's first referral `from_bd`) with no `referral_months` row:
 - Collect every qualifying day of that month. Also collect any **earlier** day that qualifies now but is not in any earlier lock's `days`. This catches days that became final late, such as an Uber report arriving after the 1st; they are paid in the next lock instead of being lost.
 - Write the lock row, even when the amount is 0, so the month is never worked out again.
 
-A lock runs whenever any of these is read: the driver's salary (`/money/salary`, `_salary_state`), the driver's referral screen, the admin Referrals page (which locks all referrers), or a withdrawal or payment check. It must be cheap when nothing is due, which is one indexed read for the lock row.
+Before the pay day the month shows as "to be paid on 6 Dec". A lock runs whenever any of these is read: the driver's salary (`/money/salary`, `_salary_state`), the driver's referral screen, the admin Referrals page (which locks all referrers), or a withdrawal or payment check. It must be cheap when nothing is due, which is one indexed read for the lock row.
 
-After a lock, corrections to that month's days are not paid. They will be rare: hubs can only edit the last 7 days.
+After a lock, corrections to that month's days are not paid. They will be rare: hubs can only edit the last 7 days and the lock waits until the 6th.
 
 ### Salary
 
@@ -122,7 +124,7 @@ After a lock, corrections to that month's days are not paid. They will be rare: 
 ### API
 
 - `POST /admin/drivers` takes an optional `referred_by` (driver id). Any role that can add a driver may set it at creation (see calls below). Refuse self-referral, an unknown or removed driver, or an inactive one.
-- `PUT /admin/drivers/{id}/referrer` with `{referrer_id | null}`, **manager or owner only** (`fleet_admin`). It closes the open row and opens a new one from today, and writes an audit entry.
+- `PUT /admin/drivers/{id}/referrer` with `{referrer_id | null}`, **owner only** (`require_owner`). It closes the open row and opens a new one from today, and writes an audit entry.
 - `GET /admin/referrals?month=`, `require_ops`. Hub managers see only links where the referrer or the referred driver is in their hub. Runs locks, then lists one row per link: referrer, referred, hub, since, this month so far, lifetime paid, and what will be paid on the 1st.
 - `GET /admin/drivers/{id}` adds `referred_by: {id, name, since}` and `referrals_made: n`. The Hub driver page uses this.
 - `GET /money/referrals?month=` (driver). Returns `{month, enabled, rate, daily_min, total, paid: bool, pay_date, people: [{name, since, active}], days: [{date, name, amount}]}`, defaulting to the current month. A paid month reads from its lock row. Fares are never returned.
@@ -139,15 +141,15 @@ After a lock, corrections to that month's days are not paid. They will be rare: 
 ### Admin panel
 
 - Add driver form: a "Referred by" driver picker (searchable by name or phone, active drivers only).
-- Driver detail: shows the referrer, with a Change button for managers and owners.
+- Driver detail: shows the referrer, with a Change button for the owner only.
 - A new **Referrals** page (nav item) with the list described above and a month picker.
 - Settings: the referral on/off switch, rate (%) and daily minimum.
 
 ## Calls I made (for the owner to check)
 
-1. A hub manager **may** pick "Referred by" when adding a driver (that is the onboarding moment). Only a manager or owner may change it afterwards.
+1. A hub manager **may** pick "Referred by" when adding a driver (that is the onboarding moment). Only the owner may change it afterwards (owner, 2026-11-14).
 2. The referrer may be in **another hub**.
-3. Days that become final late (after their month was locked) are paid in the **next** month's lock, not lost.
+3. Days that become final after their month was locked (after the 5th) are paid in the **next** month's lock, not lost.
 4. A change to the rate or threshold applies to every day not yet locked, including earlier days of the current month. Locked months keep their rate.
 5. Turning referrals off stops display and locking. Turning them on again counts the days in between; no history of the switch is kept.
 6. Referral money adds to salary even before the wider salary changes (cash-owed block, advances) are built.

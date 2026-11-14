@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A referrer earns 2% of a referred driver's final fares on every day those fares reach ₹2,500. Earnings show daily and are added to withdrawable salary when the month is locked, which happens the first time anything reads a finished month.
+**Goal:** A referrer earns 2% of a referred driver's final fares on every day those fares reach ₹2,500 or more. Earnings show daily (bonus only, never fares) and are added to withdrawable salary from the 6th of the next month, locked the first time anything reads a due month.
 
 **Architecture:** All rules live in `backend/server.py`, next to the calendar block (`_day_calendar`) and the salary code (`_salary_state`).
 - New collections: `referrals` (who referred whom, from/to dates) and `referral_months` (a locked monthly payment with the exact days paid).
@@ -15,12 +15,14 @@
 
 ## Global Constraints
 
-- Settings defaults: `referral_enabled: True`, `referral_rate: 0.02` (0–1), `referral_daily_min: 2500` (₹, ≥ 0). Owner-editable via `PUT /admin/settings`.
+- Settings defaults: `referral_enabled: True`, `referral_rate: 0.02` (0–1), `referral_daily_min: 2500` (₹, ≥ 0), `referral_pay_day: 6` (1–28). Owner-editable via `PUT /admin/settings`.
+- A month is **due** (locked and paid) once `business_date_now() >= f"{month_after}-{pay_day:02d}"`. Before that it shows as "to be paid on 6 Dec".
+- The driver sees only bonus amounts, never the friend's fares.
 - A day qualifies when fares ≥ `referral_daily_min` (₹2,500.00 qualifies; ₹2,499.99 does not). Amount = `round(fares × referral_rate, 2)`.
 - Fares are `gross_amount`, falling back to `cash_amount`, summed over all platforms. A day is final when the driver has ≥ 1 `platform_cash` row for it and every row is `settled`. Only days before `business_date_now()` count.
 - Business day: 04:00–03:59 IST. Use `business_date_now()`, `_bd_of`, `_month_after`.
 - Never backdate: a referrer set on an existing driver counts from today's business date.
-- Changing the referrer: manager or owner only (`fleet_admin`). Setting it at creation: any role that can create a driver (`require_ops`).
+- Changing the referrer: **owner only** (`require_owner`). Setting it at creation: any role that can create a driver (`require_ops`).
 - The referred driver's fares are never sent to the referrer's app.
 - Old apps must keep working: new response fields are additive.
 - English and Hindi strings; Kannada falls back to English.
@@ -124,7 +126,7 @@
 **Interfaces:**
 - Consumes: `_referral_days`, `_referral_links`.
 - Produces:
-  - `async def _referral_lock(referrer_id: str) -> None`: writes the missing `referral_months` rows for every finished month from the month of the earliest link's `from_bd` up to the month before the current business month. Each row:
+  - `async def _referral_lock(referrer_id: str) -> None`: writes the missing `referral_months` rows for every **due** month (see Global Constraints) from the month of the earliest link's `from_bd`. Each row:
     `{id, driver_id, month, amount, rate, daily_min, days:[{referred_id, date, fares, amount}], created_at}`.
     A month's `days` = qualifying days in that month, plus earlier qualifying days not in any earlier row's `days` (match on `(referred_id, date)`). The row is written even when the amount is 0. On a duplicate key, do nothing. When `referral_enabled` is off, write nothing.
   - `async def _referral_paid_total(driver_id: str) -> float`.
@@ -137,9 +139,11 @@
   rows = run(db.referral_months.find({"driver_id": "R"}).to_list(None))
   check("one lock per finished month", len([r for r in rows if r["month"] == prev]) == 1)
   check("current month not locked", not any(r["month"] == today[:7] for r in rows))
+  # patch business_date_now to the 5th of next month: last month still not due; to the 6th: due
+  check("not paid on the 5th", ...); check("paid from the 6th", ...)
   check("salary includes locked only", sal["referral_paid"] == locked_amt and sal["earned"] == share + locked_amt, sal)
   ```
-  - Late day: settle the pending previous-month day, delete only the current-month lock if any, and simulate the next month by calling `_referral_lock` with the current month treated as finished. Patch `S.business_date_now` to return the 1st of next month; restore it afterwards.
+  - Late day: settle the pending previous-month day, delete only the current-month lock if any, and simulate the next month by calling `_referral_lock` with the current month treated as finished. Patch `S.business_date_now` to return the 6th of next month; restore it afterwards.
   ```python
   check("late-final day paid in next lock", any(d["date"] == late_day for d in next_row["days"]))
   check("late day not paid twice", sum(1 for r in all_rows for d in r["days"] if d["date"] == late_day) == 1)
@@ -165,7 +169,7 @@
 - Consumes: Tasks 1–2.
 - Produces (exact paths and response keys; the apps rely on these):
   - `DriverCreateIn.referred_by: Optional[str] = None`. On create, it opens a link with `from_bd = business_date_now()`. Refuse with 400 `self_referral` (not reachable at create, but keep the check shared), 404 `referrer_not_found`, or 409 `referrer_inactive` (archived or `active: False`).
-  - `PUT /admin/drivers/{driver_id}/referrer`, body `{"referrer_id": str | null}`, `Depends(fleet_admin)`. Closes the open row (`to_bd = today`, `ended_at`, `ended_by`). Opens a new one unless null; if the new link has the same referrer, do nothing. Same refusals as above. Writes `_audit(admin, "set_referrer", driver_id, {"from": old, "to": new})`. Returns `{"ok": True, "referred_by": {...} | None}`.
+  - `PUT /admin/drivers/{driver_id}/referrer`, body `{"referrer_id": str | null}`, `Depends(require_owner)`. Closes the open row (`to_bd = today`, `ended_at`, `ended_by`). Opens a new one unless null; if the new link has the same referrer, do nothing. Same refusals as above. Writes `_audit(admin, "set_referrer", driver_id, {"from": old, "to": new})`. Returns `{"ok": True, "referred_by": {...} | None}`.
   - `GET /admin/drivers/{driver_id}/referral`, `require_ops` + `_assert_driver_in_scope`. Returns `{"referred_by": {"id", "name", "since"} | None, "referrals_made": int}`.
   - `GET /admin/referrals?month=YYYY-MM` (`_month_or_400`), `require_ops`. A hub manager sees links where either driver is in their hub. Runs `_referral_lock` for each referrer listed. Returns:
     ```
@@ -187,7 +191,7 @@
 - [ ] **Step 1: Write the failing tests:**
   - create with `referred_by` → link row `from_bd == today`;
   - create referring an archived driver → 409;
-  - `PUT` as hub manager → 403; as manager → 200; the old row's `to_bd == today`;
+  - `PUT` as hub manager → 403; as manager → 403; as owner → 200; the old row's `to_bd == today`;
   - `PUT` to self → 400;
   - `GET /money/referrals`: response has no `fares` key anywhere (`"fares" not in json.dumps(r)`); a past month gives `paid: True`;
   - `GET /admin/referrals`: a hub manager of H3 sees 0 rows, a hub manager of H2 sees the R→F row;
@@ -208,16 +212,17 @@
 - Consumes: the Task 3 endpoints and the settings keys from Task 1.
 - Produces:
   - Drivers form: a searchable "Referred by (optional)" select of active, non-archived drivers (name · phone). It sends `referred_by` in `createDriver`.
-  - DriverDetail: a `Stat` "Referred by" showing name and since. A "Change" button shows when `admin.role` is manager or owner; it opens an inline select with a "None" option and calls `PUT …/referrer`.
+  - DriverDetail: a `Stat` "Referred by" showing name and since. A "Change" button shows only when `admin.role === "owner"`; it opens an inline select with a "None" option and calls `PUT …/referrer`.
   - Referrals page: a month picker (‹ ›, bounded at the current month), totals, and a table: Referrer · Referred · Since · This month (₹, days) · Paid? · Lifetime.
-  - Settings: "Referrals on" checkbox, "Rate %" (UI shows 2, sends 0.02), "Daily minimum ₹".
+  - Settings: "Referrals on" checkbox, "Rate %" (UI shows 2, sends 0.02), "Daily minimum ₹", "Pay on day" (of the next month).
 
 - [ ] **Step 1: Build:** `cd admin && npm run build`. Expect no type errors.
 - [ ] **Step 2: Check in the browser.**
   - Run the local seeded server (`serve_calendar.py` pattern, extended with referral seed data in a copy `serve_referrals.py`).
   - Serve `admin/dist` and open it in the in-app browser.
   - Log in as the local test owner. Add a driver with a referrer, change it on the driver page, and see the Referrals page and the Settings fields.
-  - As the local hub manager, there is no Change button.
+  - As the local hub manager and a local manager, there is no Change button.
+- [ ] **Step 2b: Screenshots for the owner:** Add driver form with Referred by, driver page with Change, Referrals page, Settings. Save them to the scratchpad and send them with SendUserFile.
 - [ ] **Step 3: Commit** the listed admin files with the message "Admin: referrals page, referred-by on add and driver page, settings".
 
 ### Task 5: Driver app and Hub app
@@ -229,13 +234,14 @@
 **Interfaces:**
 - Consumes: `GET /money/referrals`, `GET /admin/drivers/{id}/referral`.
 - Produces:
-  - Money tab: a card with `testID="open-referrals"`, placed below the "Day by day" card. It renders only when `people.length > 0`, reading `/money/referrals` with the tab's existing refresh. Content: "🤝 Referral earnings", this month's total, and "Paid on 1 Dec" (or "Paid" for a locked month).
-  - `referrals.tsx`: a month header with ‹ › bounded `first_month..current`. It shows the total and the paid / to-be-paid line, the people list (with "left Ride91" when inactive), and the day list "12 Nov · Ravi · +₹60". An empty month shows "No referral earnings this month". It also explains the rule: "You earn {rate}% of a friend's fares on every day they reach ₹{min}. Paid into your salary on the 1st."
+  - Money tab: a card with `testID="open-referrals"`, placed below the "Day by day" card. It renders only when `people.length > 0`, reading `/money/referrals` with the tab's existing refresh. Content: "🤝 Referral earnings", this month's total, and "To be paid on 6 Dec" (or "Paid" for a locked month).
+  - `referrals.tsx`: a month header with ‹ › bounded `first_month..current`. It shows the total and the paid / to-be-paid line, the people list (with "left Ride91" when inactive), and the day list "12 Nov · Ravi · +₹60". An empty month shows "No referral earnings this month". It also explains the rule: "You earn {rate}% of a friend's fares on every day they reach ₹{min}. Paid into your salary after the 5th of the next month."
   - Hub driver page: "🤝 Referred by {name} (since {date})" under the calendar button, only when set. Loaded in the existing `load()` `Promise.all`. A failure there must not break the page (catch, then null).
 
 - [ ] **Step 1: Type-check:** `cd frontend && npx tsc --noEmit`. Expect no new errors.
 - [ ] **Step 2: Check on the web.**
   - Driver: `npx expo export --platform web`, served against the local seeded server, in the in-app browser on the mobile preset. Log in as the local test driver who referred someone: the card shows, the screen opens, month arrows work, Hindi switches. A driver with no referrals sees no card.
+- [ ] **Step 2b: Screenshots for the owner:** Money tab card, referral screen (this month and a paid month), Hub driver page. Send them with SendUserFile.
   - Hub: build with `APP_VARIANT=hub` and open the referred driver's page to see the line.
 - [ ] **Step 3: Commit** the listed frontend files with the message "Apps: referral earnings card and screen; Hub shows referred-by".
 
