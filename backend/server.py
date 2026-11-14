@@ -43,6 +43,7 @@ from fastapi import (
 )
 from fastapi.responses import RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
@@ -4085,10 +4086,15 @@ async def admin_delete_driver(
             or await db.payouts.find_one({"driver_id": driver_id}, {"_id": 1})
             or await db.salary_withdrawals.find_one({"driver_id": driver_id}, {"_id": 1})
             or await db.reward_payouts.find_one({"driver_id": driver_id}, {"_id": 1})
+            or await db.referral_months.find_one({"driver_id": driver_id, "amount": {"$gt": 0}}, {"_id": 1})
+            or await db.referral_months.find_one(
+                {"days.referred_id": driver_id, "amount": {"$gt": 0}}, {"_id": 1})
         )
         if has_money:
             raise HTTPException(409, "has_financial_history")
         await db.drivers.delete_one({"id": driver_id})
+        await db.referrals.delete_many({"$or": [{"referrer_id": driver_id}, {"referred_id": driver_id}]})
+        await db.referral_months.delete_many({"driver_id": driver_id})   # only ₹0 months are left
         await db.sessions.delete_many({"driver_id": driver_id})       # no phone stays signed in
         await _audit(admin, "delete_driver", driver_id)
         return {"ok": True, "id": driver_id, "deleted": True}
@@ -8813,7 +8819,10 @@ async def _salary_state(driver: Dict, exclude_withdrawal_id: Optional[str] = Non
         {"$group": {"_id": None, "g": {"$sum": {"$ifNull": ["$gross_amount", "$cash_amount"]}}}},
     ]):
         gross = float(r.get("g") or 0)
-    earned = round(gross * rate, 2)
+    # Referral money joins the salary once its month is locked (after the 5th).
+    await _referral_lock(did)
+    referral_paid = await _referral_paid_total(did)
+    earned = round(gross * rate + referral_paid, 2)
 
     paid = 0.0
     async for p in db.payouts.find({"driver_id": did}, {"_id": 0, "amount_rupees": 1, "status": 1}):
@@ -8838,6 +8847,7 @@ async def _salary_state(driver: Dict, exclude_withdrawal_id: Optional[str] = Non
         "share_rate": rate,
         "gross": round(gross, 2),
         "earned": earned,
+        "referral_paid": referral_paid,
         "paid": round(paid, 2),
         "pending": round(pending, 2),
         "cash_owed": round(cash_owed, 2),
@@ -8999,6 +9009,12 @@ async def _history_timed_rows(driver_id: str) -> Dict[str, List[Dict[str, Any]]]
             "kind": "reward", "id": r.get("id"), "at": r.get("created_at"), "date": _bd_of(r.get("created_at")),
             "amount": round(float(r.get("amount") or 0), 2), "type": r.get("type"),
             "month": r.get("month"), "note": r.get("note"),
+        })
+    async for r in db.referral_months.find({"driver_id": driver_id, "amount": {"$gt": 0}}, {"_id": 0, "days": 0}):
+        out["rewards"].append({
+            "kind": "reward", "id": r.get("id"), "at": r.get("created_at"), "date": _bd_of(r.get("created_at")),
+            "amount": round(float(r.get("amount") or 0), 2), "type": "referral",
+            "month": r.get("month"), "note": None,
         })
     return out
 
@@ -9399,6 +9415,67 @@ async def _referral_days(referrer_id: str, lo: str, hi: str) -> List[Dict]:
                     "date": day, "fares": round(b["fares"], 2), "amount": round(b["fares"] * rate, 2)})
     out.sort(key=lambda x: (x["date"], x["name"]))
     return out
+
+
+def _referral_pay_date(month: str) -> str:
+    """The business date from which `month`'s referral money is paid."""
+    day = min(28, max(1, int(get_setting("referral_pay_day") or 6)))
+    return f"{_month_after(month)}-{day:02d}"
+
+
+async def _referral_lock(referrer_id: str) -> None:
+    """Lock every month that is due and not yet locked: one `referral_months`
+    row per referrer per month, with exactly the days it paid. A day that
+    became final after its own month was locked is paid in the next lock, so
+    nothing is lost and nothing is paid twice. Rows are written even at ₹0, so
+    a month is never worked out again; the unique index makes a second writer
+    a no-op."""
+    if not get_setting("referral_enabled"):
+        return
+    links = await _referral_links(referrer_id)
+    if not links:
+        return
+    today_bd = business_date_now()
+    first_bd = min(l["from_bd"] for l in links)
+    due: List[str] = []
+    m = first_bd[:7]
+    while today_bd >= _referral_pay_date(m):
+        due.append(m)
+        m = _month_after(m)
+    if not due:
+        return
+    have = {r["month"]: r async for r in db.referral_months.find(
+        {"driver_id": referrer_id}, {"_id": 0, "month": 1, "days": 1})}
+    missing = [m for m in due if m not in have]
+    if not missing:
+        return
+    paid = {(d["referred_id"], d["date"]) for r in have.values() for d in (r.get("days") or [])}
+    for m in missing:
+        days = [d for d in await _referral_days(referrer_id, first_bd, f"{_month_after(m)}-01")
+                if (d["referred_id"], d["date"]) not in paid]
+        row = {
+            "id": str(uuid.uuid4()), "driver_id": referrer_id, "month": m,
+            "amount": round(sum(d["amount"] for d in days), 2),
+            "rate": float(get_setting("referral_rate") or 0),
+            "daily_min": float(get_setting("referral_daily_min") or 0),
+            "days": days, "created_at": iso(now_utc()),
+        }
+        try:
+            await db.referral_months.insert_one(row.copy())
+        except DuplicateKeyError:
+            # Another request locked this month first; go by what it wrote.
+            row = await db.referral_months.find_one({"driver_id": referrer_id, "month": m}, {"_id": 0, "days": 1}) or {}
+        paid |= {(d["referred_id"], d["date"]) for d in (row.get("days") or [])}
+
+
+async def _referral_paid_total(driver_id: str) -> float:
+    total = 0.0
+    async for r in db.referral_months.aggregate([
+        {"$match": {"driver_id": driver_id}},
+        {"$group": {"_id": None, "s": {"$sum": "$amount"}}},
+    ]):
+        total = float(r.get("s") or 0)
+    return round(total, 2)
 
 
 DIRECT_ACTOR = {"username": "driver-app", "role": "system"}
