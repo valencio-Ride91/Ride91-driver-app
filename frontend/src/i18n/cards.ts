@@ -151,7 +151,7 @@ const en = {
   hist_ref: (ref: string) => `Ref ${ref}`,
   hist_status: { paid: "Paid", processing: "On the way", failed: "Failed, not received", pending: "Waiting for the hub", rejected: "Turned down" } as Record<string, string>,
   hist_request: "Salary asked for",
-  hist_reward: { attendance: "Attendance bonus", loyalty_wallet: "Loyalty wallet paid out", other: "Bonus" } as Record<string, string>,
+  hist_reward: { attendance: "Attendance bonus", loyalty_wallet: "Loyalty wallet paid out", referral: "Referral bonus", other: "Bonus" } as Record<string, string>,
   hist_note_counts: "Earnings count once the day's report is in. Failed bank transfers are listed but not counted.",
 
   // ---- Rewards: this week's leaders ----
@@ -451,6 +451,7 @@ const en = {
   sal_title: "Salary",
   sal_available: "AVAILABLE TO WITHDRAW",
   sal_earned: (pct: number) => `Earned so far (your ${pct}%)`,
+  sal_referral: "Referral bonuses",
   sal_paid: "Already paid to you",
   sal_requested: "Requested, waiting for the office",
   sal_cash_owed: "Cash you owe (held back)",
@@ -644,7 +645,7 @@ const hi: CardText = {
   hist_ref: (ref) => `रेफ़ ${ref}`,
   hist_status: { paid: "मिल गया", processing: "रास्ते में", failed: "फ़ेल, नहीं मिला", pending: "हब के पास", rejected: "मना हुआ" },
   hist_request: "सैलरी माँगी",
-  hist_reward: { attendance: "हाज़िरी बोनस", loyalty_wallet: "लॉयल्टी वॉलेट से मिला", other: "बोनस" },
+  hist_reward: { attendance: "हाज़िरी बोनस", loyalty_wallet: "लॉयल्टी वॉलेट से मिला", referral: "रेफ़रल बोनस", other: "बोनस" },
   hist_note_counts: "कमाई दिन की रिपोर्ट आने पर गिनी जाती है। फ़ेल हुए बैंक ट्रांसफ़र दिखते हैं पर गिने नहीं जाते।",
 
   // ---- Rewards: this week's leaders ----
@@ -941,6 +942,7 @@ const hi: CardText = {
   sal_title: "वेतन",
   sal_available: "निकालने के लिए उपलब्ध",
   sal_earned: (pct) => `अब तक की कमाई (आपका ${pct}%)`,
+  sal_referral: "रेफ़रल बोनस",
   sal_paid: "आपको मिल चुका",
   sal_requested: "माँगा गया, ऑफ़िस की प्रतीक्षा",
   sal_cash_owed: "आप पर बाकी नकद (रोका गया)",

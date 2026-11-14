@@ -12,6 +12,7 @@ import { NotComingSheet } from "@/src/hub/sheets";
 import { doing, tagFor } from "@/src/hub/status";
 import { useHubText, HubText } from "@/src/hub/text";
 import { useCalendarText } from "@/src/i18n/calendar";
+import { useReferralText } from "@/src/i18n/referrals";
 import { useHubToday } from "@/src/hub/today";
 import { Icon, useToast } from "@/src/hub/kit";
 import { Btn, Empty, SectionTitle, Tag, callPhone, hubStyles } from "@/src/hub/ui";
@@ -49,6 +50,8 @@ function describeTap(e: Tap, t: HubText): string {
 export default function DriverPage() {
   const t = useHubText();
   const ct = useCalendarText();
+  const rt = useReferralText();
+  const [referredBy, setReferredBy] = useState<{ id: string; name: string | null; since: string } | null>(null);
   const router = useRouter();
   const { id, focus } = useLocalSearchParams<{ id: string; focus?: string }>();
   const { today, refresh } = useHubToday();
@@ -91,10 +94,14 @@ export default function DriverPage() {
   const load = useCallback(async () => {
     if (!id) return;
     try {
-      const [duty, thread] = await Promise.all([
+      const [duty, thread, referral] = await Promise.all([
         hubApi.get<{ log?: Tap[] }>(`/admin/drivers/${id}/duty`),
         hubApi.get<{ items: Note[] }>(`/admin/drivers/${id}/notifications`),
+        // Who referred this driver. An older server has no such page: show nothing.
+        hubApi.get<{ referred_by: { id: string; name: string | null; since: string } | null }>(`/admin/drivers/${id}/referral`)
+          .catch(() => null),
       ]);
+      setReferredBy(referral?.referred_by ?? null);
       setTaps(duty.log ?? []);
       setNotes(thread.items);
       // Looking at the page counts as having read what the driver wrote.
@@ -233,6 +240,11 @@ export default function DriverPage() {
                   style={{ marginTop: spacing.md }}
                   testID="hub-driver-calendar"
                 />
+                {referredBy ? (
+                  <Text style={[styles.k, { marginTop: spacing.sm, marginBottom: spacing.sm }]} testID="hub-driver-referred-by">
+                    {rt.referred_by(referredBy.name ?? "—", `${Number(referredBy.since.slice(8, 10))} ${ct.months[Number(referredBy.since.slice(5, 7)) - 1]}`)}
+                  </Text>
+                ) : null}
                 {d.shift_status !== "no_shift_time" && d.shift_status !== "started" && !d.on_duty ? (
                   <View style={styles.phoned} testID="hub-driver-phoned">
                     <Text style={styles.k}>{t.phoned_in}</Text>

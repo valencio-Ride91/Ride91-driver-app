@@ -261,7 +261,7 @@ const Row: React.FC<{ e: Entry; c: CardText }> = ({ e, c }) => {
       break;
     case "reward":
       icon = "🏆";
-      title = `${c.hist_reward[e.type ?? "other"] ?? c.hist_reward.other}${e.type === "attendance" && e.month ? ` · ${c.att_month(e.month)}` : ""}`;
+      title = `${c.hist_reward[e.type ?? "other"] ?? c.hist_reward.other}${(e.type === "attendance" || e.type === "referral") && e.month ? ` · ${c.att_month(e.month)}` : ""}`;
       sub = [when, e.note ?? ""].filter(Boolean).join(" · ");
       amount = `+${formatINR(e.amount)}`;
       amountColor = colors.live;

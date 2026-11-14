@@ -29,6 +29,7 @@ interface WithdrawalRequest {
 interface Salary {
   share_rate: number;
   earned: number;
+  referral_paid?: number;      // referral bonuses paid into salary (part of `earned`); absent on older servers
   paid: number;
   pending: number;
   cash_owed: number;
@@ -160,7 +161,8 @@ export const SalaryCard: React.FC<{ style?: ViewStyle; onChanged?: () => void; r
         </Text>
       </View>
 
-      <Line label={c.sal_earned(pct)} value={formatINR(data.earned)} />
+      <Line label={c.sal_earned(pct)} value={formatINR(data.earned - (data.referral_paid ?? 0))} />
+      {(data.referral_paid ?? 0) > 0 ? <Line label={c.sal_referral} value={`+ ${formatINR(data.referral_paid ?? 0)}`} /> : null}
       <Line label={c.sal_paid} value={`− ${formatINR(data.paid)}`} />
       {data.pending > 0 ? <Line label={c.sal_requested} value={`− ${formatINR(data.pending)}`} /> : null}
       {data.cash_held_back > 0 ? <Line label={c.sal_cash_owed} value={`− ${formatINR(data.cash_held_back)}`} alert /> : null}

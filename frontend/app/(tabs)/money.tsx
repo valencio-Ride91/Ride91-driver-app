@@ -12,6 +12,7 @@ import { api } from "@/src/api";
 import { useI18n, formatINR } from "@/src/i18n";
 import { useCardText } from "@/src/i18n/cards";
 import { useCalendarText } from "@/src/i18n/calendar";
+import { fmtRupees, useDayLabel, useReferralText, type ReferralMonth } from "@/src/i18n/referrals";
 import { colors, fonts, platformColors, platformLabels, radius, spacing } from "@/src/theme";
 
 // Ride91 settles on the PREVIOUS day: the driver's earnings and dues are the
@@ -55,8 +56,11 @@ export default function Money() {
   const { t } = useI18n();
   const c = useCardText();
   const ct = useCalendarText();
+  const rt = useReferralText();
+  const dayLabel = useDayLabel();
   const router = useRouter();
   const [day, setDay] = useState<MoneyYesterday | null>(null);
+  const [ref, setRef] = useState<ReferralMonth | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<Period>("yesterday");
   const [earn, setEarn] = useState<Earnings | null>(null);
@@ -67,6 +71,12 @@ export default function Money() {
       setDay(await api.get<MoneyYesterday>("/money/yesterday"));
     } catch {
       // keep whatever we had
+    }
+    try {
+      // Referral earnings: the card shows only to drivers who referred someone.
+      setRef(await api.get<ReferralMonth>("/money/referrals"));
+    } catch {
+      // an older server, or offline: keep whatever we had
     }
   }, []);
 
@@ -152,6 +162,22 @@ export default function Money() {
             {period !== "yesterday" && (earn?.days_operated ?? 0) > 0 ? c.earn_days(earn!.days_operated) : ""}
           </Text>
         </Card>
+
+        {/* Referral earnings: only for drivers who referred someone */}
+        {ref && ref.people.length > 0 ? (
+          <TouchableOpacity onPress={() => router.push("/referrals" as never)} testID="open-referrals" activeOpacity={0.8}>
+            <Card style={{ marginTop: spacing.md }}>
+              <View style={styles.histRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.histTitle}>{rt.card_title}</Text>
+                  <Text style={styles.histSub}>{ref.paid ? rt.card_sub_paid : rt.card_sub_due(dayLabel(ref.pay_date))}</Text>
+                </View>
+                <Text style={[styles.histTitle, { color: colors.live, marginRight: spacing.xs }]} testID="referrals-card-total">{fmtRupees(ref.total)}</Text>
+                <Text style={styles.histChev}>›</Text>
+              </View>
+            </Card>
+          </TouchableOpacity>
+        ) : null}
 
         {/* Day by day: each day's work against the QR money and cash handed in */}
         <TouchableOpacity onPress={() => router.push("/calendar" as never)} testID="open-calendar" activeOpacity={0.8}>
