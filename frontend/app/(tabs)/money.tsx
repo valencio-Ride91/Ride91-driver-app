@@ -174,7 +174,20 @@ export default function Money() {
           </Text>
         </Card>
 
-        {/* Referral earnings: only for drivers who referred someone */}
+        {/* Referrals: earnings for drivers who referred someone, an invite for everyone else */}
+        {ref && ref.people.length === 0 && ref.enabled ? (
+          <TouchableOpacity onPress={() => router.push("/referrals" as never)} testID="open-referral-invite" activeOpacity={0.8}>
+            <Card style={{ marginTop: spacing.md }}>
+              <View style={styles.histRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.histTitle}>{rt.invite_title}</Text>
+                  <Text style={styles.histSub}>{rt.invite_sub(String(Math.round(ref.rate * 1000) / 10), fmtRupees(ref.daily_min))}</Text>
+                </View>
+                <Text style={styles.histChev}>›</Text>
+              </View>
+            </Card>
+          </TouchableOpacity>
+        ) : null}
         {ref && ref.people.length > 0 ? (
           <TouchableOpacity onPress={() => router.push("/referrals" as never)} testID="open-referrals" activeOpacity={0.8}>
             <Card style={{ marginTop: spacing.md }}>

@@ -86,7 +86,15 @@ export default function Referrals() {
         {failed && !data ? <Text style={styles.note}>{rt.failed}</Text> : null}
         {busy && !data ? <ActivityIndicator color={colors.muted} style={{ marginTop: spacing.lg }} /> : null}
 
-        {data ? (
+        {data && data.people.length === 0 ? (
+          <Card testID="referrals-invite">
+            <Text style={styles.kicker}>{rt.invite_title}</Text>
+            <Text style={styles.note}>{rt.rule(pct, fmtRupees(data.daily_min))}</Text>
+            <Text style={[styles.note, { marginTop: spacing.sm }]} testID="referrals-how">{rt.invite_how}</Text>
+          </Card>
+        ) : null}
+
+        {data && data.people.length > 0 ? (
           <>
             <Card testID="referrals-total">
               <Text style={styles.kicker}>{rt.month_total}</Text>
@@ -127,6 +135,7 @@ export default function Referrals() {
             ) : null}
 
             <Text style={[styles.note, { marginTop: spacing.md }]}>{rt.rule(pct, fmtRupees(data.daily_min))}</Text>
+            <Text style={[styles.note, { marginTop: spacing.sm }]}>{rt.invite_how}</Text>
           </>
         ) : null}
       </ScrollView>

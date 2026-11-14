@@ -25,6 +25,9 @@ const en = {
   loading: "Loading…",
   failed: "Could not load. Pull down to try again.",
   referred_by: (name: string, date: string) => `🤝 Referred by ${name} (since ${date})`,
+  invite_title: "🤝 Refer a driver",
+  invite_sub: (pct: string, min: string) => `Earn ${pct}% of their fares on every day they reach ${min}`,
+  invite_how: "To refer someone, tell your hub their name and phone number. The office adds them as referred by you.",
 };
 
 type ReferralText = typeof en;
@@ -51,6 +54,9 @@ const hi: ReferralText = {
   loading: "लोड हो रहा है…",
   failed: "लोड नहीं हुआ। नीचे खींचकर फिर कोशिश करें।",
   referred_by: (name, date) => `🤝 ${name} के रेफ़रल से (${date} से)`,
+  invite_title: "🤝 ड्राइवर लाइए",
+  invite_sub: (pct, min) => `जिस दिन उनका किराया ${min} तक पहुँचे, उस दिन के किराये का ${pct}% आपको`,
+  invite_how: "किसी को लाने के लिए अपने हब को उनका नाम और फ़ोन नंबर बताइए। ऑफ़िस उन्हें आपके रेफ़रल से जोड़ देगा।",
 };
 
 export const useReferralText = (): ReferralText => {
