@@ -10,6 +10,12 @@ Last updated: 2026-11-10, after commit `0db37f1`. Tick items off here as they la
 - [ ] Hand out driver app **v23** (versionCode 10; replaces v21 and v22) and Hub app **v16** (versionCode 16; replaces v15).
 - [ ] Check the logs after the deploy (no 5xx, no warnings).
 
+## Referrals (built 2026-11-14)
+
+- [ ] Deploy `ride91-api` and `ride91-admin` with the referral commits.
+- [ ] Hand out driver app **v24** and Hub app **v17**.
+- [ ] Record referrals: admin → add driver → "Referred by". For drivers already added, the owner sets it on the driver's page (counts from that day).
+
 ## Decisions waiting on the owner
 
 - [ ] **Advance requests:** approving an advance moves no money. Should it create a payable for the hub, or stay a yes/no?
@@ -61,6 +67,7 @@ Low:
 
 | Commit | What |
 |---|---|
+| `6a5914d`…`86646d7` | Driver referrals: 2% of a referred driver's ₹2,500+ days, monthly lock into salary, admin Referrals page, driver app screen, Hub line |
 | `0db37f1` | Driver stays signed in offline; queued taps never lost; on-time judged by arrival from 10 Nov; database storage report; inspection media clean-up script |
 | `a5cb9fe` | Drivers tab: search by phone/plate, delete driver |
 | `2cf3b44` | Hub minor audit items |

@@ -47,6 +47,7 @@ Most numbers below are defaults that the owner can change in admin Settings (`SE
 - Loyalty milestones: ₹2,000 / ₹4,000 / ₹8,000 / ₹15,000 at ₹1 / 3 / 6 / 12 lakh earned.
 - Loyalty wallet: ₹25 per day with at least ₹1,500 gross, from 2026-10-01; forfeited if the driver leaves.
 - Attendance bonus: ₹3,000 for a month with 27 "good days" (on time and at least ₹2,500 gross).
+- Referrals: the office records who referred a new driver when adding them. On every day the referred driver's final fares (all apps) reach ₹2,500 or more, the referrer earns 2% of that day's fares, for as long as both stay with Ride91 (it stops from the day either is removed). Each month is locked and added to the referrer's salary from the 6th of the next month; days whose fares arrive after that are paid with the next month. The driver sees only the bonus, never the friend's fares. Only the owner can change a referrer later; a change counts from that day and is never backdated. Rate, minimum, pay day and an on/off switch are in admin Settings.
 
 ### Cars and handovers
 - One driver per shift slot per car; giving a car to a driver whose slot is taken needs `replace`.
